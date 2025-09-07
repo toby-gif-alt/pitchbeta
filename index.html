@@ -172,6 +172,12 @@
       <button id="playFlappy">🐤 Flappy (lockout only)</button>
       <button id="resetLockout">⚡ Reset lockout/timer</button>
       <button id="menuReset">⟲ Reset (factory)</button>
+      <button id="debugToggle" style="opacity:0.6;font-size:11px;">Debug</button>
+    </div>
+    
+    <!-- Debug panel -->
+    <div id="debugPanel" style="display:none;margin-top:12px;padding:10px;background:var(--muted2);border-radius:8px;font-size:11px;font-family:monospace;">
+      <div id="debugContent">Debug info will appear here...</div>
     </div>
 
     <!-- Scope looks obviously changeable now -->
@@ -291,7 +297,9 @@
       <span class="pill" id="accInfo">Acc 0% (req 20%)</span>
       <span class="pill" id="autoInfo">Auto-next: Off</span>
       <span class="pill" id="delayInfo">RT limit: 1183ms • Delay: 1000ms</span>
-      <span class="pill" id="timerInfo">Time left: 20:00</span>
+      <span class="pill" id="timerInfo">Time left: 30:00</span>
+      <span class="pill" id="jitterInfo" style="display:none;">Jitter: JL1</span>
+      <span class="pill" id="octaveInfo" style="display:none;">Mix: 90/10</span>
     </div>
     <div id="barControls">
       <button id="btnPlay">▶ Play</button>
@@ -1297,6 +1305,41 @@ function getWeakNotes() {
   return weakNotes.slice(0, 3); // Top 3 weak notes
 }
 
+function updateJitterStatusUI(set) {
+  const trainedNotes = trainedSet(set);
+  if (trainedNotes.length === 0) return;
+  
+  // Get average jitter level across trained notes
+  const levels = trainedNotes.map(note => {
+    initializeJitterLevel(note);
+    return state.jitterLevels[note];
+  });
+  
+  const levelCounts = levels.reduce((acc, level) => {
+    acc[level] = (acc[level] || 0) + 1;
+    return acc;
+  }, {});
+  
+  // Show most common level
+  const mostCommon = Object.entries(levelCounts)
+    .sort(([,a], [,b]) => b - a)[0];
+  
+  if (mostCommon) {
+    text('jitterInfo', `Jitter: ${mostCommon[0]}`);
+    byId('jitterInfo').style.display = 'inline-flex';
+  }
+}
+
+function updateOctaveStatusUI() {
+  initializeOctaveState();
+  const mix = state.octaveStats.currentMix;
+  const centerPct = Math.round(mix.center * 100);
+  const neighborPct = Math.round(mix.neighbors * 100);
+  
+  text('octaveInfo', `Mix: ${centerPct}/${neighborPct}`);
+  byId('octaveInfo').style.display = 'inline-flex';
+}
+
 function updateVarietyModeUI() {
   const label = byId('varietyModeLabel');
   const toggle = byId('varietyModeToggle');
@@ -1319,6 +1362,56 @@ function updateVarietyModeUI() {
   } else {
     label.textContent = "Available now - click to enable";
   }
+}
+
+function updateDebugInfo() {
+  const content = byId('debugContent');
+  if (!content) return;
+  
+  const info = [];
+  
+  // System state
+  info.push(`=== SYSTEM STATE ===`);
+  info.push(`Session Active: ${sessionActive}`);
+  info.push(`Current Level: ${state.levelIndex} (Set ${setFromIndex(state.levelIndex)}, Block ${blockFromIndex(state.levelIndex)})`);
+  info.push(`Variety Mode: ${state.varietyModeEnabled} (Active: ${shouldUseVarietyMode()})`);
+  
+  // Jitter levels
+  if (state.jitterLevels && Object.keys(state.jitterLevels).length > 0) {
+    info.push(`\n=== JITTER LEVELS ===`);
+    Object.entries(state.jitterLevels).forEach(([note, level]) => {
+      const stats = state.noteStats?.[note];
+      const acc = stats ? (stats.accuracy * 100).toFixed(0) : 'N/A';
+      const err = stats ? stats.medianError.toFixed(0) : 'N/A';
+      info.push(`${note}: ${level} (${acc}% acc, ${err}¢ err)`);
+    });
+  }
+  
+  // OOB state
+  if (state.oobStats) {
+    info.push(`\n=== OOB SYSTEM ===`);
+    info.push(`Adaptive Rate: ${(state.oobStats.adaptiveRate * 100).toFixed(1)}%`);
+    info.push(`Streak Count: ${state.oobStats.streakCount}`);
+    info.push(`Health Check: ${state.oobStats.healthCheckActive}`);
+    info.push(`Recent Trials: ${state.oobStats.recentTrials.length}/60`);
+  }
+  
+  // Octave mixing
+  if (state.octaveStats) {
+    info.push(`\n=== OCTAVE MIXING ===`);
+    const mix = state.octaveStats.currentMix;
+    info.push(`Current Mix: ${(mix.center * 100).toFixed(0)}% center, ${(mix.neighbors * 100).toFixed(0)}% neighbors`);
+    info.push(`Set Trials: ${state.octaveStats.setTrials.length}/24`);
+  }
+  
+  // Timbre state
+  if (state.timbreStats && shouldUseVarietyMode()) {
+    info.push(`\n=== TIMBRE VARIETY ===`);
+    info.push(`Daily Alternate: ${state.timbreStats.dailyAlternate || 'None'}`);
+    info.push(`Last Rotation: ${state.timbreStats.lastRotation || 'Never'}`);
+  }
+  
+  content.textContent = info.join('\n');
 }
 
 /* ------------------ ENHANCED AUDIO WITH JITTER ------------------ */
@@ -1907,6 +2000,15 @@ function updateLevelUI(){
     text('accInfo', `Acc ${acc}% (req ${req}%)`);
   }
   text('delayInfo', `RT limit: ${rtWindowForSet(set)}ms • Delay: ${delayMs}ms`);
+  
+  // Update jitter and octave status for active sessions
+  if (sessionActive && set >= 1) {
+    updateJitterStatusUI(set);
+    updateOctaveStatusUI();
+  } else {
+    byId('jitterInfo').style.display = 'none';
+    byId('octaveInfo').style.display = 'none';
+  }
 }
 
 /* Build note pad and attach handlers */
@@ -2689,6 +2791,12 @@ function endSession(auto){
   if(!sessionActive) return;
   sessionActive=false;
   stopAllTimers();
+  
+  // Clear trial state
+  currentNote = null;
+  currentTrialJitter = null;
+  currentTrialTimbre = null;
+  
   const rec=state.sessions[state.sessions.length-1]; if(rec && !rec.end) rec.end=Date.now();
   save(); updateCapsUI(); try{ drawChart(); }catch(_){};
   
@@ -2957,6 +3065,19 @@ function wireOnce(){
   });
   
   updateVarietyModeUI();
+
+  // Debug toggle
+  safe('debugToggle', el=> el.onclick=()=>{
+    const panel = byId('debugPanel');
+    if(panel.style.display === 'none') {
+      panel.style.display = 'block';
+      updateDebugInfo();
+      el.textContent = 'Hide Debug';
+    } else {
+      panel.style.display = 'none';
+      el.textContent = 'Debug';
+    }
+  });
 
   // Theme selection
   safe('themeSelect', el=> {
