@@ -429,6 +429,39 @@
     </div>
   </div>
 
+  <!-- Pitch Recall Modal -->
+  <div id="pitchRecallModal" aria-modal="true" role="dialog" style="position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;z-index:80">
+    <div class="card" style="max-width:600px;margin:20px;text-align:center">
+      <h2 id="recallTitle">🎤 Cold Recall</h2>
+      <p id="recallInstructions">Hum the following pitches for 2 seconds each (no reference beep):</p>
+      
+      <div id="recallProgress" style="margin:20px 0">
+        <div style="font-size:18px;margin:10px 0">
+          <span id="recallCurrentNote">F</span> - <span id="recallTimer">2.0s</span>
+        </div>
+        <div style="font-size:14px;opacity:0.8">
+          <span id="recallNoteProgress">1 / 3</span>
+        </div>
+      </div>
+      
+      <div id="recallLiveDisplay" style="margin:16px 0;padding:12px;background:var(--muted2);border-radius:8px">
+        <div>Hz: <span id="recallHz">--</span></div>
+        <div>Cents: <span id="recallCents">--</span></div>
+      </div>
+      
+      <div id="recallControls" style="margin-top:20px">
+        <button id="btnStartRecall" style="background:var(--good)">🎤 Start Recording</button>
+        <button id="btnSkipRecall" style="background:var(--muted);margin-left:8px">Skip</button>
+      </div>
+      
+      <div id="recallResults" style="display:none;margin-top:20px">
+        <h3>Results</h3>
+        <div id="recallResultsContent"></div>
+        <button id="btnRecallComplete" style="background:var(--good);margin-top:12px">Continue</button>
+      </div>
+    </div>
+  </div>
+
   <div id="bootError"></div>
 
 <script>
@@ -614,7 +647,11 @@ try{
     currentOobRate: 0.25,
     oobAdaptationBlockCount: 0,
     // Variety mode
-    varietyMode: false
+    varietyMode: false,
+    // Pitch recall tracking
+    coldRecallComplete: false,
+    warmRecallComplete: false,
+    recallResults: [] // {date, type: 'cold'|'warm', items: [{notePc, medianCents, stdCents, medianHz, verdict}]}
   };
 } catch(e){
   state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO };
@@ -652,6 +689,9 @@ if (state.minutesToday === undefined) {
   state.currentOobRate = 0.25;
   state.oobAdaptationBlockCount = 0;
   state.varietyMode = false;
+  state.coldRecallComplete = false;
+  state.warmRecallComplete = false;
+  state.recallResults = [];
   save();
 }
 
@@ -1939,6 +1979,17 @@ function startSession(){
     alert(`Training is locked for ${fmtHMM(left)}.\nYou can still play Flappy from the menu, or Reset lockout/timer.`);
     showScreen('menuScreen'); return;
   }
+  
+  // Check for cold recall test
+  if (shouldDoRecall('cold')) {
+    startRecallTest('cold');
+    return; // Will continue to training after recall
+  }
+  
+  continueToTraining();
+}
+
+function continueToTraining(){
   showScreen('trainerScreen');
   if(!state.startDate) state.startDate=Date.now();
   ensureWeekRoll();
@@ -2011,14 +2062,307 @@ function endSession(auto){
   stopAllTimers();
   const rec=state.sessions[state.sessions.length-1]; if(rec && !rec.end) rec.end=Date.now();
   save(); updateCapsUI(); try{ drawChart(); }catch(_){};
+  
   if(auto){
     const left = state.lockoutUntil ? fmtHMM(state.lockoutUntil - Date.now()) : 'some time';
     if (state.minutesToday >= DAILY_TARGET_MIN) {
+      // Check for warm recall before showing completion message
+      if (shouldDoRecall('warm')) {
+        startRecallTest('warm');
+        return; // Will show completion after recall
+      }
       alert(`Great work! You completed all 5 blocks (30 minutes). Come back tomorrow!`);
     } else {
       alert(`Cap reached. Locked for ${left}.`);
     }
   }
+}
+
+/* ------------------ PITCH RECALL SYSTEM ------------------ */
+let recallState = null; // {type: 'cold'|'warm', notes: [], currentIndex: 0, results: []}
+let recallAudioContext = null;
+let recallAnalyser = null;
+let recallMicrophone = null;
+let recallTimer = null;
+
+async function initPitchDetection() {
+  try {
+    if (!recallAudioContext) {
+      recallAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    
+    if (recallAudioContext.state === 'suspended') {
+      await recallAudioContext.resume();
+    }
+    
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recallMicrophone = recallAudioContext.createMediaStreamSource(stream);
+    recallAnalyser = recallAudioContext.createAnalyser();
+    recallAnalyser.fftSize = 4096;
+    recallMicrophone.connect(recallAnalyser);
+    
+    return true;
+  } catch (error) {
+    console.error('Failed to initialize pitch detection:', error);
+    return false;
+  }
+}
+
+function detectPitch() {
+  if (!recallAnalyser) return { hz: 0, cents: 0 };
+  
+  const bufferLength = recallAnalyser.fftSize;
+  const buffer = new Float32Array(bufferLength);
+  recallAnalyser.getFloatTimeDomainData(buffer);
+  
+  // Simple autocorrelation-based pitch detection
+  const sampleRate = recallAudioContext.sampleRate;
+  const minPeriod = Math.floor(sampleRate / 1200); // 1200 Hz max
+  const maxPeriod = Math.floor(sampleRate / 60);   // 60 Hz min
+  
+  let bestCorrelation = -1;
+  let bestPeriod = -1;
+  
+  // RMS gate - only detect if signal is strong enough
+  const rms = Math.sqrt(buffer.reduce((sum, val) => sum + val * val, 0) / buffer.length);
+  if (rms < 0.01) return { hz: 0, cents: 0 };
+  
+  for (let period = minPeriod; period <= maxPeriod; period++) {
+    let correlation = 0;
+    for (let i = 0; i < bufferLength - period; i++) {
+      correlation += buffer[i] * buffer[i + period];
+    }
+    correlation /= (bufferLength - period);
+    
+    if (correlation > bestCorrelation) {
+      bestCorrelation = correlation;
+      bestPeriod = period;
+    }
+  }
+  
+  if (bestPeriod === -1 || bestCorrelation < 0.3) {
+    return { hz: 0, cents: 0 };
+  }
+  
+  const frequency = sampleRate / bestPeriod;
+  const cents = 1200 * Math.log2(frequency / 440); // Cents relative to A4
+  
+  return { hz: frequency, cents: cents };
+}
+
+function shouldDoRecall(type) {
+  if (type === 'cold') {
+    return state.blocksCompleted === 0 && !state.coldRecallComplete;
+  } else if (type === 'warm') {
+    return state.blocksCompleted === 5 && !state.warmRecallComplete;
+  }
+  return false;
+}
+
+function startRecallTest(type) {
+  const set = setFromIndex(state.levelIndex);
+  const learnedNotes = trainedSet(set);
+  const numNotes = Math.min(N_RECALL_NOTES, Math.max(2, learnedNotes.length));
+  
+  // Select random notes from learned set
+  const selectedNotes = [];
+  const shuffled = [...learnedNotes].sort(() => Math.random() - 0.5);
+  for (let i = 0; i < numNotes; i++) {
+    selectedNotes.push(shuffled[i % shuffled.length]);
+  }
+  
+  recallState = {
+    type: type,
+    notes: selectedNotes,
+    currentIndex: 0,
+    results: []
+  };
+  
+  showRecallModal();
+}
+
+function showRecallModal() {
+  const modal = byId('pitchRecallModal');
+  const title = byId('recallTitle');
+  const instructions = byId('recallInstructions');
+  
+  if (recallState.type === 'cold') {
+    title.textContent = '🎤 Cold Recall';
+    instructions.textContent = 'Before starting training, hum these learned pitches (2 seconds each, no reference beep):';
+  } else {
+    title.textContent = '🎤 Warm Recall';
+    instructions.textContent = 'Training complete! Now hum these learned pitches (2 seconds each, no reference beep):';
+  }
+  
+  updateRecallDisplay();
+  modal.style.display = 'flex';
+}
+
+function updateRecallDisplay() {
+  if (!recallState) return;
+  
+  const currentNote = recallState.notes[recallState.currentIndex];
+  text('recallCurrentNote', pcLabel(currentNote));
+  text('recallNoteProgress', `${recallState.currentIndex + 1} / ${recallState.notes.length}`);
+  text('recallTimer', '2.0s');
+  text('recallHz', '--');
+  text('recallCents', '--');
+  
+  byId('recallProgress').style.display = 'block';
+  byId('recallResults').style.display = 'none';
+  byId('recallControls').style.display = 'block';
+}
+
+async function startRecording() {
+  const success = await initPitchDetection();
+  if (!success) {
+    alert('Could not access microphone. Recall test will be skipped.');
+    skipRecall();
+    return;
+  }
+  
+  const currentNote = recallState.notes[recallState.currentIndex];
+  const measurements = [];
+  let timeLeft = 2000; // 2 seconds
+  
+  byId('btnStartRecall').disabled = true;
+  byId('btnSkipRecall').disabled = true;
+  
+  recallTimer = setInterval(() => {
+    const pitch = detectPitch();
+    
+    if (pitch.hz > 0) {
+      measurements.push({
+        hz: pitch.hz,
+        cents: Math.abs(pitch.cents)
+      });
+    }
+    
+    text('recallHz', pitch.hz > 0 ? pitch.hz.toFixed(1) : '--');
+    text('recallCents', pitch.hz > 0 ? pitch.cents.toFixed(1) : '--');
+    
+    timeLeft -= 100;
+    text('recallTimer', (timeLeft / 1000).toFixed(1) + 's');
+    
+    if (timeLeft <= 0) {
+      clearInterval(recallTimer);
+      completeCurrentRecall(currentNote, measurements);
+    }
+  }, 100);
+}
+
+function completeCurrentRecall(notePc, measurements) {
+  let medianHz = 0, medianCents = 0, stdCents = 0, verdict = 'Off';
+  
+  if (measurements.length > 0) {
+    const hzValues = measurements.map(m => m.hz).sort((a, b) => a - b);
+    const centsValues = measurements.map(m => m.cents).sort((a, b) => a - b);
+    
+    medianHz = hzValues[Math.floor(hzValues.length / 2)];
+    medianCents = centsValues[Math.floor(centsValues.length / 2)];
+    
+    // Calculate standard deviation of cents
+    const meanCents = centsValues.reduce((a, b) => a + b, 0) / centsValues.length;
+    stdCents = Math.sqrt(centsValues.reduce((sum, val) => sum + Math.pow(val - meanCents, 2), 0) / centsValues.length);
+    
+    // Determine verdict
+    if (medianCents <= 10 && stdCents <= 15) {
+      verdict = 'On target';
+    } else if (medianCents <= 30) {
+      verdict = 'Close';
+    } else {
+      verdict = 'Off';
+    }
+  }
+  
+  recallState.results.push({
+    notePc: notePc,
+    medianHz: medianHz,
+    medianCents: medianCents,
+    stdCents: stdCents,
+    verdict: verdict
+  });
+  
+  recallState.currentIndex++;
+  
+  if (recallState.currentIndex < recallState.notes.length) {
+    // Next note
+    updateRecallDisplay();
+    byId('btnStartRecall').disabled = false;
+    byId('btnSkipRecall').disabled = false;
+  } else {
+    // All done
+    showRecallResults();
+  }
+}
+
+function showRecallResults() {
+  const results = recallState.results;
+  const content = byId('recallResultsContent');
+  
+  let html = '<div style="text-align:left">';
+  for (const result of results) {
+    const color = result.verdict === 'On target' ? 'var(--good)' : 
+                 result.verdict === 'Close' ? 'var(--accent)' : 'var(--bad)';
+    html += `
+      <div style="margin:8px 0;padding:8px;background:var(--muted2);border-radius:6px">
+        <strong>${pcLabel(result.notePc)}</strong>: 
+        <span style="color:${color}">${result.verdict}</span>
+        ${result.medianHz > 0 ? `(${result.medianHz.toFixed(1)} Hz, ±${result.medianCents.toFixed(1)}¢)` : '(No detection)'}
+      </div>
+    `;
+  }
+  html += '</div>';
+  
+  content.innerHTML = html;
+  
+  byId('recallProgress').style.display = 'none';
+  byId('recallControls').style.display = 'none';
+  byId('recallResults').style.display = 'block';
+}
+
+function completeRecall() {
+  // Store results
+  const recallResult = {
+    date: Date.now(),
+    type: recallState.type,
+    items: recallState.results
+  };
+  
+  state.recallResults.push(recallResult);
+  
+  if (recallState.type === 'cold') {
+    state.coldRecallComplete = true;
+  } else {
+    state.warmRecallComplete = true;
+  }
+  
+  save();
+  
+  // Clean up
+  if (recallMicrophone) {
+    recallMicrophone.disconnect();
+    recallMicrophone = null;
+  }
+  if (recallAnalyser) {
+    recallAnalyser.disconnect();
+    recallAnalyser = null;
+  }
+  
+  byId('pitchRecallModal').style.display = 'none';
+  recallState = null;
+}
+
+function skipRecall() {
+  if (recallState.type === 'cold') {
+    state.coldRecallComplete = true;
+  } else {
+    state.warmRecallComplete = true;
+  }
+  
+  save();
+  byId('pitchRecallModal').style.display = 'none';
+  recallState = null;
 }
 
 /* ------------------ BREAK SYSTEM ------------------ */
@@ -2113,6 +2457,8 @@ function quotaStart(){
       state.inBreak = false;
       state.breakStart = null;
       state.lockoutUntil = null;
+      state.coldRecallComplete = false;
+      state.warmRecallComplete = false;
       save();
     }
     return state.capResetAt; 
@@ -2265,6 +2611,8 @@ function wireOnce(){
     state.currentBlockStart = null;
     state.inBreak = false;
     state.breakStart = null;
+    state.coldRecallComplete = false;
+    state.warmRecallComplete = false;
     save(); updateCapsUI(); alert('Timer reset. You can start training now.');
   });
   safe('menuReset',   el=> el.onclick=()=> doFactoryReset());
@@ -2381,6 +2729,22 @@ function wireOnce(){
   safe('btnContinueTraining', el=> el.onclick=()=>{ 
     closeNewPitchModal(); 
     startFlappyReward(); 
+  });
+
+  // Pitch recall modal buttons
+  safe('btnStartRecall', el=> el.onclick=()=> startRecording());
+  safe('btnSkipRecall', el=> el.onclick=()=> skipRecall());
+  safe('btnRecallComplete', el=> el.onclick=()=> {
+    completeRecall();
+    if (recallState?.type === 'cold') {
+      continueToTraining(); // Continue to training after cold recall
+    } else {
+      // After warm recall, show completion message
+      alert(`Great work! You completed all 5 blocks (30 minutes). Come back tomorrow!`);
+      showScreen('menuScreen'); 
+      populatePitchSelect(); 
+      drawChart();
+    }
   });
 
   // Initial screen
