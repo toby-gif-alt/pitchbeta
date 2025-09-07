@@ -108,7 +108,8 @@
         <div class="tPage" id="tPage2">
           <h3>⏱ Daily session</h3>
           <ul>
-            <li>Train for <strong>20 minutes</strong> (timer runs only while actively training).</li>
+            <li>Train for <strong>30 minutes</strong> (timer runs only while actively training).</li>
+            <li>Breaks happen every <strong>6 minutes</strong> for 60 seconds with Flappy.</li>
             <li>Menus, Flappy, and the 20-s <strong>Shepard tone</strong> don’t count.</li>
             <li>Blocks <strong>1–20</strong> with feedback; <strong>21–24</strong> are tests (no feedback).</li>
           </ul>
@@ -520,9 +521,11 @@ const THRESH_24=[0.20,0.25,0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.60,0.65,0.70,0.7
 function blockHasFeedback(block){ return block<=20; }
 function rtWindowForSet(n){const a=1183,b=2028;return Math.round(a+(n-1)*(b-a)/11);}
 const OOB_RATE=0.25;
-const SESS_DAILY_MS=20*60*1000;
+const SESS_DAILY_MS=30*60*1000; // Changed from 20 to 30 minutes
 const WEEKLY_TARGET_MS=2*3600*1000;
-const LOCKOUT_MS=6*3600*1000;
+const BREAK_INTERVAL_MS=6*60*1000; // Break every 6 minutes
+const BREAK_DURATION_MS=60*1000; // 60-second mandatory break
+// Lockout until next calendar day (calculated dynamically)
 const LATENCY_CUSHION_MS=100;
 
 /* ------------------ THEME SYSTEM ------------------ */
@@ -567,7 +570,18 @@ try{
     audioType: AUDIO_TYPES.PIANO,
     assessmentScores: [],
     theme: 'default',
-    flappySoundEnabled: true
+    flappySoundEnabled: true,
+    // New state for enhanced features
+    sessionBreakTime: 0, // Time when next break should occur
+    lastBreakTime: 0, // Time of last break
+    inBreak: false, // Currently in a break
+    coldRecallDone: false, // Cold recall completed today
+    warmRecallDone: false, // Warm recall completed today
+    recallResults: [], // Recall test results
+    jitterLevels: {}, // Per-note jitter levels (JL0-JL3)
+    confusionMatrix: {}, // 12x12 confusion tracking
+    noteStats: {}, // Per-note rolling statistics
+    varietyModeEnabled: false // Timbre variety mode
   };
 } catch(e){
   state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO };
@@ -592,6 +606,20 @@ if (state.flappySoundEnabled === undefined) {
   state.flappySoundEnabled = true;
   save();
 }
+// Migration for new enhanced features
+if (state.sessionBreakTime === undefined) {
+  state.sessionBreakTime = 0;
+  state.lastBreakTime = 0;
+  state.inBreak = false;
+  state.coldRecallDone = false;
+  state.warmRecallDone = false;
+  state.recallResults = [];
+  state.jitterLevels = {};
+  state.confusionMatrix = {};
+  state.noteStats = {};
+  state.varietyModeEnabled = false;
+  save();
+}
 
 // Apply theme on load
 applyTheme(state.theme);
@@ -604,6 +632,7 @@ function fmtHMM(ms){ const s=Math.max(0,Math.floor(ms/1000)); const h=Math.floor
 function fmtHrsMins(ms){ let s=Math.max(0, Math.floor(ms/1000)); const h=Math.floor(s/3600); const m=Math.floor((s%3600)/60); return `${h} hr${h===1?'':'s'} ${m} min${m===1?'':'s'}`; }
 function dateAtMidnight(ts){ const d=new Date(ts); d.setHours(0,0,0,0); return d.getTime(); }
 function todayKey(ts){ return dateAtMidnight(ts||Date.now()); }
+function nextMidnight(ts){ const today = dateAtMidnight(ts||Date.now()); return today + 24*60*60*1000; }
 function weekIndex(ts){ const base=ts||Date.now(); if(!state.startDate) return 0; return Math.floor((base-state.startDate)/(7*24*60*60*1000)); }
 function currentWeekIdx(){ return weekIndex(Date.now()); }
 function weekStartTs(){ if(!state.startDate) return todayKey(Date.now()); const idx=currentWeekIdx(); const base=dateAtMidnight(state.startDate); return base + idx*7*86400000; }
@@ -679,7 +708,12 @@ function updateCapsUI(){
   const locked = isLocked();
   const lp = byId('lockoutPill');
   if(lp){
-    if(locked){ lp.style.display='inline-flex'; lp.textContent = `🔒 Locked (${fmtHMM(state.lockoutUntil - Date.now())} left)`; }
+    if(locked){ 
+      const timeLeft = state.lockoutUntil - Date.now();
+      const message = timeLeft > 12*60*60*1000 ? '🔒 Come back tomorrow' : `🔒 Locked (${fmtHMM(timeLeft)} left)`;
+      lp.style.display='inline-flex'; 
+      lp.textContent = message; 
+    }
     else lp.style.display='none';
   }
   const pf = byId('playFlappy'); if(pf) pf.disabled = !locked;
@@ -1535,7 +1569,12 @@ function startSession(){
   ensureWeekRoll();
   sessionActive=true; paused=false;
   (state.sessions||[]).push({start:Date.now(),end:null,pauses:[],completed:false}); 
-  state.lastSeen = Date.now(); save();
+  // Initialize break timing for this session
+  const now = Date.now();
+  state.sessionBreakTime = now + BREAK_INTERVAL_MS; // First break in 6 minutes
+  state.lastBreakTime = now;
+  state.inBreak = false;
+  state.lastSeen = now; save();
   updateCapsUI(); updateLevelUI(); paintNotes();
   text('promptPill','Press Play to start');
   stopAllTimers();
@@ -1543,13 +1582,20 @@ function startSession(){
     ensureWeekRoll();
     if(sessionActive && !paused && !shepRunning){ state.thisWeekMs = (state.thisWeekMs||0) + 1000; save(); }
     if(sessionActive && !paused){
+      const now = Date.now();
       const left = Math.max(0, SESS_DAILY_MS - msUsedQuota());
+      
+      // Check for mandatory break every 6 minutes
+      if(!state.inBreak && now >= state.sessionBreakTime){
+        triggerMandatoryBreak();
+        return; // Exit early, break will handle resume
+      }
+      
       text('timerInfo', `Time left: ${fmtMMSS(left)}`);
       if(left<=0){
-        const now = Date.now();
         const rec=state.sessions[state.sessions.length-1];
         if(rec && !rec.completed){ rec.completed=true; rec.end = now; }
-        state.lockoutUntil = now + LOCKOUT_MS;
+        state.lockoutUntil = nextMidnight(now); // Lock until next calendar day
         state.capResetAt   = state.lockoutUntil;
         save(); endSession(true);
       }
@@ -1849,6 +1895,99 @@ let fCtx, flappyRAF=null, running=false, score=0, pipes=[], bird, pipeTimer=0, l
 const FLAPPY = { gravity:900, flap:-380, baseSpeed:140, maxSpeed:260, speed:140, baseGap:140, gap:140, introPipes:5, introExtra:60, spawnEvery:1.20, width:52 };
 
 function openFlappyFromMenu(){ if(isLocked()) openFlappyModal(); else alert('Flappy is intended for lockout/rewards.'); }
+
+/* Mandatory Break System */
+function triggerMandatoryBreak(){
+  if(!sessionActive || state.inBreak) return;
+  
+  // Pause the session and start break
+  if(!paused) pauseStart('mandatory-break');
+  state.inBreak = true;
+  state.lastBreakTime = Date.now();
+  
+  // Schedule next break in 6 minutes from now
+  state.sessionBreakTime = Date.now() + BREAK_INTERVAL_MS;
+  save();
+  
+  // Show Flappy with lockout sound (always enabled during mandatory breaks)
+  openMandatoryBreakFlappy();
+}
+
+function openMandatoryBreakFlappy(){
+  byId('flappyModal').style.display='flex'; 
+  const c=byId('flappyCanvas'); 
+  if(!c) return; 
+  fCtx=c.getContext('2d'); 
+  resetFlappy(); 
+  attachFlappyControls();
+  
+  // Update UI to show this is a mandatory break
+  const modalTitle = byId('flappyModal').querySelector('h3');
+  if(modalTitle) modalTitle.textContent = '⏱️ Mandatory 60s Break';
+  
+  // Show sound toggle and set appropriate description
+  const soundToggle = byId('flappySoundToggle');
+  const description = byId('flappyModal').querySelector('p:last-child');
+  if (soundToggle) {
+    soundToggle.style.display = 'inline-block';
+    soundToggle.textContent = state.flappySoundEnabled ? '🔊 Sound On' : '🔇 Sound Off';
+  }
+  if (description) {
+    description.textContent = 'Mandatory 60-second break. Tap/click (or Space) to flap — each flap makes a flappy sound.';
+  }
+  
+  // Start the break timer
+  startBreakTimer();
+}
+
+function startBreakTimer(){
+  // Force close after 60 seconds minimum, but allow game to continue if in progress
+  setTimeout(() => {
+    if(state.inBreak) {
+      // Check if user is still playing - if so, let them finish their current game
+      if(running && bird && bird.y > 0 && bird.y < byId('flappyCanvas')?.height) {
+        // Game is active, wait for it to end naturally
+        const checkGameEnd = setInterval(() => {
+          if(!running) {
+            clearInterval(checkGameEnd);
+            endMandatoryBreak();
+          }
+        }, 100);
+      } else {
+        // Game not active or already ended, close immediately
+        endMandatoryBreak();
+      }
+    }
+  }, BREAK_DURATION_MS);
+}
+
+function endMandatoryBreak(){
+  if(!state.inBreak) return;
+  
+  // Close Flappy
+  running = false;
+  cancelAnimationFrame(flappyRAF);
+  byId('flappyModal').style.display = 'none';
+  detachFlappyControls();
+  
+  // Reset modal title
+  const modalTitle = byId('flappyModal').querySelector('h3');
+  if(modalTitle) modalTitle.textContent = '🐤 Flappy Break';
+  
+  // End break state
+  state.inBreak = false;
+  save();
+  
+  // Resume session
+  if(sessionActive) {
+    pauseEnd();
+    safe('btnPause', el=> el.textContent='⏸ Pause');
+    currentNote = null;
+    clearTimeout(rtTimer); rtTimer = null;
+    clearTimeout(autoTimer); autoTimer = null;
+    text('promptPill', 'Break over — press Play to continue');
+  }
+}
 function openFlappyModal(){ 
   byId('flappyModal').style.display='flex'; 
   const c=byId('flappyCanvas'); 
@@ -1889,10 +2028,10 @@ function resetFlappy(){ const cnv=byId('flappyCanvas'); if(!cnv) return; bird={x
 function flap(){ 
   bird.vy = FLAPPY.flap; 
   
-  // Only play sound if enabled and use flappy sound for lockout
-  if (state.flappySoundEnabled && isLocked()) {
+  // Use flappy sound for lockout or mandatory breaks, musical pitches otherwise
+  if (state.flappySoundEnabled && (isLocked() || state.inBreak)) {
     playFlappySound();
-  } else if (state.flappySoundEnabled && !isLocked()) {
+  } else if (state.flappySoundEnabled && !isLocked() && !state.inBreak) {
     // Regular flappy bird with musical pitches
     const pc = rand(PC); 
     const note = `${pc}${rand(currentOctaves())}`; 
