@@ -956,6 +956,9 @@ function findClosestGuitarSample(targetNote) {
 
 /* Always play a tone (sample -> oscillator -> fallback) */
 async function playSample(note, jitterCents = 0, forceTimbre = null){
+  // Skip audio during simulation
+  if (SIMULATING) return;
+  
   try{
     await resumeCtx();
     const ctx = getCtx();
@@ -3588,6 +3591,503 @@ window.getOOBDebug = () => {
   const last60 = (state.trials||[]).filter(t=>!t.oob).slice(-60);
   const acc = last60.length ? last60.reduce((a,t)=>a+(t.correct?1:0),0)/last60.length : null;
   return { rate: state.oobStats.adaptiveRate, maxInRow: state.oobStats.maxInRow, last60InBoundsAcc: acc };
+};
+
+/* ------------------ OFFLINE SIMULATOR ------------------ */
+
+// Seeded RNG (mulberry32) for reproducible simulations
+function mulberry32(a) {
+  return function() {
+    let t = a += 0x6D2B79F5;
+    t = Math.imul(t ^ t >>> 15, t | 1);
+    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// Simulation constants
+const SIM_TRIALS_PER_BLOCK = 20;
+const SIM_DAILY_BLOCKS = 5;
+
+// Global simulation state
+let SIMULATING = false;
+let simRNG = null;
+
+// Learner model state
+let learnerSkills = {}; // per-pitch class skills [0..1]
+let simConfusionMatrix = {}; // 12x12 confusion tracking
+
+// Initialize learner skills
+function initializeLearnerSkills() {
+  learnerSkills = {};
+  PC.forEach(pc => {
+    learnerSkills[pc] = 0.55; // Initial skill level
+  });
+}
+
+// Initialize simulation confusion matrix
+function initializeSimConfusionMatrix() {
+  simConfusionMatrix = {};
+  PC.forEach(truePc => {
+    simConfusionMatrix[truePc] = {};
+    PC.forEach(guessPc => {
+      simConfusionMatrix[truePc][guessPc] = 0;
+    });
+  });
+}
+
+// Learner model response
+function simulateLearnerResponse(truePc, isOOB, jitterInfo) {
+  if (isOOB) {
+    // OOB trials are always incorrect, no skill update
+    return { correct: false, guess: 'OOB' };
+  }
+  
+  // Calculate base probability of correct response
+  let base = learnerSkills[truePc] || 0.55;
+  
+  // Apply penalties/bonuses based on jitter
+  if (jitterInfo.isProbe) {
+    base -= 0.18; // Probe penalty (±25-40¢)
+  } else if (jitterInfo.jitter !== 0) {
+    const penalty = Math.min(Math.abs(jitterInfo.jitter) / 40, 0.12);
+    base -= penalty; // Jitter penalty up to -0.12
+  } else {
+    base += 0.03; // Anchor bonus (0¢)
+  }
+  
+  // Clamp probability
+  base = Math.max(0.05, Math.min(0.98, base));
+  
+  // Determine if correct
+  const correct = simRNG() < base;
+  
+  let guess = truePc;
+  if (!correct) {
+    // Choose incorrect guess using confusion distribution
+    const confusionRow = simConfusionMatrix[truePc];
+    const neighbors = getNeighboringSemitones(truePc);
+    
+    if (simRNG() < 0.5) {
+      // 50% chance: prefer nearest semitones
+      guess = neighbors[Math.floor(simRNG() * neighbors.length)];
+    } else {
+      // 50% chance: sample from confusion matrix
+      const weights = PC.map(pc => (confusionRow[pc] || 0) + 0.01); // epsilon
+      const totalWeight = weights.reduce((a, b) => a + b, 0);
+      const rand = simRNG() * totalWeight;
+      let cumulative = 0;
+      for (let i = 0; i < PC.length; i++) {
+        cumulative += weights[i];
+        if (rand <= cumulative) {
+          guess = PC[i];
+          break;
+        }
+      }
+    }
+  }
+  
+  return { correct, guess };
+}
+
+// Get neighboring semitones for confusion
+function getNeighboringSemitones(pc) {
+  const idx = PC.indexOf(pc);
+  const prev = PC[(idx + 11) % 12];
+  const next = PC[(idx + 1) % 12];
+  return [prev, next];
+}
+
+// Update learner skills after trial
+function updateLearnerSkills(truePc, correct, guess) {
+  const skill = learnerSkills[truePc];
+  
+  if (correct) {
+    // Increase skill, with diminishing returns
+    const increment = 0.01 * (1 - skill);
+    learnerSkills[truePc] = Math.min(0.97, skill + increment);
+  } else {
+    // Decrease skill, with bonus penalty for nearby confusions
+    let decrement = 0.005;
+    const neighbors = getNeighboringSemitones(truePc);
+    if (neighbors.includes(guess)) {
+      decrement += 0.005; // Extra penalty for ±1 semitone errors
+    }
+    learnerSkills[truePc] = Math.max(0.40, skill - decrement);
+  }
+}
+
+// Update confusion matrix
+function updateSimConfusionMatrix(truePc, guess) {
+  if (!simConfusionMatrix[truePc]) simConfusionMatrix[truePc] = {};
+  simConfusionMatrix[truePc][guess] = (simConfusionMatrix[truePc][guess] || 0) + 1;
+}
+
+// Simulate cold/warm recall
+function simulateRecall(type) {
+  const learnedPcs = Object.keys(learnerSkills).filter(pc => learnerSkills[pc] > 0.55);
+  const testPcs = learnedPcs.length >= 3 ? 
+    shuffleArray(learnedPcs).slice(0, 3) : 
+    learnedPcs;
+  
+  return testPcs.map(pc => {
+    const skill = learnerSkills[pc];
+    const meanError = (1 - skill) * 35; // Cents error mean
+    const sdError = 12; // Standard deviation
+    
+    // Generate normal distribution error, clamped to ±60¢
+    let error = normalRandom() * sdError + meanError;
+    error = Math.max(-60, Math.min(60, error));
+    
+    return { pc, cents: Math.round(error * 10) / 10 };
+  });
+}
+
+// Box-Muller normal distribution
+function normalRandom() {
+  const u1 = simRNG();
+  const u2 = simRNG();
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+}
+
+// Fisher-Yates shuffle using seeded RNG
+function shuffleArray(array) {
+  const arr = [...array];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(simRNG() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+// Override Math.random during simulation
+function withSimulatedRandom(fn) {
+  if (!SIMULATING) return fn();
+  
+  const originalRandom = Math.random;
+  Math.random = simRNG;
+  try {
+    return fn();
+  } finally {
+    Math.random = originalRandom;
+  }
+}
+
+// Helper functions that may not exist - provide fallbacks
+function selectInBoundsNote(usable) {
+  if (typeof window.selectInBoundsNote === 'function') {
+    return window.selectInBoundsNote(usable);
+  }
+  // Fallback: random selection from usable set
+  return usable[Math.floor(simRNG() * usable.length)];
+}
+
+function selectOctaveForNote(pc) {
+  if (typeof window.selectOctaveForNote === 'function') {
+    return window.selectOctaveForNote(pc);
+  }
+  // Fallback: weighted random from [3,4,5] with bias toward 4
+  const weights = [0.15, 0.7, 0.15]; // Favor octave 4
+  const rand = simRNG();
+  let cumulative = 0;
+  for (let i = 0; i < weights.length; i++) {
+    cumulative += weights[i];
+    if (rand <= cumulative) {
+      return 3 + i;
+    }
+  }
+  return 4; // Fallback
+}
+
+function initializeJitterLevel(pc) {
+  if (typeof window.initializeJitterLevel === 'function') {
+    return window.initializeJitterLevel(pc);
+  }
+  // Fallback: initialize to JL1
+  if (!state.jitterLevels) state.jitterLevels = {};
+  if (!(pc in state.jitterLevels)) {
+    state.jitterLevels[pc] = 1; // Default to JL1
+  }
+}
+
+function shouldUseProbe(pc) {
+  if (typeof window.shouldUseProbe === 'function') {
+    return window.shouldUseProbe(pc);
+  }
+  // Fallback: 5% chance of probe
+  return simRNG() < 0.05;
+}
+
+function calculateJitter(pc, isProbe) {
+  if (typeof window.calculateJitter === 'function') {
+    return window.calculateJitter(pc, isProbe);
+  }
+  // Fallback jitter calculation
+  if (isProbe) {
+    // Probe: ±25-40¢ range
+    const sign = simRNG() < 0.5 ? -1 : 1;
+    return sign * (25 + simRNG() * 15); // 25-40 cents
+  } else {
+    // Regular jitter: ±5-15¢ based on level
+    const level = state.jitterLevels[pc] || 1;
+    const maxJitter = Math.min(15, 5 + level * 3);
+    const sign = simRNG() < 0.5 ? -1 : 1;
+    return sign * simRNG() * maxJitter;
+  }
+}
+
+// Simulate a single trial
+function simulateTrial(set, blockNum, trialNum) {
+  return withSimulatedRandom(() => {
+    // Generate trial using existing logic
+    const usable = trainedSet(set);
+    const wasOOB = shouldGenerateOOB(set);
+    
+    let truePc, currentNote, jitterInfo;
+    
+    if (wasOOB) {
+      truePc = selectOOBNote(set);
+      const octave = selectOctaveForNote(truePc);
+      currentNote = `${truePc}${octave}`;
+      jitterInfo = { jitter: 0, isProbe: false, level: null };
+    } else {
+      truePc = selectInBoundsNote(usable);
+      const octave = selectOctaveForNote(truePc);
+      currentNote = `${truePc}${octave}`;
+      
+      // Initialize jitter level if needed
+      initializeJitterLevel(truePc);
+      
+      const isProbe = shouldUseProbe(truePc);
+      const jitter = calculateJitter(truePc, isProbe);
+      
+      jitterInfo = {
+        jitter: jitter,
+        isProbe: isProbe,
+        level: state.jitterLevels[truePc]
+      };
+    }
+    
+    // Get learner response
+    const response = simulateLearnerResponse(truePc, wasOOB, jitterInfo);
+    
+    // Record trial data
+    const trialData = {
+      day: Math.floor((Date.now() - simStartTime) / (24 * 60 * 60 * 1000)) + 1,
+      block: blockNum,
+      t: trialNum,
+      pc: truePc,
+      octave: parseInt(currentNote.slice(-1)),
+      isOOB: wasOOB,
+      detuneCents: Math.round(jitterInfo.jitter * 10) / 10,
+      probe: jitterInfo.isProbe,
+      anchor: jitterInfo.jitter === 0 && !wasOOB,
+      ok: response.correct
+    };
+    
+    // Update learner state for in-bounds trials
+    if (!wasOOB) {
+      updateLearnerSkills(truePc, response.correct, response.guess);
+      if (!response.correct && response.guess !== truePc) {
+        updateSimConfusionMatrix(truePc, response.guess);
+      }
+    }
+    
+    // Record in app state (simulate recordTrial call)
+    recordTrial(response.guess, response.correct, false, wasOOB);
+    
+    return trialData;
+  });
+}
+
+// Track simulation start time
+let simStartTime = 0;
+
+// Main simulation function
+window.runSimWeek = function(opts = {}) {
+  const days = opts.days ?? 7;
+  const seed = opts.seed ?? 1234;
+  const dailyBlocks = opts.dailyBlocks ?? SIM_DAILY_BLOCKS;
+  const trialsPerBlock = opts.trialsPerBlock ?? SIM_TRIALS_PER_BLOCK;
+  
+  // Initialize simulation
+  SIMULATING = true;
+  simRNG = mulberry32(seed);
+  simStartTime = Date.now();
+  
+  // Initialize learner model
+  initializeLearnerSkills();
+  initializeSimConfusionMatrix();
+  
+  // Data collection arrays
+  const perDayData = [];
+  const rawTrials = [];
+  const oobSeries = [];
+  
+  // Save original state
+  const originalState = JSON.parse(JSON.stringify(state));
+  
+  try {
+    // Run simulation for each day
+    for (let day = 1; day <= days; day++) {
+      // Reset daily counters but keep cross-day state
+      const dayStartMinutes = state.minutesToday || 0;
+      
+      let dayOobTrials = 0;
+      let dayOobCorrect = 0;
+      let dayOobMaxStreak = 0;
+      let dayCurrentStreak = 0;
+      let dayAnchors = 0;
+      let dayProbes = 0;
+      let dayJittered = 0;
+      let dayTotalTrials = 0;
+      
+      const octaveCounts = {
+        inBounds: { 3: 0, 4: 0, 5: 0 },
+        oob: { 3: 0, 4: 0, 5: 0 }
+      };
+      
+      // Simulate cold recall at start of day
+      const coldRecall = simulateRecall('cold');
+      
+      // Run daily blocks
+      for (let block = 1; block <= dailyBlocks; block++) {
+        for (let trial = 1; trial <= trialsPerBlock; trial++) {
+          const set = setFromIndex(state.levelIndex);
+          const trialData = simulateTrial(set, block, trial);
+          
+          // Collect statistics
+          dayTotalTrials++;
+          
+          if (trialData.isOOB) {
+            dayOobTrials++;
+            if (trialData.ok) dayOobCorrect++;
+            dayCurrentStreak = trialData.ok ? 0 : dayCurrentStreak + 1;
+            dayOobMaxStreak = Math.max(dayOobMaxStreak, dayCurrentStreak);
+            octaveCounts.oob[trialData.octave]++;
+          } else {
+            dayCurrentStreak = 0;
+            octaveCounts.inBounds[trialData.octave]++;
+            
+            if (trialData.anchor) dayAnchors++;
+            else if (trialData.probe) dayProbes++;
+            else if (trialData.detuneCents !== 0) dayJittered++;
+          }
+          
+          // Store recent trials (keep last 1000)
+          rawTrials.push(trialData);
+          if (rawTrials.length > 1000) {
+            rawTrials.shift();
+          }
+        }
+        
+        // Trigger block boundary logic every 3 blocks
+        if (block % 3 === 0) {
+          // Force OOB adaptation logic to run
+          const blockIndex = (day - 1) * dailyBlocks + block;
+          const currentOobRate = state.oobStats?.adaptiveRate ?? 0.18;
+          oobSeries.push({
+            block: blockIndex,
+            targetPct: Math.round(currentOobRate * 1000) / 10
+          });
+        }
+      }
+      
+      // Simulate warm recall at end of day
+      const warmRecall = simulateRecall('warm');
+      
+      // Calculate day statistics
+      const oobTargetPct = state.oobStats?.adaptiveRate ? 
+        Math.round(state.oobStats.adaptiveRate * 1000) / 10 : 18.0;
+      const oobObservedPct = dayOobTrials > 0 ? 
+        Math.round((dayOobTrials / dayTotalTrials) * 1000) / 10 : 0;
+      
+      const last60InBounds = state.trials
+        .filter(t => !t.oob)
+        .slice(-60);
+      const last60Acc = last60InBounds.length > 0 ? 
+        Math.round((last60InBounds.filter(t => t.correct).length / last60InBounds.length) * 1000) / 10 : 0;
+      
+      // Store per-day summary
+      perDayData.push({
+        day: day,
+        blocksDone: dailyBlocks,
+        oobTargetPct: oobTargetPct,
+        oobObservedPct: oobObservedPct,
+        oobMaxStreak: dayOobMaxStreak,
+        anchorsPct: dayTotalTrials > 0 ? Math.round((dayAnchors / dayTotalTrials) * 1000) / 10 : 0,
+        probesPct: dayTotalTrials > 0 ? Math.round((dayProbes / dayTotalTrials) * 1000) / 10 : 0,
+        jitterPct: dayTotalTrials > 0 ? Math.round((dayJittered / dayTotalTrials) * 1000) / 10 : 0,
+        octaveCounts: octaveCounts,
+        last60InBoundsAcc: last60Acc,
+        cold: coldRecall,
+        warm: warmRecall
+      });
+    }
+    
+    // Generate final summary statistics
+    const perPitchStats = {};
+    PC.forEach(pc => {
+      const pcTrials = rawTrials.filter(t => t.pc === pc && !t.isOOB);
+      if (pcTrials.length > 0) {
+        const anchors = pcTrials.filter(t => t.anchor).length;
+        const probes = pcTrials.filter(t => t.probe).length;
+        const jittered = pcTrials.filter(t => t.detuneCents !== 0 && !t.probe && !t.anchor).length;
+        const totalCents = pcTrials.reduce((sum, t) => sum + Math.abs(t.detuneCents), 0);
+        
+        perPitchStats[pc] = {
+          tones: pcTrials.length,
+          anchorsPercent: Math.round((anchors / pcTrials.length) * 1000) / 10,
+          probesPercent: Math.round((probes / pcTrials.length) * 1000) / 10,
+          jitterPercent: Math.round((jittered / pcTrials.length) * 1000) / 10,
+          meanAbsCents: Math.round((totalCents / pcTrials.length) * 10) / 10
+        };
+      }
+    });
+    
+    // Build final result
+    const result = {
+      days: days,
+      dailyBlocks: dailyBlocks,
+      trialsPerBlock: trialsPerBlock,
+      seed: seed,
+      perDay: perDayData,
+      confusionMatrix: simConfusionMatrix,
+      perPitch: perPitchStats,
+      oobSeries: oobSeries,
+      raw: {
+        trialsTail: rawTrials
+      }
+    };
+    
+    return result;
+    
+  } finally {
+    // Restore original state
+    Object.assign(state, originalState);
+    SIMULATING = false;
+    simRNG = null;
+  }
+};
+
+// Export simulation results to JSON file
+window.exportSimWeek = async function(opts) {
+  const results = await window.runSimWeek(opts);
+  const dateStr = new Date().toISOString().slice(0, 10);
+  const filename = `sim_week_${dateStr}.json`;
+  
+  const blob = new Blob([JSON.stringify(results, null, 2)], { 
+    type: 'application/json' 
+  });
+  
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  
+  setTimeout(() => URL.revokeObjectURL(a.href), 0);
+  
+  return results;
 };
 
 /* ------------------ INIT ------------------ */
