@@ -298,6 +298,7 @@
       <span class="pill" id="autoInfo">Auto-next: Off</span>
       <span class="pill" id="delayInfo">RT limit: 1183ms • Delay: 1000ms</span>
       <span class="pill" id="timerInfo">Time left: 30:00</span>
+      <span class="pill" id="chunkInfo">Training: 6:00 (1/6)</span>
       <span class="pill" id="jitterInfo" style="display:none;">Jitter: JL1</span>
       <span class="pill" id="octaveInfo" style="display:none;">Mix: 90/10</span>
     </div>
@@ -363,6 +364,7 @@
   <div id="flappyModal">
     <div class="card" style="text-align:center">
       <h3>🐤 Flappy Break</h3>
+      <p id="breakCountdown" style="display:none;font-size:16px;font-weight:bold;margin:8px 0;color:var(--accent);">Break ends in: 60s</p>
       <canvas id="flappyCanvas" width="320" height="480"></canvas>
       <div style="margin-top:8px">
         <button id="flappySoundToggle" style="display:none;margin-right:8px">🔊 Sound On</button>
@@ -2713,8 +2715,6 @@ function advanceCheck(){
     // Check if we're moving to a new set (new pitch introduced)
     if(newSet > oldSet && newSet <= UNLOCK_ORDER.length){
       showNewPitchModal(newSet);
-    } else {
-      startFlappyReward();
     }
   } else save();
 }
@@ -2810,6 +2810,15 @@ function startSessionTimer(){
     // Update timer display
     const left = Math.max(0, SESS_DAILY_MS - usedMs);
     text('timerInfo', `Time left: ${fmtMMSS(left)}`);
+    
+    // Update training chunk display
+    if(!state.inBreak) {
+      const chunkUsedMs = usedMs % BREAK_INTERVAL_MS;
+      const chunkLeft = Math.max(0, BREAK_INTERVAL_MS - chunkUsedMs);
+      const currentChunk = Math.floor(usedMs / BREAK_INTERVAL_MS) + 1;
+      const totalChunks = Math.ceil(SESS_DAILY_MS / BREAK_INTERVAL_MS);
+      text('chunkInfo', `Training: ${fmtMMSS(chunkLeft)} (${currentChunk}/${totalChunks})`);
+    }
     
   }, 1000); // Update every second
 }
@@ -3193,6 +3202,10 @@ function triggerMandatoryBreak(){
   state.sessionBreakTime = Date.now() + BREAK_INTERVAL_MS;
   save();
   
+  // Hide training chunk display during break
+  const chunkEl = byId('chunkInfo');
+  if(chunkEl) chunkEl.textContent = 'Break in progress...';
+  
   // Show Flappy with lockout sound (always enabled during mandatory breaks)
   openMandatoryBreakFlappy();
 }
@@ -3225,8 +3238,32 @@ function openMandatoryBreakFlappy(){
 }
 
 function startBreakTimer(){
+  // Show countdown display
+  const countdownEl = byId('breakCountdown');
+  if(countdownEl) countdownEl.style.display = 'block';
+  
+  const startTime = Date.now();
+  
+  // Update countdown every second
+  const countdownInterval = setInterval(() => {
+    const elapsed = Date.now() - startTime;
+    const remaining = Math.max(0, BREAK_DURATION_MS - elapsed);
+    const seconds = Math.ceil(remaining / 1000);
+    
+    if(countdownEl) {
+      countdownEl.textContent = `Break ends in: ${seconds}s`;
+    }
+    
+    if(remaining <= 0) {
+      clearInterval(countdownInterval);
+    }
+  }, 1000);
+  
   // Force close after 60 seconds minimum, but allow game to continue if in progress
   setTimeout(() => {
+    clearInterval(countdownInterval);
+    if(countdownEl) countdownEl.style.display = 'none';
+    
     if(state.inBreak) {
       // Check if user is still playing - if so, let them finish their current game
       if(running && bird && bird.y > 0 && bird.y < byId('flappyCanvas')?.height) {
@@ -3260,6 +3297,10 @@ function endMandatoryBreak(){
   // Reset modal title
   const modalTitle = byId('flappyModal').querySelector('h3');
   if(modalTitle) modalTitle.textContent = '🐤 Flappy Break';
+  
+  // Hide break countdown
+  const countdownEl = byId('breakCountdown');
+  if(countdownEl) countdownEl.style.display = 'none';
   
   // End break state and schedule next break
   state.inBreak = false;
