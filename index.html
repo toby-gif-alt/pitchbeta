@@ -31,8 +31,7 @@
   #feedbackOverlay{position:fixed;inset:0;display:none;align-items:center;justify-content:center;pointer-events:none}
   #feedbackBox{min-width:240px;text-align:center;padding:16px 18px;border-radius:14px;font-weight:700;font-size:20px;box-shadow:0 20px 60px rgba(0,0,0,.35);transform:scale(.9);opacity:0;transition:transform .15s,opacity .15s}
   #feedbackOverlay.show #feedbackBox{transform:scale(1.05);opacity:1}
-  #shepardOverlay{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;z-index:60}
-  #shepardBox{background:var(--card);border:1px solid var(--muted);padding:20px 24px;border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,.35);text-align:center}
+
   #bootError{display:none;position:fixed;left:12px;right:12px;bottom:12px;background:var(--bad);color:var(--text);padding:10px 12px;border-radius:10px;box-shadow:0 4px 18px rgba(0,0,0,.35);z-index:9999;font:13px/1.35 system-ui,sans-serif;white-space:pre-wrap}
 
   /* Flappy */
@@ -110,7 +109,7 @@
           <ul>
             <li>Train for <strong>30 minutes</strong> (timer runs only while actively training).</li>
             <li>Breaks happen every <strong>6 minutes</strong> for 60 seconds with Flappy.</li>
-            <li>Menus, Flappy, and the 20-s <strong>Shepard tone</strong> don’t count.</li>
+            <li>Menus and Flappy don't count toward training time.</li>
             <li>Blocks <strong>1–20</strong> with feedback; <strong>21–24</strong> are tests (no feedback).</li>
           </ul>
         </div>
@@ -338,14 +337,7 @@
   <!-- Feedback -->
   <div id="feedbackOverlay"><div id="feedbackBox"></div></div>
 
-  <!-- Shepard overlay -->
-  <div id="shepardOverlay">
-    <div id="shepardBox">
-      <h3>🔇 Memory reset</h3>
-      <p>Playing a 20-second Shepard tone…</p>
-      <p id="shepardCountdown">20</p>
-    </div>
-  </div>
+
 
   <!-- Flappy -->
   <div id="flappyModal">
@@ -596,7 +588,6 @@ try{
     userName:null,
     levelIndex:1,
     levelTrials:0, levelCorrect:0,
-    shepardDoneFor:-1,
     sessions:[], trials:[],
     startDate:null, lockoutUntil:null, capResetAt:null,
     testFailStreak:0, suggestShownSet:null,
@@ -621,7 +612,7 @@ try{
     varietyModeEnabled: false // Timbre variety mode
   };
 } catch(e){
-  state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO };
+  state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO };
 }
 // Migration for audioType
 if (!state.audioType) {
@@ -897,30 +888,6 @@ async function playFlappySound(){
     const t = ctx.currentTime;
     src.start(t);
   }catch(_e){}
-}
-
-/* ------------------ Shepard (pauses) ------------------ */
-let shepRunning=false;
-async function playShepard20s(){
-  const wasActive = sessionActive && !paused;
-  if(wasActive) pauseStart('shepard');
-  await resumeCtx();
-  const overlay=byId('shepardOverlay'), counterEl=byId('shepardCountdown');
-  if(!overlay||!counterEl) return;
-  overlay.style.display='flex'; shepRunning=true;
-  const ctx=getCtx(); const oscillators=[]; const partials=8, base=55, dur=20; const now=ctx.currentTime;
-  for(let i=0;i<partials;i++){
-    const osc=ctx.createOscillator(); const g=ctx.createGain(); const f=base*Math.pow(2,i);
-    osc.type='sine'; osc.frequency.setValueAtTime(f, now); osc.frequency.exponentialRampToValueAtTime(f/2, now+dur);
-    const amp=Math.exp(-Math.pow((i-(partials-1)/2)/2,2)); g.gain.setValueAtTime(0.05*amp, now);
-    osc.connect(g).connect(ctx.destination); oscillators.push(osc);
-  }
-  oscillators.forEach(o=>o.start(now)); oscillators.forEach(o=>o.stop(now+dur));
-  let left=20; counterEl.textContent=left;
-  const id=setInterval(()=>{ left--; counterEl.textContent=left; if(left<=0) clearInterval(id); },1000);
-  await new Promise(r=>setTimeout(r,dur*1000));
-  overlay.style.display='none'; shepRunning=false;
-  if(wasActive){ pauseEnd(); safe('btnPause', el=> el.textContent='⏸ Pause'); }
 }
 
 /* ------------------ PITCH RECALL SYSTEM ------------------ */
@@ -1295,16 +1262,6 @@ function paintNotes(){
     el.style.display = set>=12 ? 'none' : 'block';
     el.onclick = ()=> chooseOOB();
   });
-}
-
-/* Shepard gating for tests */
-function maybeRunShepard(){
-  const blk=blockFromIndex(state.levelIndex);
-  if(!blockHasFeedback(blk) && state.shepardDoneFor!==state.levelIndex){
-    state.shepardDoneFor=state.levelIndex; save();
-    return playShepard20s();
-  }
-  return Promise.resolve();
 }
 
 /* ---------- Specials at BLOCK 15 (weakest from last 15 blocks) ---------- */
@@ -1724,7 +1681,7 @@ function drawTrackerChart() {
 
 /* -------- Normal trials -------- */
 function guess(pc){
-  if(!sessionActive || paused || shepRunning || special) return;
+  if(!sessionActive || paused || special) return;
   if(!currentNote){ return; }
   if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
   const ok = (!isOOBTrial && pc === truePc);
@@ -1735,7 +1692,7 @@ function guess(pc){
   scheduleAuto();
 }
 function chooseOOB(){
-  if(!sessionActive || paused || shepRunning || special) return;
+  if(!sessionActive || paused || special) return;
   if(!currentNote) return;
   if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
   const ok = isOOBTrial;
@@ -1748,9 +1705,9 @@ function chooseOOB(){
 }
 
 /* Driving */
-function scheduleAuto(){ if(autoTimer){ clearTimeout(autoTimer); autoTimer=null; } if(autoNext && sessionActive && !paused && !shepRunning && !special){ autoTimer = setTimeout(()=> nextTrial(true), delayMs); } }
+function scheduleAuto(){ if(autoTimer){ clearTimeout(autoTimer); autoTimer=null; } if(autoNext && sessionActive && !paused && !special){ autoTimer = setTimeout(()=> nextTrial(true), delayMs); } }
 async function nextTrial(forceNew=false){
-  if(!sessionActive || paused || shepRunning || special) return;
+  if(!sessionActive || paused || special) return;
   if(inFlightTrial) return;
 
   /* clear the one-shot strict suppression as soon as normal play resumes */
@@ -1761,7 +1718,6 @@ async function nextTrial(forceNew=false){
   inFlightTrial=true;
   try{
     await resumeCtx();
-    await maybeRunShepard();
     if(paused || !sessionActive || special) return;
     if(!currentNote || forceNew){
       const set = setFromIndex(state.levelIndex);
@@ -1797,7 +1753,7 @@ function restartCurrentSet(){
   const set = setFromIndex(state.levelIndex);
   state.levelIndex = (set-1)*LEVELS_PER_SET + 1;
   state.levelTrials = 0; state.levelCorrect = 0;
-  state.shepardDoneFor = -1; state.testFailStreak = 0;
+  state.testFailStreak = 0;
   state.suggestShownSet = null; save();
   updateLevelUI(); paintNotes();
   text('promptPill', `Restarted Set ${set}. Press Play to begin.`);
@@ -1866,7 +1822,7 @@ function advanceCheck(){
     if(state.levelFailCounts[key] >= 10){
       if(confirm('You’ve attempted this level 10+ times without passing. Drop to a lower level?')){
         if(state.levelIndex>1) state.levelIndex--;
-        state.levelTrials=0; state.levelCorrect=0; state.shepardDoneFor=-1;
+        state.levelTrials=0; state.levelCorrect=0;
         save(); updateLevelUI(); paintNotes();
         alert('Dropped one level. Keep going!');
         return;
@@ -2131,7 +2087,7 @@ function wireOnce(){
   });
   safe('applySetBtn', el=> el.onclick=()=>{
     const v = parseInt(byId('setSizeSelect')?.value||'1',10)||1;
-    state.levelIndex=(v-1)*LEVELS_PER_SET+1; state.levelTrials=0; state.levelCorrect=0; state.shepardDoneFor=-1; state.testFailStreak=0; suggestedRestartFlag=false; state.suggestShownSet=null; save();
+    state.levelIndex=(v-1)*LEVELS_PER_SET+1; state.levelTrials=0; state.levelCorrect=0; state.testFailStreak=0; suggestedRestartFlag=false; state.suggestShownSet=null; save();
     alert(`Scope set to ${v} ${v===1?'pitch':'pitches'} (Block 1/24)`); paintNotes();
   });
 
@@ -2506,7 +2462,7 @@ function forceStartScreen(){
   if(input){ input.value=''; input.focus(); }
 }
 function resetInMemoryStateToDefaults(){
-  state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null };
+  state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null };
   save();
 }
 function doFactoryReset(){
