@@ -176,6 +176,7 @@
       <button id="menuStart">▶ Start Training</button>
       <button id="startAssessment">📊 Assessment Test</button>
       <button id="viewTracker">📊 Track</button>
+      <button id="exportData">📤 Export Data</button>
       <button id="playFlappy">🐤 Flappy (lockout only)</button>
       <button id="resetLockout">⚡ Reset lockout/timer</button>
       <button id="menuReset">⟲ Reset (factory)</button>
@@ -577,23 +578,73 @@ const THRESH_24=[0.20,0.25,0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.60,0.65,0.70,0.7
 function blockHasFeedback(block){ return block<=20; }
 function rtWindowForSet(n){const a=1183,b=2028;return Math.round(a+(n-1)*(b-a)/11);}
 /* ------------------ ENHANCED OOB SYSTEM ------------------ */
-// B) OOB GENERATION = BERNOULLI PER TRIAL + ≤2 STREAK (no adaptation here)
+// B) OOB GENERATION = BERNOULLI PER TRIAL + ≤2 STREAK with 3-block cadence adaptation
 function shouldGenerateOOB(set) {
   const oobs = currentOOBs(set);
   if (oobs.length === 0) return false;
   
-  const rate = state.oobStats.adaptiveRate ?? 0.18;
+  const rate = getAdaptiveOOBTarget();
   const canOOB = (state.oobStats.streakCount || 0) < (state.oobStats.maxInRow || 2);
   
-  // Check if health check is active and reduce rate
-  let effectiveRate = rate;
-  if (state.oobStats.healthCheckActive) {
-    effectiveRate = Math.min(rate, 0.12);
-  }
-  
-  const isOOB = canOOB && Math.random() < effectiveRate;
+  const isOOB = canOOB && Math.random() < rate;
   state.oobStats.streakCount = isOOB ? (state.oobStats.streakCount + 1) : 0;
   return isOOB;
+}
+
+// Get current OOB target rate with 3-block cadence adaptation
+function getAdaptiveOOBTarget() {
+  const currentBlock = blockFromIndex(state.levelIndex);
+  
+  // Check if we need to adapt (every 3 blocks)
+  if (currentBlock % 3 === 1) {
+    adaptOOBTarget();
+  }
+  
+  return state.oobStats.targetRate ?? 0.18;
+}
+
+// Adapt OOB target every 3 blocks based on last 60 in-bounds trials
+function adaptOOBTarget() {
+  // Get last 60 graded in-bounds trials
+  const last60InBounds = state.trials
+    .filter(t => !t.oob && t.correct !== undefined)
+    .slice(-60);
+  
+  if (last60InBounds.length < 30) {
+    // Not enough data, keep current rate
+    return;
+  }
+  
+  const observedAcc = last60InBounds.filter(t => t.correct).length / last60InBounds.length;
+  const observedAcc60 = Math.round(observedAcc * 100);
+  
+  let newTarget = state.oobStats.targetRate ?? 0.18;
+  let reason = 'no-change';
+  
+  // Target policy: nudge toward 70-85% overall accuracy using ±3pp steps
+  if (observedAcc60 < 70) {
+    newTarget = Math.max(0.05, newTarget - 0.03); // Decrease OOB rate to make easier
+    reason = 'accuracy-too-low';
+  } else if (observedAcc60 > 85) {
+    newTarget = Math.min(0.35, newTarget + 0.03); // Increase OOB rate to make harder
+    reason = 'accuracy-too-high';
+  }
+  
+  // Clamp to 5-35% range
+  newTarget = Math.max(0.05, Math.min(0.35, newTarget));
+  
+  // Record the adaptation in oobSeries
+  if (!state.oobSeries) state.oobSeries = [];
+  state.oobSeries.push({
+    blockIndex: state.levelIndex,
+    observedAcc60: observedAcc60,
+    newTarget: Math.round(newTarget * 100),
+    reason: reason,
+    timestamp: Date.now()
+  });
+  
+  state.oobStats.targetRate = newTarget;
+  save();
 }
 
 function recordOOBTrial(wasOOB, correct) {
@@ -799,6 +850,8 @@ if (state.sessionBreakTime === undefined) {
   state.confusionMatrix = {};
   state.noteStats = {};
   state.varietyModeEnabled = false;
+  state.octaveWindowMetrics = [];
+  state.weightsTrace = [];
   save();
 }
 
@@ -807,8 +860,9 @@ state.oobStats ??= {};
 state.oobStats.oobTrials ??= [];
 state.oobStats.recentTrials ??= [];   // in-bounds only, 1/0
 state.oobStats.streakCount ??= 0;     // generation streak
-if (typeof state.oobStats.adaptiveRate !== 'number') state.oobStats.adaptiveRate = 0.18; // 18%
+if (typeof state.oobStats.targetRate !== 'number') state.oobStats.targetRate = 0.18; // 18%
 state.oobStats.maxInRow = 2;          // streak cap
+state.oobSeries ??= [];               // OOB adaptation log
 save();
 
 // Apply theme on load
@@ -1091,24 +1145,27 @@ async function playFlappySound(){
 const JITTER_LEVELS = {
   JL0: { // Onboarding (new pitch or new timbre)
     jitterRange: [-8, 8], // ±3-8¢
-    probeRate: 0.02, // 0-3%
+    probeRate: 0.08, // Raised to ~8% (bounded by global 10%)
     probeRange: [-30, 30], // ±25-40¢
+    anchorRate: 0.08, // 8% anchors (0¢)
     promoteAcc: 0.75,
     promoteMedian: 20,
     trials: 40
   },
   JL1: { // Early stable
     jitterRange: [-10, 10], // ±5-10¢
-    probeRate: 0.05, // ~5%
+    probeRate: 0.09, // Raised to ~9%
     probeRange: [-35, 35],
+    anchorRate: 0.06, // 6% anchors (0¢)
     promoteAcc: 0.80,
     promoteMedian: 15,
     trials: 40
   },
   JL2: { // Mid stable
     jitterRange: [-15, 15], // ±5-15¢
-    probeRate: 0.08, // ~8%
+    probeRate: 0.10, // Raised to ~10%
     probeRange: [-40, 40],
+    anchorRate: 0.04, // 4% anchors (0¢)
     promoteAcc: 0.90,
     promoteMedian: 10,
     promoteSD: 15,
@@ -1116,8 +1173,9 @@ const JITTER_LEVELS = {
   },
   JL3: { // Mature
     jitterRange: [-15, 15], // ±5-15¢ (global default)
-    probeRate: 0.11, // ~10-12%
+    probeRate: 0.12, // Raised to ~12% (bounded by global ~10%)
     probeRange: [-40, 40],
+    anchorRate: 0.02, // 2% anchors (0¢)
     demoteAcc: 0.75,
     demoteMedian: 25,
     demoteSD: 30,
@@ -1244,6 +1302,112 @@ function shouldUseProbe(note) {
 function selectInBoundsNote(usableNotes) {
   if (usableNotes.length === 0) return 'F'; // Fallback
   
+  // Use new weight calculation system
+  const weights = calculateSelectionWeights(usableNotes);
+  
+  // Weighted random selection
+  const totalWeight = Object.values(weights).reduce((a, b) => a + b, 0);
+  let random = Math.random() * totalWeight;
+  
+  let selectedNote = null;
+  for (const [note, weight] of Object.entries(weights)) {
+    random -= weight;
+    if (random <= 0) {
+      selectedNote = note;
+      break;
+    }
+  }
+  
+  if (!selectedNote) {
+    selectedNote = rand(usableNotes); // Fallback to random
+  }
+  
+  // Log weights trace before each block
+  logWeightsTrace(usableNotes, selectedNote);
+  
+  return selectedNote;
+}
+
+/* ------------------ CONFUSION MATRIX & SCHEDULING ------------------ */
+function updateConfusionMatrix(truePc, guessPc) {
+  if (!state.confusionMatrix) {
+    // Initialize 12x12 matrix
+    state.confusionMatrix = {};
+    PC.forEach(pc1 => {
+      state.confusionMatrix[pc1] = {};
+      PC.forEach(pc2 => {
+        state.confusionMatrix[pc1][pc2] = 0;
+      });
+    });
+  }
+  
+  // Update the matrix
+  if (state.confusionMatrix[truePc] && state.confusionMatrix[truePc][guessPc] !== undefined) {
+    state.confusionMatrix[truePc][guessPc]++;
+  }
+}
+
+function getConfusionPairs() {
+  // Return the most confused note pairs for targeted training
+  if (!state.confusionMatrix) return [];
+  
+  const pairs = [];
+  PC.forEach(truePc => {
+    PC.forEach(guessPc => {
+      if (truePc !== guessPc && state.confusionMatrix[truePc] && state.confusionMatrix[truePc][guessPc] > 0) {
+        pairs.push({
+          truePc,
+          guessPc,
+          count: state.confusionMatrix[truePc][guessPc]
+        });
+      }
+    });
+  });
+  
+  return pairs.sort((a, b) => b.count - a.count).slice(0, 3); // Top 3 confusion pairs
+}
+
+// Log selection weights before each block
+function logWeightsTrace(usableNotes, selectedNote) {
+  const currentBlock = blockFromIndex(state.levelIndex);
+  
+  if (!state.weightsTrace) state.weightsTrace = [];
+  
+  // Calculate weights for this selection
+  const weights = calculateSelectionWeights(usableNotes);
+  
+  // Get top 3 notes by weight
+  const sortedWeights = Object.entries(weights)
+    .sort(([,a], [,b]) => b - a)
+    .slice(0, 3);
+  
+  // Determine reason for selection
+  let reason = 'random';
+  const weakNotes = getWeakNotes().map(w => w.note);
+  const confusionPairs = getConfusionPairs();
+  
+  if (weakNotes.includes(selectedNote)) {
+    reason = 'weak-note';
+  } else if (confusionPairs.some(p => p.truePc === selectedNote)) {
+    reason = 'confusion-target';
+  }
+  
+  state.weightsTrace.push({
+    block: currentBlock,
+    set: setFromIndex(state.levelIndex),
+    selectedNote: selectedNote,
+    topWeights: sortedWeights.map(([note, weight]) => ({
+      note,
+      weight: Math.round(weight * 100) / 100
+    })),
+    reason: reason,
+    timestamp: Date.now()
+  });
+}
+
+function calculateSelectionWeights(usableNotes) {
+  if (usableNotes.length === 0) return {};
+  
   // Get weak notes and confusion pairs
   const weakNotes = getWeakNotes().map(w => w.note);
   const confusionPairs = getConfusionPairs();
@@ -1260,51 +1424,18 @@ function selectInBoundsNote(usableNotes) {
   // Boost weight for weak notes
   weakNotes.forEach(note => {
     if (weights[note] !== undefined) {
-      weights[note] += 2; // Extra weight for weak notes
+      weights[note] += 2; // +2 weight for weak notes
     }
   });
   
   // Boost weight for notes in top confusion pairs
-  confusionPairs.slice(0, 2).forEach(pair => {
+  confusionPairs.forEach(pair => {
     if (weights[pair.truePc] !== undefined) {
-      weights[pair.truePc] += 1.5; // Extra weight for confused notes
+      weights[pair.truePc] += 1.5; // +1.5 weight for confusion targets
     }
   });
   
-  // Weighted random selection
-  const totalWeight = Object.values(weights).reduce((a, b) => a + b, 0);
-  let random = Math.random() * totalWeight;
-  
-  for (const [note, weight] of Object.entries(weights)) {
-    random -= weight;
-    if (random <= 0) {
-      return note;
-    }
-  }
-  
-  return rand(usableNotes); // Fallback to random
-}
-
-/* ------------------ CONFUSION MATRIX & SCHEDULING ------------------ */
-function updateConfusionMatrix(truePc, guessPc) {
-  if (!state.confusionMatrix) state.confusionMatrix = {};
-  
-  const key = `${truePc}->${guessPc}`;
-  state.confusionMatrix[key] = (state.confusionMatrix[key] || 0) + 1;
-}
-
-function getConfusionPairs() {
-  // Return the most confused note pairs for targeted training
-  if (!state.confusionMatrix) return [];
-  
-  const pairs = Object.entries(state.confusionMatrix)
-    .map(([key, count]) => {
-      const [truePc, guessPc] = key.split('->');
-      return { truePc, guessPc, count };
-    })
-    .sort((a, b) => b.count - a.count);
-  
-  return pairs.slice(0, 3); // Top 3 confusion pairs
+  return weights;
 }
 
 function getWeakNotes() {
@@ -1908,6 +2039,24 @@ function selectOctaveForNote(note) {
   const centerOctave = stats.centerOctave;
   const neighbors = octaves.filter(o => o !== centerOctave);
   
+  // Enforce early distribution: Trials 1-12 = 90% center / 10% neighbors
+  const currentSet = setFromIndex(state.levelIndex);
+  const setTrials = stats.setTrials.filter(t => t.set === currentSet);
+  const trialNum = setTrials.length + 1; // Next trial number
+  
+  let centerWeight, neighborWeight;
+  
+  if (trialNum <= 12) {
+    // Early distribution: 90% center / 10% neighbors
+    centerWeight = 0.90;
+    neighborWeight = 0.10;
+  } else {
+    // Use adaptive mixing based on performance
+    const mix = stats.currentMix;
+    centerWeight = mix.center;
+    neighborWeight = mix.neighbors;
+  }
+  
   // Check for per-note override (weak notes get more center)
   const noteStats = state.noteStats?.[note];
   let centerBoost = 0;
@@ -1915,18 +2064,12 @@ function selectOctaveForNote(note) {
     centerBoost = 0.20; // +20% center for weak notes
   }
   
-  const centerProb = Math.min(0.95, stats.currentMix.center + centerBoost);
-  const neighborProb = 1 - centerProb;
+  const finalCenterWeight = Math.min(0.95, centerWeight + centerBoost);
   
-  // ~10% surprise checks (count within neighbor share)
-  const surpriseCheck = Math.random() < 0.10;
+  // Select octave based on weights
+  const selectedOctave = Math.random() < finalCenterWeight ? centerOctave : rand(neighbors);
   
-  if (Math.random() < centerProb && !surpriseCheck) {
-    return centerOctave;
-  } else {
-    // Select from neighbors, including surprise checks
-    return rand(neighbors);
-  }
+  return selectedOctave;
 }
 
 function updateOctaveMixing(trialData) {
@@ -1967,8 +2110,43 @@ function checkOctaveStep(startTrial, endTrial, windowKey) {
   const errors = windowTrials.map(t => Math.abs(t.jitter?.jitter || 0));
   const medianError = errors.sort((a, b) => a - b)[Math.floor(errors.length / 2)];
   
-  const windowData = { accuracy, medianError, trials: windowTrials.length };
+  // Calculate standard deviation
+  const mean = errors.reduce((a, b) => a + b, 0) / errors.length;
+  const variance = errors.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / errors.length;
+  const stdDev = Math.sqrt(variance);
+  
+  // Calculate chosen mix for this window
+  const centerCount = windowTrials.filter(t => {
+    const noteOctave = parseInt(t.note?.slice(-1));
+    return noteOctave === stats.centerOctave;
+  }).length;
+  const chosenMix = {
+    center: centerCount / windowTrials.length,
+    neighbors: 1 - (centerCount / windowTrials.length)
+  };
+  
+  const windowData = { 
+    accuracy: Math.round(accuracy * 100), 
+    medianCents: Math.round(medianError * 10) / 10,
+    sdCents: Math.round(stdDev * 10) / 10,
+    trials: windowTrials.length,
+    chosenMix: {
+      center: Math.round(chosenMix.center * 100),
+      neighbors: Math.round(chosenMix.neighbors * 100)
+    },
+    windowRange: `${startTrial}-${endTrial}`,
+    timestamp: Date.now()
+  };
+  
   stats.performanceWindows[windowKey] = windowData;
+  
+  // Log to octaveWindowMetrics
+  if (!state.octaveWindowMetrics) state.octaveWindowMetrics = [];
+  state.octaveWindowMetrics.push({
+    set: setFromIndex(state.levelIndex),
+    window: windowKey,
+    ...windowData
+  });
   
   // Apply stepping rules
   if (windowKey === 'window8_12') {
@@ -2545,20 +2723,41 @@ async function nextTrial(forceNew=false){
     // Apply jitter system for in-bounds trials only
     let appliedJitter = 0;
     let isProbe = false;
+    let isAnchor = false;
     if (!isOOBTrial) {
       // Initialize jitter level for this note if needed
       initializeJitterLevel(truePc);
       
-      // Check if this should be a boundary probe
-      isProbe = shouldUseProbe(truePc);
+      // Global probe rate limiting (~10%)
+      const globalProbeRate = 0.10;
+      const shouldProbe = Math.random() < globalProbeRate;
       
-      // Calculate jitter/probe amount
-      appliedJitter = calculateJitter(truePc, isProbe);
+      if (shouldProbe) {
+        // Check if this should be a boundary probe or 0¢ anchor
+        const level = state.jitterLevels[truePc];
+        const config = JITTER_LEVELS[level];
+        
+        // Decide between probe and anchor based on rates
+        const totalSpecialRate = config.probeRate + (config.anchorRate || 0);
+        const anchorProbability = (config.anchorRate || 0) / totalSpecialRate;
+        
+        if (Math.random() < anchorProbability) {
+          isAnchor = true;
+          appliedJitter = 0; // 0¢ anchor
+        } else {
+          isProbe = true;
+          appliedJitter = calculateJitter(truePc, true); // Boundary probe
+        }
+      } else {
+        // Regular jitter
+        appliedJitter = calculateJitter(truePc, false);
+      }
       
       // Store jitter info for this trial
       currentTrialJitter = {
         jitter: appliedJitter,
         isProbe: isProbe,
+        isAnchor: isAnchor,
         level: state.jitterLevels[truePc]
       };
     } else {
@@ -2566,6 +2765,7 @@ async function nextTrial(forceNew=false){
       currentTrialJitter = {
         jitter: 0,
         isProbe: false,
+        isAnchor: false,
         level: null
       };
     }
@@ -3051,6 +3251,7 @@ function wireOnce(){
   safe('menuStart',   el=> el.onclick=()=> startSession());
   safe('startAssessment', el=> el.onclick=()=> startAssessment());
   safe('viewTracker', el=> el.onclick=()=> showTracker());
+  safe('exportData',  el=> el.onclick=()=> exportTrainingData());
   safe('playFlappy',  el=> el.onclick=()=> openFlappyFromMenu());
   safe('resetLockout',el=> el.onclick=()=>{
     if(!confirm('Reset lockout/timer now? This starts a fresh 30-minute window immediately.')) return;
@@ -4113,6 +4314,164 @@ window.exportSimWeek = async function(opts) {
 console.log('Dev functions available:');
 console.log('- runSimWeek:', typeof window.runSimWeek === 'function' ? 'available' : 'NOT AVAILABLE');
 console.log('- exportSimWeek:', typeof window.exportSimWeek === 'function' ? 'available' : 'NOT AVAILABLE');
+
+/* ------------------ EXPORT FOR QA ------------------ */
+function exportTrainingData() {
+  try {
+    // Generate comprehensive export data
+    const exportData = {
+      // Basic info
+      userName: state.userName,
+      startDate: state.startDate,
+      exportDate: Date.now(),
+      
+      // Calculate days since start
+      days: state.startDate ? Math.floor((Date.now() - state.startDate) / (24 * 60 * 60 * 1000)) + 1 : 0,
+      
+      // Per-day aggregated data
+      perDay: generatePerDayData(),
+      
+      // OOB adaptation series
+      oobSeries: state.oobSeries || [],
+      
+      // Octave window metrics
+      octaveWindowMetrics: state.octaveWindowMetrics || [],
+      
+      // Per-pitch statistics
+      perPitch: generatePerPitchStats(),
+      
+      // 12x12 confusion matrix
+      confusionMatrix: state.confusionMatrix || {},
+      
+      // Selection weights trace
+      weightsTrace: state.weightsTrace || [],
+      
+      // Cold/warm recall results
+      recall: state.recallResults || [],
+      
+      // Assessment scores
+      assessmentScores: state.assessmentScores || [],
+      
+      // Raw trial data (last 1000 trials for QA)
+      rawTrials: state.trials ? state.trials.slice(-1000) : []
+    };
+    
+    // Create downloadable file
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { 
+      type: 'application/json' 
+    });
+    
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const filename = `pitch_training_${state.userName}_${dateStr}.json`;
+    
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    
+    setTimeout(() => URL.revokeObjectURL(a.href), 0);
+    
+    alert(`Data exported successfully as ${filename}`);
+    
+  } catch (error) {
+    alert(`Export failed: ${error.message}`);
+    report(error);
+  }
+}
+
+function generatePerDayData() {
+  if (!state.trials || !state.startDate) return [];
+  
+  const perDayData = [];
+  const startDay = dateAtMidnight(state.startDate);
+  const today = dateAtMidnight(Date.now());
+  
+  for (let day = 0; day <= 6; day++) { // Week 1 (first 7 days)
+    const dayStart = startDay + (day * 24 * 60 * 60 * 1000);
+    const dayEnd = dayStart + (24 * 60 * 60 * 1000);
+    
+    if (dayStart > today) break; // Future day
+    
+    const dayTrials = state.trials.filter(t => 
+      t.time >= dayStart && t.time < dayEnd
+    );
+    
+    const inBoundsTrials = dayTrials.filter(t => !t.oob);
+    const oobTrials = dayTrials.filter(t => t.oob);
+    const probeTrials = dayTrials.filter(t => t.jitter && t.jitter.isProbe);
+    const anchorTrials = dayTrials.filter(t => t.jitter && t.jitter.isAnchor);
+    
+    // Calculate octave distribution
+    const octaveCounts = {
+      inBounds: { 3: 0, 4: 0, 5: 0 },
+      oob: { 3: 0, 4: 0, 5: 0 }
+    };
+    
+    dayTrials.forEach(t => {
+      if (t.note) {
+        const octave = parseInt(t.note.slice(-1));
+        if (octave >= 3 && octave <= 5) {
+          if (t.oob) {
+            octaveCounts.oob[octave]++;
+          } else {
+            octaveCounts.inBounds[octave]++;
+          }
+        }
+      }
+    });
+    
+    // Get recall data for this day
+    const dayRecalls = state.recallResults.filter(r => 
+      dateAtMidnight(r.date) === dayStart
+    );
+    const coldRecall = dayRecalls.find(r => r.type === 'cold');
+    const warmRecall = dayRecalls.find(r => r.type === 'warm');
+    
+    perDayData.push({
+      day: day + 1,
+      date: dayStart,
+      totalTrials: dayTrials.length,
+      inBoundsTrials: inBoundsTrials.length,
+      oobTrials: oobTrials.length,
+      probesPct: dayTrials.length > 0 ? Math.round((probeTrials.length / dayTrials.length) * 100 * 10) / 10 : 0,
+      anchorsPct: dayTrials.length > 0 ? Math.round((anchorTrials.length / dayTrials.length) * 100 * 10) / 10 : 0,
+      octaveCounts: octaveCounts,
+      cold: coldRecall || null,
+      warm: warmRecall || null
+    });
+  }
+  
+  return perDayData;
+}
+
+function generatePerPitchStats() {
+  const perPitchStats = {};
+  
+  PC.forEach(pc => {
+    const pcTrials = state.trials.filter(t => t.pc === pc && !t.oob);
+    if (pcTrials.length === 0) return;
+    
+    const probeTrials = pcTrials.filter(t => t.jitter && t.jitter.isProbe);
+    const anchorTrials = pcTrials.filter(t => t.jitter && t.jitter.isAnchor);
+    const jitteredTrials = pcTrials.filter(t => t.jitter && t.jitter.jitter !== 0 && !t.jitter.isProbe && !t.jitter.isAnchor);
+    
+    const centsErrors = pcTrials.map(t => Math.abs(t.jitter?.jitter || 0));
+    const medianCents = centsErrors.length > 0 ? 
+      centsErrors.sort((a, b) => a - b)[Math.floor(centsErrors.length / 2)] : 0;
+    
+    perPitchStats[pc] = {
+      totalTrials: pcTrials.length,
+      accuracy: pcTrials.length > 0 ? pcTrials.filter(t => t.correct).length / pcTrials.length : 0,
+      probesPct: Math.round((probeTrials.length / pcTrials.length) * 100 * 10) / 10,
+      anchorsPct: Math.round((anchorTrials.length / pcTrials.length) * 100 * 10) / 10,
+      jitteredPct: Math.round((jitteredTrials.length / pcTrials.length) * 100 * 10) / 10,
+      medianCents: Math.round(medianCents * 10) / 10,
+      currentJitterLevel: state.jitterLevels?.[pc] || 'JL0'
+    };
+  });
+  
+  return perPitchStats;
+}
 
 /* ------------------ INIT ------------------ */
 window.addEventListener('load', wireOnce);
