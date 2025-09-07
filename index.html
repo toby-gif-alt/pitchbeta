@@ -108,18 +108,18 @@
         <div class="tPage" id="tPage2">
           <h3>⏱ Daily session</h3>
           <ul>
-            <li>Train for <strong>20 minutes</strong> (timer runs only while actively training).</li>
-            <li>Menus, Flappy, and the 20-s <strong>Shepard tone</strong> don’t count.</li>
+            <li>Train for <strong>30 minutes</strong> as 5×6-minute blocks with 60s breaks.</li>
+            <li>Cold/Warm Pitch Recall before/after training (doesn't count toward timer).</li>
             <li>Blocks <strong>1–20</strong> with feedback; <strong>21–24</strong> are tests (no feedback).</li>
           </ul>
         </div>
         <div class="tPage" id="tPage3">
           <h3>🎹 Octaves (per study)</h3>
           <ul>
-            <li>Training tones span <strong>three octaves</strong> and are randomized within blocks.</li>
-            <li><strong>Piano/Sine:</strong> C4–B6 • <strong>Guitar:</strong> C3–B5</li>
+            <li>Training tones span <strong>three octaves (3–5)</strong> and are randomized within blocks.</li>
+            <li><strong>All audio types:</strong> C3–B5 (center octave 4)</li>
             <li>This encourages learning the <em>chroma</em> (pitch class), not just pitch height.</li>
-            <li>Tone length: <strong>800 ms</strong>.</li>
+            <li>Tone length: <strong>800 ms</strong> (stationary, no glides).</li>
           </ul>
         </div>
         <div class="tPage" id="tPage4">
@@ -157,21 +157,134 @@
     </div>
   </div>
 
+  <!-- Break Screen -->
+  <div class="card screen" id="breakScreen">
+    <h1>🎯 Block Complete!</h1>
+    <div class="row">
+      <span class="pill" id="breakProgress">Block 1/5 complete</span>
+      <span class="pill" id="breakTimer">Break: 1:00</span>
+    </div>
+    <div class="row">
+      <button id="playFlappyBreak">🐤 Play Flappy</button>
+      <button id="muteFlappyBreak">🔊 Sound On</button>
+    </div>
+    <div style="margin-top:20px;text-align:center">
+      <p>Take a 60-second break! Flappy game available during break.</p>
+      <p id="breakInstructions">Break will end automatically, then you can continue training.</p>
+    </div>
+  </div>
+
+  <!-- Daily Complete Screen -->
+  <div class="card screen" id="dailyCompleteScreen">
+    <h1>✅ Great work!</h1>
+    <div class="row">
+      <span class="pill" id="dailyProgress">All 5 blocks complete</span>
+      <span class="pill" id="dailyTime">30 minutes trained</span>
+    </div>
+    <div class="row">
+      <button id="startWarmRecall">🎤 Warm Recall</button>
+      <button id="playFlappyDaily">🐤 Play Flappy</button>
+      <button id="backMenuDaily">↩ Menu</button>
+    </div>
+    <div style="margin-top:20px;text-align:center">
+      <p><strong>Training complete for today!</strong></p>
+      <p>Take the Warm Recall test or play Flappy. Come back tomorrow for more training.</p>
+    </div>
+  </div>
+
+  <!-- Cold Recall Screen -->
+  <div class="card screen" id="coldRecallScreen">
+    <h1>🎤 Cold Pitch Recall</h1>
+    <div class="row">
+      <span class="pill" id="coldRecallProgress">Note 1/3</span>
+      <button id="coldRecallSkip">Skip Cold Recall</button>
+    </div>
+    
+    <div style="margin:20px 0;text-align:center">
+      <p id="coldRecallPrompt">Hum the pitch: <strong>F</strong></p>
+      <div id="coldRecallFeedback" style="margin:10px 0">
+        <div id="pitchRuler" style="margin:10px 0;padding:10px;border:1px solid var(--muted);border-radius:8px;background:var(--card)">
+          <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:5px">
+            <span>A♭</span><span>A</span><span>A♯</span>
+          </div>
+          <div id="pitchNeedle" style="height:20px;background:var(--muted);border-radius:10px;position:relative">
+            <div id="needleIndicator" style="position:absolute;top:0;width:4px;height:20px;background:var(--accent);border-radius:2px;left:50%;transform:translateX(-50%)"></div>
+          </div>
+        </div>
+        <div id="pitchMetrics" style="font-size:14px;color:var(--text)">
+          <span id="currentHz">-- Hz</span> • 
+          <span id="currentCents">-- ¢</span>
+        </div>
+      </div>
+      <button id="startColdRecall">🎤 Start Recording</button>
+      <button id="nextColdRecall" style="display:none">Next Note ▶</button>
+    </div>
+    
+    <div id="coldRecallResults" style="display:none;margin-top:20px">
+      <h3>Cold Recall Results</h3>
+      <div id="coldRecallSummary"></div>
+      <button id="startTrainingFromCold">▶ Start Training</button>
+    </div>
+  </div>
+
+  <!-- Warm Recall Screen -->
+  <div class="card screen" id="warmRecallScreen">
+    <h1>🎤 Warm Pitch Recall</h1>
+    <div class="row">
+      <span class="pill" id="warmRecallProgress">Note 1/3</span>
+      <button id="warmRecallSkip">Skip Warm Recall</button>
+    </div>
+    
+    <div style="margin:20px 0;text-align:center">
+      <p id="warmRecallPrompt">Hum the pitch: <strong>F</strong></p>
+      <div id="warmRecallFeedback" style="margin:10px 0">
+        <div id="pitchRulerWarm" style="margin:10px 0;padding:10px;border:1px solid var(--muted);border-radius:8px;background:var(--card)">
+          <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:5px">
+            <span>A♭</span><span>A</span><span>A♯</span>
+          </div>
+          <div id="pitchNeedleWarm" style="height:20px;background:var(--muted);border-radius:10px;position:relative">
+            <div id="needleIndicatorWarm" style="position:absolute;top:0;width:4px;height:20px;background:var(--accent);border-radius:2px;left:50%;transform:translateX(-50%)"></div>
+          </div>
+        </div>
+        <div id="pitchMetricsWarm" style="font-size:14px;color:var(--text)">
+          <span id="currentHzWarm">-- Hz</span> • 
+          <span id="currentCentsWarm">-- ¢</span>
+        </div>
+      </div>
+      <button id="startWarmRecallMic">🎤 Start Recording</button>
+      <button id="nextWarmRecall" style="display:none">Next Note ▶</button>
+    </div>
+    
+    <div id="warmRecallResults" style="display:none;margin-top:20px">
+      <h3>Warm Recall Results</h3>
+      <div id="warmRecallSummary"></div>
+      <button id="backMenuFromWarm">↩ Menu</button>
+    </div>
+  </div>
+
   <!-- Menu -->
   <div class="card screen" id="menuScreen">
     <h1 id="greeting">Absolute Pitch Trainer</h1>
     <div class="row">
-      <span class="pill" id="capInfo">Left: 20:00</span>
+      <span class="pill" id="capInfo">Left: 30:00</span>
+      <span class="pill" id="blockInfo">Blocks: 0/5</span>
       <span class="pill" id="weekPill">This week: 0 hrs 0 mins</span>
       <span class="pill" id="lockoutPill" style="display:none">🔒 Locked</span>
     </div>
     <div class="row">
       <button id="menuStart">▶ Start Training</button>
+      <button id="startColdRecall">🎤 Cold Recall</button>
       <button id="startAssessment">📊 Assessment Test</button>
       <button id="viewTracker">📊 Track</button>
       <button id="playFlappy">🐤 Flappy (lockout only)</button>
       <button id="resetLockout">⚡ Reset lockout/timer</button>
       <button id="menuReset">⟲ Reset (factory)</button>
+    </div>
+    
+    <!-- Daily Complete Banner -->
+    <div id="dailyCompleteBanner" style="display:none;margin:8px 0 4px;padding:10px 12px;border-radius:12px;background:var(--good);color:var(--bg);text-align:center">
+      <strong>✅ Great work! Training complete for today.</strong><br>
+      Come back tomorrow for more training.
     </div>
 
     <!-- Scope looks obviously changeable now -->
@@ -188,10 +301,14 @@
       <div class="scopeWrap">
         <span style="opacity:.9">Audio type:</span>
         <select id="audioTypeSelect" class="scopeSelect">
-          <option value="piano">Piano (C4-B6)</option>
-          <option value="sine">Sine Wave (C4-B6)</option>
+          <option value="piano">Piano (C3-B5)</option>
+          <option value="sine">Sine Wave (C3-B5)</option>
           <option value="guitar">Guitar (C3-B5)</option>
         </select>
+        <label style="margin-left:10px">
+          <input type="checkbox" id="timbreVarietyMode" style="margin-right:5px">
+          Variety Mode (Week 3+)
+        </label>
         <button id="applyAudioBtn" class="scopeBtn">Change</button>
       </div>
     </div>
@@ -301,7 +418,7 @@
       <button class="note" id="btnOther" type="button">Other (OOB)</button>
     </div>
 
-    <p style="opacity:.75;margin-top:8px">800 ms tone • RT limit adapts with set size • 24 blocks per set • Octaves randomized (C4–B6)</p>
+    <p style="opacity:.75;margin-top:8px">800 ms tone • RT limit adapts with set size • 24 blocks per set • Octaves randomized (C3–B5)</p>
   </div>
 
   <!-- Assessment Screen -->
@@ -520,7 +637,10 @@ const THRESH_24=[0.20,0.25,0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.60,0.65,0.70,0.7
 function blockHasFeedback(block){ return block<=20; }
 function rtWindowForSet(n){const a=1183,b=2028;return Math.round(a+(n-1)*(b-a)/11);}
 const OOB_RATE=0.25;
-const SESS_DAILY_MS=20*60*1000;
+const SESS_DAILY_MS=30*60*1000; // Changed to 30 minutes
+const BLOCK_MS=6*60*1000; // 6 minutes per block
+const BREAK_MS=60*1000; // 60 second breaks
+const BLOCKS_PER_SESSION=5; // 5 blocks of 6 minutes each
 const WEEKLY_TARGET_MS=2*3600*1000;
 const LOCKOUT_MS=6*3600*1000;
 const LATENCY_CUSHION_MS=100;
@@ -567,7 +687,28 @@ try{
     audioType: AUDIO_TYPES.PIANO,
     assessmentScores: [],
     theme: 'default',
-    flappySoundEnabled: true
+    flappySoundEnabled: true,
+    // New state for enhanced training system
+    trainingBlocks: [], // Track current session blocks
+    currentBlock: 0, // Current block in session (0-4)
+    blockStartTime: null,
+    breakStartTime: null,
+    breakTimeLeft: 0,
+    inBreak: false,
+    minutesToday: 0, // Total minutes completed today
+    blocksDoneToday: 0,
+    dailyCompleted: false,
+    coldRecallResults: [],
+    warmRecallResults: [],
+    confusionMatrix: {}, // 12x12 matrix for tracking confusions
+    pitchStats: {}, // Per-pitch statistics
+    jitterLevels: {}, // Per-pitch jitter maturity levels
+    oobHistory: [], // Track OOB trials for adaptation
+    lastOobAdaptation: 0, // Block number of last OOB adaptation
+    currentOobRate: 0.15, // Current OOB percentage
+    octaveMix: { center: 0.9, neighbors: 0.1 }, // Current octave distribution
+    timbreVarietyMode: false,
+    varietyWeek: 0
   };
 } catch(e){
   state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO };
@@ -590,6 +731,31 @@ if (!state.theme) {
 // Migration for flappySoundEnabled
 if (state.flappySoundEnabled === undefined) {
   state.flappySoundEnabled = true;
+  save();
+}
+
+// Migration for new training system state
+if (!state.trainingBlocks) {
+  state.trainingBlocks = [];
+  state.currentBlock = 0;
+  state.blockStartTime = null;
+  state.breakStartTime = null;
+  state.breakTimeLeft = 0;
+  state.inBreak = false;
+  state.minutesToday = 0;
+  state.blocksDoneToday = 0;
+  state.dailyCompleted = false;
+  state.coldRecallResults = [];
+  state.warmRecallResults = [];
+  state.confusionMatrix = {};
+  state.pitchStats = {};
+  state.jitterLevels = {};
+  state.oobHistory = [];
+  state.lastOobAdaptation = 0;
+  state.currentOobRate = 0.15;
+  state.octaveMix = { center: 0.9, neighbors: 0.1 };
+  state.timbreVarietyMode = false;
+  state.varietyWeek = 0;
   save();
 }
 
@@ -688,6 +854,139 @@ function setFromIndex(i){return Math.floor((i-1)/LEVELS_PER_SET)+1;}
 function blockFromIndex(i){return ((i-1)%LEVELS_PER_SET)+1;}
 function thresholdForIndex(i){return THRESH_24[blockFromIndex(i)-1];}
 function trainedSet(k){ return UNLOCK_ORDER.slice(0,k); }
+
+/* ------------------ PITCH DETECTOR ------------------ */
+let micStream = null;
+let pitchAnalyzer = null;
+let pitchCallback = null;
+let pitchSamples = [];
+
+async function startPitchDetection(onUpdate) {
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const audioContext = getCtx();
+    const source = audioContext.createMediaStreamSource(micStream);
+    pitchAnalyzer = audioContext.createAnalyser();
+    pitchAnalyzer.fftSize = 2048;
+    source.connect(pitchAnalyzer);
+    pitchCallback = onUpdate;
+    pitchSamples = [];
+    analyzePitch();
+  } catch(e) {
+    report('Microphone access required for pitch recall: ' + e.message);
+    throw e;
+  }
+}
+
+function stopPitchDetection() {
+  if (micStream) {
+    micStream.getTracks().forEach(track => track.stop());
+    micStream = null;
+  }
+  pitchAnalyzer = null;
+  pitchCallback = null;
+}
+
+function analyzePitch() {
+  if (!pitchAnalyzer || !pitchCallback) return;
+  
+  const bufferLength = pitchAnalyzer.fftSize;
+  const dataArray = new Float32Array(bufferLength);
+  pitchAnalyzer.getFloatTimeDomainData(dataArray);
+  
+  // Calculate RMS for gating
+  let rms = 0;
+  for (let i = 0; i < bufferLength; i++) {
+    rms += dataArray[i] * dataArray[i];
+  }
+  rms = Math.sqrt(rms / bufferLength);
+  
+  if (rms > 0.01) { // RMS gate threshold
+    const freq = autocorrelate(dataArray, getCtx().sampleRate);
+    if (freq >= 60 && freq <= 1200) { // Valid frequency range
+      const cents = freqToCents(freq);
+      pitchSamples.push({ freq, cents, time: Date.now() });
+      
+      // Keep only recent samples (last 2 seconds)
+      const cutoff = Date.now() - 2000;
+      pitchSamples = pitchSamples.filter(s => s.time > cutoff);
+      
+      pitchCallback(freq, cents, pitchSamples);
+    }
+  }
+  
+  if (pitchAnalyzer) {
+    requestAnimationFrame(analyzePitch);
+  }
+}
+
+function autocorrelate(buffer, sampleRate) {
+  const SIZE = buffer.length;
+  const MAX_SAMPLES = Math.floor(SIZE / 2);
+  let bestOffset = -1;
+  let bestCorrelation = 0;
+  let rms = 0;
+  
+  for (let i = 0; i < SIZE; i++) {
+    rms += buffer[i] * buffer[i];
+  }
+  rms = Math.sqrt(rms / SIZE);
+  
+  if (rms < 0.01) return -1;
+  
+  let lastCorrelation = 1;
+  for (let offset = 1; offset < MAX_SAMPLES; offset++) {
+    let correlation = 0;
+    for (let i = 0; i < MAX_SAMPLES; i++) {
+      correlation += Math.abs((buffer[i]) - (buffer[i + offset]));
+    }
+    correlation = 1 - (correlation / MAX_SAMPLES);
+    
+    if (correlation > 0.9 && correlation > lastCorrelation) {
+      bestCorrelation = correlation;
+      bestOffset = offset;
+    }
+    lastCorrelation = correlation;
+  }
+  
+  if (bestOffset === -1) return -1;
+  return sampleRate / bestOffset;
+}
+
+function freqToCents(freq) {
+  const A4 = 440; // Reference frequency
+  return Math.round(1200 * Math.log2(freq / A4));
+}
+
+function centsToPitchClass(cents) {
+  // Convert cents to pitch class, with A = 0
+  const semitonesFromA = Math.round(cents / 100);
+  const pitchIndex = ((semitonesFromA % 12) + 12) % 12;
+  const pitchClasses = ['A', 'Bb', 'B', 'C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab'];
+  return pitchClasses[pitchIndex];
+}
+
+function getRecallVerdict(samples) {
+  if (samples.length < 10) return { verdict: 'insufficient', median: 0, sd: 0 };
+  
+  const recentSamples = samples.slice(-20); // Last 20 samples
+  const centValues = recentSamples.map(s => s.cents);
+  
+  // Calculate median
+  const sorted = [...centValues].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  
+  // Calculate standard deviation
+  const mean = centValues.reduce((a, b) => a + b, 0) / centValues.length;
+  const variance = centValues.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / centValues.length;
+  const sd = Math.sqrt(variance);
+  
+  let verdict = 'off';
+  if (Math.abs(median) <= 10 && sd <= 15) verdict = 'on_target';
+  else if (Math.abs(median) <= 30) verdict = 'close';
+  
+  return { verdict, median: Math.round(median), sd: Math.round(sd) };
+}
 
 /* ------------------ AUDIO ------------------ */
 let ACTX=null; const BUF_CACHE=new Map();
@@ -807,6 +1106,110 @@ async function playSample(note){
   }
 }
 
+/* Enhanced playSample with detune support */
+async function playSampleWithDetune(note, detuneCents = 0){
+  try{
+    await resumeCtx();
+    const ctx = getCtx();
+    
+    // Handle different audio types
+    if (state.audioType === AUDIO_TYPES.PIANO) {
+      try{
+        const url = `${AUDIO_PIANO}/${note}.mp3`;
+        const buf = await loadBuffer(url);
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        
+        // Apply detune
+        if (ctx.createBufferSource().detune) {
+          src.detune.value = detuneCents;
+        } else {
+          // Fallback for browsers without detune support
+          const semitonesDetune = detuneCents / 100;
+          src.playbackRate.value = Math.pow(2, semitonesDetune / 12);
+        }
+        
+        const g = ctx.createGain(); g.gain.value = 1;
+        src.connect(g).connect(ctx.destination);
+        const t = ctx.currentTime;
+        src.start(t); src.stop(t + TONE_MS/1000);
+        return;
+      }catch(_e){}
+    } else if (state.audioType === AUDIO_TYPES.GUITAR) {
+      try{
+        const {sample, semitones} = findClosestGuitarSample(note);
+        const url = `${AUDIO_GUITAR}/${GUITAR_SAMPLES[sample]}`;
+        const buf = await loadBuffer(url);
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        
+        // Apply pitch shifting + detune
+        const totalSemitones = semitones + (detuneCents / 100);
+        const pitchRatio = Math.pow(2, totalSemitones / 12);
+        src.playbackRate.value = pitchRatio;
+        
+        // Guitar samples are louder, so reduce gain
+        const g = ctx.createGain(); 
+        g.gain.value = 0.7; // Reduce guitar volume
+        
+        src.connect(g).connect(ctx.destination);
+        const t = ctx.currentTime;
+        src.start(t); src.stop(t + TONE_MS/1000 / pitchRatio);
+        return;
+      }catch(_e){}
+    } else if (state.audioType === AUDIO_TYPES.SINE) {
+      // Skip to sine wave generation
+    } else {
+      // Default to piano, fallback to sine
+      try{
+        const url = `${AUDIO_PIANO}/${note}.mp3`;
+        const buf = await loadBuffer(url);
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        
+        // Apply detune
+        if (ctx.createBufferSource().detune) {
+          src.detune.value = detuneCents;
+        } else {
+          const semitonesDetune = detuneCents / 100;
+          src.playbackRate.value = Math.pow(2, semitonesDetune / 12);
+        }
+        
+        const g = ctx.createGain(); g.gain.value = 1;
+        src.connect(g).connect(ctx.destination);
+        const t = ctx.currentTime;
+        src.start(t); src.stop(t + TONE_MS/1000);
+        return;
+      }catch(_e){}
+    }
+    
+    // Fallback to sine wave with detune
+    const m=/^([A-G](?:b)?)(\d)$/.exec(note);
+    const pc=m?m[1]:'A', o=m?+m[2]:4;
+    const idx={C:0,Db:1,D:2,Eb:3,E:4,F:5,Gb:6,G:7,Ab:8,A:9,Bb:10,B:11};
+    const semis=(idx[pc]??9)+(o-4)*12;
+    const baseFreq=440*Math.pow(2,(semis-9)/12);
+    const detuneRatio = Math.pow(2, detuneCents / 1200); // Convert cents to frequency ratio
+    const freq = baseFreq * detuneRatio;
+    
+    const osc = ctx.createOscillator(); const g = ctx.createGain();
+    osc.type='sine'; osc.frequency.value=freq;
+    const t0 = ctx.currentTime;
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(0.25, t0 + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + TONE_MS/1000);
+    osc.connect(g).connect(ctx.destination);
+    osc.start(t0); osc.stop(t0 + TONE_MS/1000);
+  }catch(e){
+    try{
+      const ctx=getCtx(); const osc=ctx.createOscillator(); const g=ctx.createGain();
+      osc.type='sine'; osc.frequency.value=440;
+      const t0=ctx.currentTime; g.gain.setValueAtTime(0.0001,t0); g.gain.linearRampToValueAtTime(0.2,t0+0.01); g.gain.exponentialRampToValueAtTime(0.0001,t0+0.3);
+      osc.connect(g).connect(ctx.destination); osc.start(t0); osc.stop(t0+0.3);
+    }catch(_){}
+  }
+}
+
 /* Flappy sound for Flappy Bird lockout */
 async function playFlappySound(){
   try{
@@ -851,6 +1254,7 @@ async function playShepard20s(){
 /* ------------------ TRAINING FLOW ------------------ */
 let autoNext=false, delayMs=1000;
 let currentNote=null, truePc=null, isOOBTrial=false;
+let currentTrialDetune=0; // Detune amount for current trial in cents
 let firstRtBonusMs=0, inFlightTrial=false;
 let suggestedRestartFlag=false;
 
@@ -885,10 +1289,8 @@ function getPlusMinusTwoSemitones(targetPc){
   return pitches;
 }
 function currentOctaves(){ 
-  if (state.audioType === AUDIO_TYPES.GUITAR) {
-    return [3,4,5]; // Guitar uses C3-B5
-  }
-  return [4,5,6]; // Piano uses C4-B6
+  // Use octaves 3-5 only for all audio types (center = 4)
+  return [3,4,5];
 }
 function rand(a){ return a[Math.floor(Math.random()*a.length)]; }
 function pcLabel(pc){ return PC_LABEL[pc] || pc; }
@@ -1377,7 +1779,310 @@ function chooseOOB(){
   scheduleAuto();
 }
 
-/* Driving */
+/* ------------------ ENHANCED TRAINING SCHEDULER ------------------ */
+
+// Initialize pitch statistics if needed
+function initPitchStats(pc) {
+  if (!state.pitchStats[pc]) {
+    state.pitchStats[pc] = {
+      total: 0,
+      correct: 0,
+      lastN: [], // Rolling window of last ~40 trials
+      sumRt: 0,
+      confusions: {} // What this pitch was confused with
+    };
+  }
+  if (!state.jitterLevels[pc]) {
+    state.jitterLevels[pc] = 0; // Start at JL0 (onboarding)
+  }
+}
+
+// Get jitter amount based on maturity level
+function getJitterForPitch(pc, timbre) {
+  initPitchStats(pc);
+  const level = state.jitterLevels[pc] || 0;
+  
+  // Check if this pitch needs rescue (poor performance)
+  const stats = state.pitchStats[pc];
+  const recentTrials = stats.lastN.slice(-40);
+  if (recentTrials.length >= 20) {
+    const recentAcc = recentTrials.filter(t => t.correct).length / recentTrials.length;
+    const recentCents = recentTrials.map(t => t.cents || 0);
+    const medianCents = recentCents.sort((a,b) => a-b)[Math.floor(recentCents.length/2)] || 0;
+    
+    if (recentAcc < 0.75 || Math.abs(medianCents) > 25) {
+      // Rescue mode: smaller jitter
+      return (Math.random() - 0.5) * 2 * (3 + Math.random() * 5); // ±3-8¢
+    }
+  }
+  
+  // Normal jitter ladder
+  switch (level) {
+    case 0: return (Math.random() - 0.5) * 2 * (3 + Math.random() * 5); // ±3-8¢
+    case 1: return (Math.random() - 0.5) * 2 * (5 + Math.random() * 5); // ±5-10¢
+    case 2: return (Math.random() - 0.5) * 2 * (5 + Math.random() * 10); // ±5-15¢
+    case 3: return (Math.random() - 0.5) * 2 * (5 + Math.random() * 10); // ±5-15¢
+    default: return (Math.random() - 0.5) * 2 * (5 + Math.random() * 10);
+  }
+}
+
+// Check if this should be a boundary probe
+function isBoundaryProbe(pc) {
+  initPitchStats(pc);
+  const level = state.jitterLevels[pc] || 0;
+  const probeRates = [0.01, 0.05, 0.08, 0.12]; // Probe rates by jitter level
+  return Math.random() < probeRates[Math.min(level, 3)];
+}
+
+// Get boundary probe detune amount
+function getBoundaryProbeDetune() {
+  return (Math.random() - 0.5) * 2 * (25 + Math.random() * 15); // ±25-40¢
+}
+
+// Update jitter maturity level based on performance
+function updateJitterLevel(pc) {
+  initPitchStats(pc);
+  const stats = state.pitchStats[pc];
+  const level = state.jitterLevels[pc] || 0;
+  const recentTrials = stats.lastN.slice(-40);
+  
+  if (recentTrials.length < 20) return; // Not enough data
+  
+  const acc = recentTrials.filter(t => t.correct).length / recentTrials.length;
+  const cents = recentTrials.map(t => t.cents || 0);
+  const medianCents = Math.abs(cents.sort((a,b) => a-b)[Math.floor(cents.length/2)] || 0);
+  const variance = cents.reduce((acc, c) => acc + c*c, 0) / cents.length;
+  const sd = Math.sqrt(variance);
+  
+  // Promotion logic
+  if (level === 0 && acc >= 0.75 && medianCents <= 20) state.jitterLevels[pc] = 1;
+  else if (level === 1 && acc >= 0.80 && medianCents <= 15) state.jitterLevels[pc] = 2;
+  else if (level === 2 && acc >= 0.90 && medianCents <= 10 && sd <= 15) state.jitterLevels[pc] = 3;
+  
+  // Regression logic
+  const recentShort = recentTrials.slice(-20);
+  if (recentShort.length >= 20) {
+    const shortAcc = recentShort.filter(t => t.correct).length / recentShort.length;
+    const shortCents = recentShort.map(t => t.cents || 0);
+    const shortMedian = Math.abs(shortCents.sort((a,b) => a-b)[Math.floor(shortCents.length/2)] || 0);
+    const shortVar = shortCents.reduce((acc, c) => acc + c*c, 0) / shortCents.length;
+    const shortSd = Math.sqrt(shortVar);
+    
+    if (shortAcc < 0.75 || shortMedian > 25 || shortSd > 30) {
+      state.jitterLevels[pc] = Math.max(0, level - 1);
+    }
+  }
+}
+
+// Confusion-aware pitch selection
+function selectNextPitch(trainedPitches) {
+  // Initialize all pitch stats
+  trainedPitches.forEach(pc => initPitchStats(pc));
+  
+  const weights = {};
+  
+  for (const pc of trainedPitches) {
+    const stats = state.pitchStats[pc];
+    const lastN = stats.lastN.slice(-40);
+    const lastAcc = lastN.length > 0 ? lastN.filter(t => t.correct).length / lastN.length : 0.5;
+    
+    // Base weight: more weight for lower accuracy
+    weights[pc] = Math.max(0.15, Math.pow(1 - lastAcc, 2) + 0.15);
+    
+    // Boost confusions for this pitch
+    if (state.confusionMatrix[pc]) {
+      const confusions = state.confusionMatrix[pc];
+      const topConfusion = Object.keys(confusions).reduce((a, b) => 
+        confusions[a] > confusions[b] ? a : b, Object.keys(confusions)[0]);
+      if (topConfusion && trainedPitches.includes(topConfusion)) {
+        weights[topConfusion] *= 1.35; // Boost confused pitch
+      }
+    }
+  }
+  
+  // Weighted random selection
+  const totalWeight = Object.values(weights).reduce((a, b) => a + b, 0);
+  let random = Math.random() * totalWeight;
+  
+  for (const pc of trainedPitches) {
+    random -= weights[pc];
+    if (random <= 0) return pc;
+  }
+  
+  return trainedPitches[0]; // Fallback
+}
+
+// OOB adaptation every 3 blocks
+function adaptOOBRate() {
+  const currentBlockNumber = blockFromIndex(state.levelIndex);
+  
+  // Only adapt every 3 blocks
+  if (currentBlockNumber % 3 !== 0 || state.lastOobAdaptation === currentBlockNumber) return;
+  
+  state.lastOobAdaptation = currentBlockNumber;
+  
+  // Get last 60 graded in-bounds trials
+  const recent = (state.trials || []).filter(t => 
+    !t.oob && !t.special && t.correct !== undefined
+  ).slice(-60);
+  
+  if (recent.length < 30) return; // Not enough data
+  
+  const accuracy = recent.filter(t => t.correct).length / recent.length;
+  
+  // Target accuracy: 70-85%
+  if (accuracy < 0.70) {
+    state.currentOobRate = Math.max(0.05, state.currentOobRate - 0.03);
+  } else if (accuracy > 0.85) {
+    state.currentOobRate = Math.min(0.35, state.currentOobRate + 0.03);
+  }
+  
+  save();
+}
+
+// OOB health check for novices
+function checkOOBHealth() {
+  const recentOOB = (state.oobHistory || []).slice(-20);
+  if (recentOOB.length < 20) return false;
+  
+  const oobAcc = recentOOB.filter(t => t.correct).length / recentOOB.length;
+  return oobAcc < 0.60; // Unhealthy if less than 60%
+}
+
+// Get octave distribution based on performance
+function getOctaveDistribution() {
+  // Set 1 performance gating logic
+  const set = setFromIndex(state.levelIndex);
+  const block = blockFromIndex(state.levelIndex);
+  
+  // Default distribution
+  let centerWeight = 0.9, neighborWeight = 0.1;
+  
+  // Check performance windows within the set
+  const setStart = (set - 1) * 24 + 1;
+  const trials = (state.trials || []).filter(t => 
+    t.set === set && !t.oob && !t.special
+  );
+  
+  // Window 8-12 evaluation
+  const window1 = trials.filter(t => t.block >= 8 && t.block <= 12);
+  if (window1.length >= 4) {
+    const acc1 = window1.filter(t => t.correct).length / window1.length;
+    const cents1 = window1.map(t => t.cents || 0);
+    const median1 = Math.abs(cents1.sort((a,b) => a-b)[Math.floor(cents1.length/2)] || 0);
+    
+    if (acc1 >= 0.80 && median1 <= 15) {
+      centerWeight = 0.7;
+      neighborWeight = 0.3;
+    }
+  }
+  
+  // Window 16-20 evaluation  
+  const window2 = trials.filter(t => t.block >= 16 && t.block <= 20);
+  if (window2.length >= 4) {
+    const acc2 = window2.filter(t => t.correct).length / window2.length;
+    const cents2 = window2.map(t => t.cents || 0);
+    const median2 = Math.abs(cents2.sort((a,b) => a-b)[Math.floor(cents2.length/2)] || 0);
+    
+    if (acc2 >= 0.85 && median2 <= 12) {
+      centerWeight = 0.6;
+      neighborWeight = 0.4;
+    }
+  }
+  
+  return { center: centerWeight, neighbors: neighborWeight };
+}
+
+// Select octave with current distribution
+function selectOctave(pc) {
+  const distribution = getOctaveDistribution();
+  const octaves = currentOctaves(); // [3, 4, 5]
+  const centerOctave = 4;
+  const neighborOctaves = [3, 5];
+  
+  // Per-note override for weak pitches
+  const stats = state.pitchStats[pc];
+  if (stats && stats.lastN.length >= 20) {
+    const recentAcc = stats.lastN.slice(-40).filter(t => t.correct).length / Math.min(40, stats.lastN.length);
+    const recentCents = stats.lastN.slice(-40).map(t => t.cents || 0);
+    const medianCents = Math.abs(recentCents.sort((a,b) => a-b)[Math.floor(recentCents.length/2)] || 0);
+    
+    if (recentAcc < 0.75 || medianCents > 25) {
+      // Bias toward center octave for weak pitch
+      return Math.random() < 0.8 ? centerOctave : rand(neighborOctaves);
+    }
+  }
+  
+  // Normal distribution
+  if (Math.random() < distribution.center) {
+    return centerOctave;
+  } else {
+    return rand(neighborOctaves);
+  }
+}
+
+// Check for OOB streak limit
+function checkOOBStreakLimit() {
+  const recentTrials = (state.trials || []).slice(-2);
+  return recentTrials.length === 2 && recentTrials.every(t => t.oob);
+}
+
+// Record trial response and update statistics
+function recordTrialResponse(trialData) {
+  const { correct, rtMs, chosenPC, truePC, oob, cents, special } = trialData;
+  
+  // Update general trial data
+  state.trials.push({
+    note: currentNote,
+    pc: truePC,
+    guess: chosenPC,
+    correct,
+    timeout: rtMs === null,
+    oob,
+    set: setFromIndex(state.levelIndex),
+    block: blockFromIndex(state.levelIndex),
+    time: Date.now(),
+    special,
+    cents: cents || 0,
+    rtMs: rtMs || 0
+  });
+  
+  if (!oob && !special) {
+    // Update in-bounds pitch statistics
+    initPitchStats(truePC);
+    const stats = state.pitchStats[truePC];
+    stats.total++;
+    if (correct) stats.correct++;
+    if (rtMs) stats.sumRt += rtMs;
+    
+    // Add to rolling window
+    stats.lastN.push({ correct, cents: cents || 0, rtMs: rtMs || 0 });
+    if (stats.lastN.length > 40) stats.lastN.shift();
+    
+    // Update confusion matrix
+    if (!state.confusionMatrix[truePC]) state.confusionMatrix[truePC] = {};
+    if (chosenPC && chosenPC !== 'OOB' && chosenPC !== truePC) {
+      state.confusionMatrix[truePC][chosenPC] = (state.confusionMatrix[truePC][chosenPC] || 0) + 1;
+    }
+    
+    // Update jitter level
+    updateJitterLevel(truePC);
+  } else if (oob) {
+    // Track OOB trials for health check
+    state.oobHistory.push({ correct, time: Date.now() });
+    if (state.oobHistory.length > 50) state.oobHistory.shift();
+  }
+  
+  save();
+}
+
+// Remove Shepard tone functionality
+function maybeRunShepard() {
+  // Shepard tones are removed as per requirements
+  return Promise.resolve();
+}
+
+/* ------------------ ENHANCED TRIAL GENERATION ------------------ */
 function scheduleAuto(){ if(autoTimer){ clearTimeout(autoTimer); autoTimer=null; } if(autoNext && sessionActive && !paused && !shepRunning && !special){ autoTimer = setTimeout(()=> nextTrial(true), delayMs); } }
 async function nextTrial(forceNew=false){
   if(!sessionActive || paused || shepRunning || special) return;
@@ -1388,21 +2093,68 @@ async function nextTrial(forceNew=false){
 
   if(startSpecialAtBlock15()) return;
 
+  // Adapt OOB rate every 3 blocks
+  adaptOOBRate();
+
   inFlightTrial=true;
   try{
     await resumeCtx();
-    await maybeRunShepard();
+    // Shepard tones removed as per requirements
     if(paused || !sessionActive || special) return;
+    
     if(!currentNote || forceNew){
       const set = setFromIndex(state.levelIndex);
-      const usable = trainedSet(set);
+      const trainedPitches = trainedSet(set);
       const oobs = currentOOBs(set);
-      isOOBTrial = oobs.length && Math.random() < OOB_RATE;
-      const pc = isOOBTrial ? rand(oobs) : rand(usable);
-      truePc = pc;
-      currentNote = `${pc}${rand(currentOctaves())}`;
+      
+      // Check OOB streak limit and health
+      const streakLimit = checkOOBStreakLimit();
+      const oobUnhealthy = checkOOBHealth();
+      
+      // Determine if this should be OOB
+      let oobRate = state.currentOobRate || 0.15;
+      if (oobUnhealthy) oobRate = Math.min(0.12, oobRate); // Cap for unhealthy OOB
+      
+      isOOBTrial = !streakLimit && oobs.length > 0 && Math.random() < oobRate;
+      
+      if (isOOBTrial) {
+        // OOB trial - no jitter, same octave distribution as in-bounds
+        const octaveMix = getOctaveDistribution();
+        truePc = rand(oobs);
+        
+        // For OOB health issues, prefer pitches far from trained notes
+        if (oobUnhealthy) {
+          const farOobs = oobs.filter(oob => {
+            return !trainedPitches.some(trained => {
+              const oobIdx = PC2I[oob] || 0;
+              const trainedIdx = PC2I[trained] || 0;
+              const distance = Math.min(Math.abs(oobIdx - trainedIdx), 12 - Math.abs(oobIdx - trainedIdx));
+              return distance <= 1; // Avoid ±1 semitone
+            });
+          });
+          if (farOobs.length > 0) truePc = rand(farOobs);
+        }
+        
+        const octave = selectOctave(truePc);
+        currentNote = `${truePc}${octave}`;
+        currentTrialDetune = 0; // No jitter for OOB
+      } else {
+        // In-bounds trial with jitter and confusion-aware selection
+        truePc = selectNextPitch(trainedPitches);
+        const octave = selectOctave(truePc);
+        
+        // Apply jitter or boundary probe
+        if (isBoundaryProbe(truePc)) {
+          currentTrialDetune = getBoundaryProbeDetune();
+        } else {
+          currentTrialDetune = getJitterForPitch(truePc, state.audioType);
+        }
+        
+        currentNote = `${truePc}${octave}`;
+      }
     }
-    await playSample(currentNote);
+    
+    await playSampleWithDetune(currentNote, currentTrialDetune);
     if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
     const baseRt = rtWindowForSet(setFromIndex(state.levelIndex));
     const rtms = baseRt + firstRtBonusMs + LATENCY_CUSHION_MS;
