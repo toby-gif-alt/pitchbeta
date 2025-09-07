@@ -651,7 +651,11 @@ try{
     // Pitch recall tracking
     coldRecallComplete: false,
     warmRecallComplete: false,
-    recallResults: [] // {date, type: 'cold'|'warm', items: [{notePc, medianCents, stdCents, medianHz, verdict}]}
+    recallResults: [], // {date, type: 'cold'|'warm', items: [{notePc, medianCents, stdCents, medianHz, verdict}]}
+    // OOB health tracking
+    lastNOobResults: [],
+    oobHealthRestricted: false,
+    oobHealthBlocksLeft: 0
   };
 } catch(e){
   state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO };
@@ -692,6 +696,9 @@ if (state.minutesToday === undefined) {
   state.coldRecallComplete = false;
   state.warmRecallComplete = false;
   state.recallResults = [];
+  state.lastNOobResults = [];
+  state.oobHealthRestricted = false;
+  state.oobHealthBlocksLeft = 0;
   save();
 }
 
@@ -1008,11 +1015,29 @@ function currentOOBs(setSize){
   const learned = trainedSet(setSize).map(n=>PC2I[n]).sort((a,b)=>a-b);
   const low=learned[0], high=learned[learned.length-1];
   const up1=(high+1)%12, up2=(high+2)%12, dn1=(low+11)%12, dn2=(low+10)%12;
-  const out=[];
-  if(!learned.includes(up1)) out.push(PC[up1]);
-  if(!learned.includes(up2) && !learned.includes(up1)) out.push(PC[up2]);
-  if(!learned.includes(dn1)) out.push(PC[dn1]);
-  if(!learned.includes(dn2) && !learned.includes(dn1)) out.push(PC[dn2]);
+  let out=[];
+  
+  // During health restrictions, use semitone distance ≥ 2 from trained pitches
+  if (state.oobHealthRestricted) {
+    for (let i = 0; i < 12; i++) {
+      if (!learned.includes(i)) {
+        // Check if this pitch is at least 2 semitones away from all learned pitches
+        const minDistance = Math.min(...learned.map(l => Math.min(Math.abs(i - l), 12 - Math.abs(i - l))));
+        if (minDistance >= 2) {
+          out.push(PC[i]);
+        }
+      }
+    }
+    // Cap OOB rate to 12% during health restrictions
+    state.currentOobRate = Math.min(state.currentOobRate, 0.12);
+  } else {
+    // Normal OOB selection
+    if(!learned.includes(up1)) out.push(PC[up1]);
+    if(!learned.includes(up2) && !learned.includes(up1)) out.push(PC[up2]);
+    if(!learned.includes(dn1)) out.push(PC[dn1]);
+    if(!learned.includes(dn2) && !learned.includes(dn1)) out.push(PC[dn2]);
+  }
+  
   return out;
 }
 function getPlusMinusTwoSemitones(targetPc){
@@ -1862,6 +1887,18 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
     }
   }
   
+  // Track OOB results for health check
+  if (isOOBTrial || oobChosen) {
+    state.lastNOobResults = state.lastNOobResults || [];
+    state.lastNOobResults.push(ok);
+    if (state.lastNOobResults.length > 20) {
+      state.lastNOobResults.shift();
+    }
+    
+    // Check OOB health
+    checkOobHealth();
+  }
+  
   // Clean up trial-specific data
   window.currentTrialDetune = undefined;
   window.currentTrialCategory = undefined;
@@ -1895,6 +1932,44 @@ function adaptOobRate() {
     }
     
     console.log(`OOB adaptation: accuracy=${(accuracy*100).toFixed(1)}%, new OOB rate=${(state.currentOobRate*100).toFixed(1)}%`);
+  }
+}
+
+function checkOobHealth() {
+  // OOB health check for novices/small sets
+  if (!state.lastNOobResults || state.lastNOobResults.length < 20) return;
+  
+  const oobAcc = state.lastNOobResults.reduce((a, b) => a + b, 0) / state.lastNOobResults.length;
+  
+  if (oobAcc < 0.60 && !state.oobHealthRestricted) {
+    // Activate health restrictions
+    state.oobHealthRestricted = true;
+    state.oobHealthBlocksLeft = 2;
+    console.log(`OOB health check: accuracy ${(oobAcc*100).toFixed(1)}% < 60%, activating restrictions for 2 blocks`);
+    save();
+  } else if (oobAcc >= 0.75 && state.oobHealthRestricted) {
+    // Remove health restrictions
+    state.oobHealthRestricted = false;
+    state.oobHealthBlocksLeft = 0;
+    console.log(`OOB health check: accuracy ${(oobAcc*100).toFixed(1)}% ≥ 75%, removing restrictions`);
+    save();
+  }
+  
+  // Decrement health restriction blocks
+  if (state.oobHealthRestricted && state.oobHealthBlocksLeft > 0) {
+    state.oobHealthBlocksLeft--;
+    if (state.oobHealthBlocksLeft <= 0) {
+      // Re-evaluate after restriction period
+      const newAcc = state.lastNOobResults.slice(-20).reduce((a, b) => a + b, 0) / Math.min(20, state.lastNOobResults.length);
+      if (newAcc >= 0.75) {
+        state.oobHealthRestricted = false;
+        console.log(`OOB health restriction ended: accuracy ${(newAcc*100).toFixed(1)}%`);
+      } else {
+        state.oobHealthBlocksLeft = 2; // Extend for another 2 blocks
+        console.log(`OOB health restriction extended: accuracy ${(newAcc*100).toFixed(1)}%`);
+      }
+      save();
+    }
   }
 }
 
@@ -2377,13 +2452,13 @@ function startBreak(){
   pauseStart('block-break');
   
   // Show break message
-  text('promptPill', `Block ${state.blocksCompleted} complete! 60-second break starting...`);
+  text('promptPill', `🎉 Block ${state.blocksCompleted} complete! 60-second break...`);
   
   // Start break countdown
   let breakLeft = BREAK_SEC;
   const breakInterval = setInterval(() => {
     breakLeft--;
-    text('promptPill', `Break: ${breakLeft}s remaining — Flappy available`);
+    text('promptPill', `Break: ${breakLeft}s remaining — 🐤 Flappy available`);
     
     if (breakLeft <= 0) {
       clearInterval(breakInterval);
@@ -2391,8 +2466,33 @@ function startBreak(){
     }
   }, 1000);
   
-  // Allow Flappy during break but store the interval to clean up
+  // Store the interval to clean up later
   window.currentBreakInterval = breakInterval;
+  
+  // Show a break dialog with Flappy option
+  showBreakDialog();
+}
+
+function showBreakDialog() {
+  if(confirm(`🎉 Great job! Block ${state.blocksCompleted} completed.\n\nTake a 60-second break. Play Flappy Bird? (Click OK for Flappy, Cancel to wait)`)) {
+    openBreakFlappy();
+  }
+}
+
+function openBreakFlappy() {
+  // Open Flappy during break
+  byId('flappyModal').style.display='flex'; 
+  const c=byId('flappyCanvas'); 
+  if(!c) return; 
+  fCtx=c.getContext('2d'); 
+  resetFlappy(); 
+  attachFlappyControls();
+  
+  // Update description for break context
+  const description = byId('flappyModal').querySelector('p:last-child');
+  if (description) {
+    description.textContent = 'Break time! Tap/click (or Space) to flap. Each flap plays a random pitch.';
+  }
 }
 
 function endBreak(){
@@ -2790,7 +2890,13 @@ function startFlappyReward(){ if(sessionActive && !paused){ pauseStart('flappy')
 function closeFlappy(){
   running=false; cancelAnimationFrame(flappyRAF); byId('flappyModal').style.display='none'; detachFlappyControls();
   if(score > (state.flappyHighScore||0)){ state.flappyHighScore = score; save(); }
-  if(sessionActive){
+  
+  // Different behavior during breaks vs normal training
+  if(state.inBreak) {
+    // During break: just close and wait for break to end
+    text('promptPill', `Break continues... ${Math.max(0, BREAK_SEC - Math.floor((Date.now() - state.breakStart) / 1000))}s remaining`);
+  } else if(sessionActive){
+    // During normal training: standard behavior
     safe('btnPause', el=> el.textContent='▶ Resume');
     currentNote=null; clearTimeout(rtTimer); rtTimer=null; clearTimeout(autoTimer); autoTimer=null;
     text('promptPill','Flappy over — press Play to continue');
