@@ -570,93 +570,49 @@ const THRESH_24=[0.20,0.25,0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.60,0.65,0.70,0.7
 function blockHasFeedback(block){ return block<=20; }
 function rtWindowForSet(n){const a=1183,b=2028;return Math.round(a+(n-1)*(b-a)/11);}
 /* ------------------ ENHANCED OOB SYSTEM ------------------ */
-function initializeOOBState() {
-  if (!state.oobStats) {
-    state.oobStats = {
-      adaptiveRate: 0.25, // Start with 25%
-      lastAdjustment: Date.now(),
-      recentTrials: [], // Rolling window for in-bounds trials
-      oobTrials: [], // Rolling window for OOB trials
-      streakCount: 0, // Current OOB streak
-      healthCheckActive: false
-    };
-  }
-}
-
-function updateOOBRate() {
-  initializeOOBState();
-  
-  const stats = state.oobStats;
-  const now = Date.now();
-  
-  // Only adjust every 3 blocks (roughly)
-  if (now - stats.lastAdjustment < 3 * 24 * 2000) return; // Rough time estimate
-  
-  // Get last 60 graded in-bounds answers
-  const recentInBounds = stats.recentTrials.slice(-60);
-  if (recentInBounds.length < 30) return; // Need minimum data
-  
-  const accuracy = recentInBounds.filter(t => t.correct).length / recentInBounds.length;
-  
-  // Target 70-85% accuracy
-  let adjustment = 0;
-  if (accuracy < 0.70) {
-    adjustment = -0.03; // Reduce OOB to make it easier
-  } else if (accuracy > 0.85) {
-    adjustment = 0.03; // Increase OOB to make it harder
-  }
-  
-  // Apply adjustment with clamping
-  stats.adaptiveRate = Math.max(0.05, Math.min(0.35, stats.adaptiveRate + adjustment));
-  stats.lastAdjustment = now;
-  
-  save();
-}
-
+// B) OOB GENERATION = BERNOULLI PER TRIAL + ≤2 STREAK (no adaptation here)
 function shouldGenerateOOB(set) {
-  initializeOOBState();
-  updateOOBRate();
-  
-  const stats = state.oobStats;
   const oobs = currentOOBs(set);
-  
   if (oobs.length === 0) return false;
   
-  // Streak guard: ≤2 OOB in a row
-  if (stats.streakCount >= 2) return false;
+  const rate = state.oobStats.adaptiveRate ?? 0.18;
+  const canOOB = (state.oobStats.streakCount || 0) < (state.oobStats.maxInRow || 2);
   
-  // Check OOB health - if OOB accuracy is poor, temporarily reduce rate
-  if (stats.healthCheckActive) {
-    return Math.random() < Math.min(0.12, stats.adaptiveRate);
+  // Check if health check is active and reduce rate
+  let effectiveRate = rate;
+  if (state.oobStats.healthCheckActive) {
+    effectiveRate = Math.min(rate, 0.12);
   }
   
-  return Math.random() < stats.adaptiveRate;
+  const isOOB = canOOB && Math.random() < effectiveRate;
+  state.oobStats.streakCount = isOOB ? (state.oobStats.streakCount + 1) : 0;
+  return isOOB;
 }
 
 function recordOOBTrial(wasOOB, correct) {
-  initializeOOBState();
-  
   const stats = state.oobStats;
   
   if (wasOOB) {
-    // Track OOB streak
-    stats.streakCount = correct ? 0 : stats.streakCount + 1;
-    
     // Add to OOB trials tracking
     stats.oobTrials.push({ correct, timestamp: Date.now() });
     if (stats.oobTrials.length > 20) {
       stats.oobTrials = stats.oobTrials.slice(-20);
     }
     
-    // Check OOB health
+    // D) OOB HEALTH CHECK (novice case)
     if (stats.oobTrials.length >= 20) {
       const oobAccuracy = stats.oobTrials.filter(t => t.correct).length / stats.oobTrials.length;
-      stats.healthCheckActive = oobAccuracy < 0.60;
+      if (oobAccuracy < 0.60) {
+        // For the next 2 blocks set reduced rate
+        stats.healthCheckActive = true;
+        stats.healthCheckBlocks = 2;
+      } else if (oobAccuracy >= 0.75 && stats.healthCheckActive) {
+        // Restore when OOB ≥ 0.75
+        stats.healthCheckActive = false;
+        stats.healthCheckBlocks = 0;
+      }
     }
   } else {
-    // Reset OOB streak for in-bounds trials
-    stats.streakCount = 0;
-    
     // Add to recent in-bounds trials for adaptation
     stats.recentTrials.push({ correct, timestamp: Date.now() });
     if (stats.recentTrials.length > 60) {
@@ -677,8 +633,8 @@ function selectOOBNote(set) {
     const trainedPcs = trainedSet(set);
     const farOOBs = oobs.filter(oob => {
       return !trainedPcs.some(trained => {
-        const oobIdx = PC2I[oob];
-        const trainedIdx = PC2I[trained];
+        const oobIdx = PC.indexOf(oob);
+        const trainedIdx = PC.indexOf(trained);
         const dist = Math.min(
           Math.abs(oobIdx - trainedIdx),
           12 - Math.abs(oobIdx - trainedIdx)
@@ -800,6 +756,15 @@ if (state.sessionBreakTime === undefined) {
   state.varietyModeEnabled = false;
   save();
 }
+
+// A) INITIALIZE/REPAIR STATE (prevents .push crash)
+state.oobStats ??= {};
+state.oobStats.oobTrials ??= [];
+state.oobStats.recentTrials ??= [];   // in-bounds only, 1/0
+state.oobStats.streakCount ??= 0;     // generation streak
+if (typeof state.oobStats.adaptiveRate !== 'number') state.oobStats.adaptiveRate = 0.18; // 18%
+state.oobStats.maxInRow = 2;          // streak cap
+save();
 
 // Apply theme on load
 applyTheme(state.theme);
@@ -2639,6 +2604,9 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
   // Update octave mixing performance
   updateOctaveMixing(trialData);
   
+  // Validate OOB state
+  validateOOBState();
+  
   save(); updateLevelUI(); try{ drawChart(); }catch(_){}; 
   if(block >= 21 && !ok) maybeSuggestRestart();
 }
@@ -2706,6 +2674,28 @@ function advanceCheck(){
     state.minutesToday += BLOCK_LEN_MIN;
   }
   
+  // C) ADAPT OOB% ONLY AT BLOCK BOUNDARIES (every 3 blocks), using last 60 in-bounds
+  if(passed && block % 3 === 0) {
+    const last60 = (state.trials || []).filter(t => !t.oob).slice(-60);
+    if (last60.length >= 30) {
+      const acc = last60.reduce((a,t)=>a+(t.correct?1:0),0) / last60.length;
+      let r = state.oobStats.adaptiveRate ?? 0.18;
+      // Target 70–85% overall accuracy:
+      if (acc > 0.85)      r = Math.min(0.35, r + 0.03); // +3pp harder
+      else if (acc < 0.70) r = Math.max(0.05, r - 0.03); // -3pp easier
+      state.oobStats.adaptiveRate = r;
+    }
+    state.oobStats.streakCount = 0; // reset at block boundary
+    
+    // Update health check block countdown
+    if (state.oobStats.healthCheckActive && state.oobStats.healthCheckBlocks > 0) {
+      state.oobStats.healthCheckBlocks--;
+      if (state.oobStats.healthCheckBlocks <= 0) {
+        state.oobStats.healthCheckActive = false;
+      }
+    }
+  }
+
   if(passed && state.levelIndex<LEVELS_TOTAL){
     const oldSet = setFromIndex(state.levelIndex);
     state.levelIndex++;
@@ -3535,6 +3525,24 @@ function doFactoryReset(){
     }catch(e){ report(e); alert('Reset failed: '+e.message); }
   })();
 }
+
+/* ------------------ SANITY GUARDS & DEBUG ------------------ */
+// F) SANITY GUARDS (dev-only console asserts ok)
+function validateOOBState() {
+  console.assert(state.oobStats.adaptiveRate >= 0.05 && state.oobStats.adaptiveRate <= 0.35, 'OOB rate clamp failed');
+  if (isOOBTrial) console.assert(currentTrialJitter?.jitter === 0, 'OOB must be 0¢');
+  if (currentNote) {
+    const octave = parseInt(currentNote.slice(-1));
+    console.assert([3,4,5].includes(octave), 'Octave outside 3–5');
+  }
+}
+
+// Tiny helper:
+window.getOOBDebug = () => {
+  const last60 = (state.trials||[]).filter(t=>!t.oob).slice(-60);
+  const acc = last60.length ? last60.reduce((a,t)=>a+(t.correct?1:0),0)/last60.length : null;
+  return { rate: state.oobStats.adaptiveRate, maxInRow: state.oobStats.maxInRow, last60InBoundsAcc: acc };
+};
 
 /* ------------------ INIT ------------------ */
 window.addEventListener('load', wireOnce);
