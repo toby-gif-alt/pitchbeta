@@ -21,6 +21,13 @@
   label{opacity:.9}
   .screen{display:none}
   .pill{display:inline-flex;align-items:center;background:var(--muted);padding:8px 12px;border-radius:16px;font-size:13px;margin:6px;white-space:nowrap}
+  .pill.clickable{cursor:pointer;transition:background 0.2s ease}
+  .pill.clickable:hover{background:var(--muted2);transform:translateY(-1px)}
+
+  /* Tooltip system for UI pills */
+  .tooltip{position:relative}
+  .tooltip-content{position:absolute;bottom:110%;left:50%;transform:translateX(-50%);background:var(--card);border:1px solid var(--muted);color:var(--text);padding:8px 12px;border-radius:8px;font-size:12px;white-space:nowrap;z-index:1000;opacity:0;visibility:hidden;transition:opacity 0.3s,visibility 0.3s;box-shadow:0 4px 12px rgba(0,0,0,0.3);max-width:300px;white-space:normal;line-height:1.4}
+  .tooltip:hover .tooltip-content{opacity:1;visibility:visible}
   .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
   .note-pad{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}
   .note{min-height:64px;font-size:18px;border-radius:14px}
@@ -292,7 +299,7 @@
 
     <div id="barStatus">
       <span class="pill" id="promptPill">Press Play to start</span>
-      <span class="pill" id="setInfo">Set 1 / 12</span>
+      <span class="pill" id="setInfo">Pitches 1 / 12</span>
       <span class="pill" id="blockInfo">Block 1 / 24</span>
       <span class="pill" id="accInfo">Acc 0% (req 20%)</span>
       <span class="pill" id="autoInfo">Auto-next: Off</span>
@@ -687,6 +694,44 @@ function showFlex(id){ safe(id, el=> el.style.display='flex'); }
 function showBlock(id){ safe(id, el=> el.style.display='block'); }
 function hide(id){ safe(id, el=> el.style.display='none'); }
 function text(id, v){ safe(id, el=> el.textContent=v); }
+function textWithTooltip(id, v){ 
+  safe(id, el=> {
+    const tooltip = el.querySelector('.tooltip-content');
+    el.textContent = v;
+    if (tooltip) {
+      el.appendChild(tooltip);
+    }
+  }); 
+}
+
+// Initialize tooltips for UI pills
+function initializeTooltips() {
+  const tooltips = {
+    setInfo: "Shows how many pitches you're currently learning. You start with 1 pitch (F) and gradually add more up to all 12 pitches.",
+    blockInfo: "Each set has 24 blocks. Blocks 1-20 give feedback, blocks 21-24 are tests with no feedback. You need to achieve the required accuracy to advance.",
+    accInfo: "Your current accuracy percentage and the required accuracy to advance to the next block. The requirement increases with each block.",
+    autoInfo: "When enabled, the next tone plays automatically after the delay period. Toggle with the ⏯ button or adjust the delay slider.",
+    delayInfo: "RT limit: Maximum reaction time to answer before timeout. Delay: Time between trials when auto-next is enabled.",
+    timerInfo: "Remaining time in your 30-minute daily training session. Timer only runs during active training, not during menus or breaks.",
+    chunkInfo: "Time remaining in current 6-minute training chunk before a mandatory 60-second break. Shows current chunk number out of 5 total chunks.",
+    jitterInfo: "Jitter Level shows how much pitch variation is added for training. JL0 = easiest (±3-8¢), JL1 = early (±5-10¢), JL2 = mid (±5-15¢), JL3 = hardest (±5-15¢ + probes). Example: currently you are on JL0 for F, JL2 for E. Jitter helps you learn where the pitch boundaries are.",
+    octaveInfo: "Octave mixing ratio. Shows percentage of center octave vs neighbor octaves. Adaptive mixing based on your performance to encourage learning pitch class rather than absolute pitch height."
+  };
+  
+  Object.keys(tooltips).forEach(id => {
+    const element = byId(id);
+    if (element) {
+      element.classList.add('clickable', 'tooltip');
+      let tooltipContent = element.querySelector('.tooltip-content');
+      if (!tooltipContent) {
+        tooltipContent = document.createElement('div');
+        tooltipContent.className = 'tooltip-content';
+        tooltipContent.textContent = tooltips[id];
+        element.appendChild(tooltipContent);
+      }
+    }
+  });
+}
 function report(err){ const el=byId('bootError'); if(!el) return; el.style.display='block'; el.textContent = '⚠️ Script error: ' + (err && err.message ? err.message : String(err)); if(err && err.stack){ el.textContent += '\n' + err.stack; } }
 
 let state;
@@ -1296,7 +1341,7 @@ function updateJitterStatusUI(set) {
     .sort(([,a], [,b]) => b - a)[0];
   
   if (mostCommon) {
-    text('jitterInfo', `Jitter: ${mostCommon[0]}`);
+    textWithTooltip('jitterInfo', `Jitter: ${mostCommon[0]}`);
     byId('jitterInfo').style.display = 'inline-flex';
   }
 }
@@ -1307,7 +1352,7 @@ function updateOctaveStatusUI() {
   const centerPct = Math.round(mix.center * 100);
   const neighborPct = Math.round(mix.neighbors * 100);
   
-  text('octaveInfo', `Mix: ${centerPct}/${neighborPct}`);
+  textWithTooltip('octaveInfo', `Mix: ${centerPct}/${neighborPct}`);
   byId('octaveInfo').style.display = 'inline-flex';
 }
 
@@ -1984,15 +2029,15 @@ function pcLabel(pc){ return PC_LABEL[pc] || pc; }
 
 function updateLevelUI(){
   const set=setFromIndex(state.levelIndex), block=blockFromIndex(state.levelIndex);
-  text('setInfo', `Set ${set} / 12`);
-  text('blockInfo', `Block ${block} / 24`);
-  if(block >= 21){ text('accInfo', `Testing — No Feedback`); }
+  textWithTooltip('setInfo', `Pitches ${set} / 12`);
+  textWithTooltip('blockInfo', `Block ${block} / 24`);
+  if(block >= 21){ textWithTooltip('accInfo', `Testing — No Feedback`); }
   else{
     const req=(thresholdForIndex(state.levelIndex)*100).toFixed(0);
     const acc=((state.levelCorrect/state.levelTrials*100)||0).toFixed(0);
-    text('accInfo', `Acc ${acc}% (req ${req}%)`);
+    textWithTooltip('accInfo', `Acc ${acc}% (req ${req}%)`);
   }
-  text('delayInfo', `RT limit: ${rtWindowForSet(set)}ms • Delay: ${delayMs}ms`);
+  textWithTooltip('delayInfo', `RT limit: ${rtWindowForSet(set)}ms • Delay: ${delayMs}ms`);
   
   // Update jitter and octave status for active sessions
   if (sessionActive && set >= 1) {
@@ -2762,6 +2807,7 @@ function startTrainingDirectly(){
   // Show trainer screen and start
   showScreen('trainerScreen');
   updateLevelUI();
+  initializeTooltips();
   paintNotes();
   text('promptPill', 'Session started — press Play to begin training');
   
@@ -2799,7 +2845,7 @@ function startSessionTimer(){
     
     // Update timer display
     const left = Math.max(0, SESS_DAILY_MS - usedMs);
-    text('timerInfo', `Time left: ${fmtMMSS(left)}`);
+    textWithTooltip('timerInfo', `Time left: ${fmtMMSS(left)}`);
     
     // Update training chunk display
     if(!state.inBreak) {
@@ -2807,7 +2853,7 @@ function startSessionTimer(){
       const chunkLeft = Math.max(0, BREAK_INTERVAL_MS - chunkUsedMs);
       const currentChunk = Math.floor(usedMs / BREAK_INTERVAL_MS) + 1;
       const totalChunks = Math.ceil(SESS_DAILY_MS / BREAK_INTERVAL_MS);
-      text('chunkInfo', `Training: ${fmtMMSS(chunkLeft)} (${currentChunk}/${totalChunks})`);
+      textWithTooltip('chunkInfo', `Training: ${fmtMMSS(chunkLeft)} (${currentChunk}/${totalChunks})`);
     }
     
   }, 1000); // Update every second
@@ -3131,7 +3177,7 @@ function wireOnce(){
     else { showScreen('menuScreen'); populatePitchSelect(); drawChart(); }
   });
   safe('btnToggleAuto',  el=> el.onclick=()=>{
-    autoNext=!autoNext; text('autoInfo',`Auto-next: ${autoNext?'On':'Off'}`);
+    autoNext=!autoNext; textWithTooltip('autoInfo',`Auto-next: ${autoNext?'On':'Off'}`);
     const sl=byId('delaySlider'); if(sl){ sl.disabled=!autoNext; sl.classList.toggle('disabled', !autoNext); }
     if(!autoNext && autoTimer){ clearTimeout(autoTimer); autoTimer=null; }
   });
@@ -3145,7 +3191,7 @@ function wireOnce(){
   safe('btnOther', el=> el.onclick=()=> answerSpecial(false));
 
   // Strict modal buttons
-  safe('btnStrictResume', el=> el.onclick=()=>{ closeStrictModal(); showScreen('trainerScreen'); });
+  safe('btnStrictResume', el=> el.onclick=()=>{ closeStrictModal(); showScreen('trainerScreen'); initializeTooltips(); });
   safe('btnStrictMenu',   el=> el.onclick=()=>{ closeStrictModal(); showScreen('menuScreen'); });
 
   // New pitch modal buttons
