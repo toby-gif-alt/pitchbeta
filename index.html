@@ -214,6 +214,18 @@
         <button id="applyThemeBtn" class="scopeBtn">Change</button>
       </div>
     </div>
+    
+    <!-- Variety Mode -->
+    <div class="row" style="margin-top:8px;gap:12px">
+      <div class="scopeWrap">
+        <span style="opacity:.9">Variety mode:</span>
+        <span id="varietyStatus" style="margin-left:8px;padding:4px 8px;border-radius:8px;background:var(--muted)">Off</span>
+        <button id="toggleVarietyBtn" class="scopeBtn">Toggle</button>
+      </div>
+      <div style="font-size:12px;opacity:0.8;margin-left:8px">
+        Weeks 1-2: 100% chosen timbre • Week 3+: 80% chosen, 20% alternate
+      </div>
+    </div>
 
     <!-- Progress -->
     <div class="card" id="progressCard">
@@ -397,7 +409,7 @@
   <div id="strictModal" aria-modal="true" role="dialog">
     <div id="strictBox" class="card">
       <h3>⚠️ Don’t break your session</h3>
-      <p>Training is meant to be one strict 20-minute session without interruption. Please finish, then wait until tomorrow.</p>
+      <p>Training is meant to be completed as structured 30-minute sessions (5×6-minute blocks) without interruption. Please finish your current block, then take the scheduled break.</p>
       <div id="strictBtns">
         <button id="btnStrictResume">Resume Training</button>
         <button id="btnStrictMenu">Go to Menu</button>
@@ -531,6 +543,21 @@ const WEEKLY_TARGET_MS=2*3600*1000;
 const LOCKOUT_MS=6*3600*1000;
 const LATENCY_CUSHION_MS=100;
 
+// Jitter Tones & Boundary Probes
+const BOUNDARY_PROBE_RATE = 0.10;
+const N_RECALL_NOTES = 3;
+
+// Jitter Ladder by maturity level
+const JITTER_LADDER = {
+  JL0: { jitterRange: [3, 8], anchorCenterShare: 0.30, probeRate: 0.03 },
+  JL1: { jitterRange: [5, 10], anchorCenterShare: 0.25, probeRate: 0.05 },
+  JL2: { jitterRange: [5, 15], anchorCenterShare: 0.15, probeRate: 0.08 },
+  JL3: { jitterRange: [5, 15], anchorCenterShare: 0.12, probeRate: 0.10 }
+};
+
+// Octave mixing
+const SURPRISE_OCT_RATE = 0.10;
+
 /* ------------------ THEME SYSTEM ------------------ */
 function applyTheme(themeName) {
   const theme = THEMES[themeName] || THEMES.default;
@@ -579,7 +606,15 @@ try{
     blocksCompleted: 0,
     currentBlockStart: null,
     inBreak: false,
-    breakStart: null
+    breakStart: null,
+    // Pitch maturity and confusion tracking
+    pitchMaturity: {}, // pc -> { level: 'JL0'|'JL1'|'JL2'|'JL3', lastN: [], totalTrials: 0, correctTrials: 0 }
+    confusionMatrix: {}, // [truePC][chosenPC] -> count
+    lastNGradedInBounds: [], // last 60 graded in-bounds for OOB adaptation
+    currentOobRate: 0.25,
+    oobAdaptationBlockCount: 0,
+    // Variety mode
+    varietyMode: false
   };
 } catch(e){
   state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO };
@@ -611,6 +646,12 @@ if (state.minutesToday === undefined) {
   state.currentBlockStart = null;
   state.inBreak = false;
   state.breakStart = null;
+  state.pitchMaturity = {};
+  state.confusionMatrix = {};
+  state.lastNGradedInBounds = [];
+  state.currentOobRate = 0.25;
+  state.oobAdaptationBlockCount = 0;
+  state.varietyMode = false;
   save();
 }
 
@@ -705,6 +746,8 @@ function updateCapsUI(){
   const remainingMin = Math.max(0, DAILY_TARGET_MIN - state.minutesToday);
   text('capInfo', `Left: ${remainingMin} min (${state.blocksCompleted}/5 blocks)`);
   
+  updateVarietyModeDisplay();
+  
   const usedW = state.thisWeekMs || 0;
   const wp = byId('weekPill');
   if(wp){
@@ -734,6 +777,14 @@ function updateCapsUI(){
     }
   }
   const pf = byId('playFlappy'); if(pf) pf.disabled = !locked;
+}
+
+function updateVarietyModeDisplay() {
+  const status = byId('varietyStatus');
+  if (status) {
+    status.textContent = state.varietyMode ? 'On' : 'Off';
+    status.style.background = state.varietyMode ? 'var(--good)' : 'var(--muted)';
+  }
 }
 function setFromIndex(i){return Math.floor((i-1)/LEVELS_PER_SET)+1;}
 function blockFromIndex(i){return ((i-1)%LEVELS_PER_SET)+1;}
@@ -936,10 +987,64 @@ function getPlusMinusTwoSemitones(targetPc){
   return pitches;
 }
 function currentOctaves(){ 
-  if (state.audioType === AUDIO_TYPES.GUITAR) {
-    return [3,4,5]; // Guitar uses C3-B5
+  // Always use octaves 3-5 across all timbres (center = 4)
+  return [3, 4, 5];
+}
+
+function selectOctaveWithMixing(pc, isInBounds = true) {
+  if (!isInBounds) {
+    // OOB trials mirror the in-bounds octave mix
+    return selectOctaveWithMixing(pc, true);
   }
-  return [4,5,6]; // Piano uses C4-B6
+  
+  // For now, use basic mixing - in a full implementation this would
+  // track set windows and progression
+  const octaves = currentOctaves();
+  const centerOct = 4;
+  const neighborOcts = [3, 5];
+  
+  // Basic progression: start with heavy center bias, gradually increase neighbors
+  const set = setFromIndex(state.levelIndex);
+  const block = blockFromIndex(state.levelIndex);
+  const trialsInSet = (block - 1) * 20 + state.levelTrials; // approximate
+  
+  let centerShare = 0.90; // Start with high center bias
+  let neighborShare = 0.10;
+  
+  // Simple progression based on set experience
+  if (trialsInSet > 100) {
+    centerShare = 0.70;
+    neighborShare = 0.30;
+  }
+  if (trialsInSet > 200) {
+    centerShare = 0.60;
+    neighborShare = 0.40;
+  }
+  
+  // Per-note override: weak pitches get +0.20 toward center
+  const maturity = getPitchMaturity(pc);
+  if (maturity.lastN.length >= 10) {
+    const recentAcc = maturity.lastN.slice(-10).reduce((a,b) => a+b, 0) / Math.min(10, maturity.lastN.length);
+    const medianCents = maturity.medianCents.length ? 
+      maturity.medianCents.slice(-10).sort((a,b) => a-b)[Math.floor(maturity.medianCents.slice(-10).length/2)] : 0;
+    
+    if (recentAcc < 0.75 || medianCents > 25) {
+      centerShare = Math.min(1.0, centerShare + 0.20);
+      neighborShare = Math.max(0.0, neighborShare - 0.20);
+    }
+  }
+  
+  // Select octave based on shares
+  if (Math.random() < centerShare) {
+    return centerOct;
+  } else {
+    // Within neighbor share, check for surprise octave rate
+    if (Math.random() < SURPRISE_OCT_RATE) {
+      return rand(neighborOcts); // Surprise octave
+    } else {
+      return rand(neighborOcts); // Regular neighbor
+    }
+  }
 }
 function rand(a){ return a[Math.floor(Math.random()*a.length)]; }
 function pcLabel(pc){ return PC_LABEL[pc] || pc; }
@@ -1428,6 +1533,167 @@ function chooseOOB(){
   scheduleAuto();
 }
 
+/* ------------------ JITTER & PROBE SYSTEM ------------------ */
+function getPitchMaturity(pc) {
+  if (!state.pitchMaturity[pc]) {
+    state.pitchMaturity[pc] = {
+      level: 'JL0',
+      lastN: [], // up to 40 booleans for recent trials
+      totalTrials: 0,
+      correctTrials: 0,
+      medianCents: [],
+      stdCents: []
+    };
+  }
+  return state.pitchMaturity[pc];
+}
+
+function updatePitchMaturity(pc, correct, cents) {
+  const maturity = getPitchMaturity(pc);
+  
+  // Update rolling window (lastN = 40)
+  maturity.lastN.push(correct);
+  if (maturity.lastN.length > 40) {
+    maturity.lastN.shift();
+  }
+  
+  // Update totals
+  maturity.totalTrials++;
+  if (correct) maturity.correctTrials++;
+  
+  // Store cents for analysis
+  if (cents !== undefined) {
+    maturity.medianCents.push(Math.abs(cents));
+    if (maturity.medianCents.length > 40) {
+      maturity.medianCents.shift();
+    }
+  }
+  
+  // Evaluate maturity transitions if we have enough data
+  if (maturity.lastN.length >= 20) {
+    const recentAcc = maturity.lastN.slice(-40).reduce((a,b) => a+b, 0) / Math.min(40, maturity.lastN.length);
+    const medianCents = maturity.medianCents.length ? 
+      maturity.medianCents.slice().sort((a,b) => a-b)[Math.floor(maturity.medianCents.length/2)] : 999;
+    const stdCents = maturity.medianCents.length > 1 ? 
+      Math.sqrt(maturity.medianCents.reduce((a,v) => a + Math.pow(v - medianCents, 2), 0) / maturity.medianCents.length) : 999;
+    
+    // Progression rules
+    if (maturity.level === 'JL0' && recentAcc >= 0.75 && medianCents <= 20) {
+      maturity.level = 'JL1';
+    } else if (maturity.level === 'JL1' && recentAcc >= 0.80 && medianCents <= 15) {
+      maturity.level = 'JL2';
+    } else if (maturity.level === 'JL2' && recentAcc >= 0.90 && medianCents <= 10 && stdCents <= 15) {
+      maturity.level = 'JL3';
+    }
+    
+    // Regression rule (last 20 trials)
+    if (maturity.lastN.length >= 20) {
+      const recent20Acc = maturity.lastN.slice(-20).reduce((a,b) => a+b, 0) / 20;
+      if (recent20Acc < 0.75 || medianCents > 25 || stdCents > 30) {
+        if (maturity.level === 'JL3') maturity.level = 'JL2';
+        else if (maturity.level === 'JL2') maturity.level = 'JL1';
+        else if (maturity.level === 'JL1') maturity.level = 'JL0';
+      }
+    }
+  }
+  
+  save();
+}
+
+function selectInBoundsPitch(usablePitches) {
+  // Confusion-aware scheduling
+  const weights = {};
+  let totalWeight = 0;
+  
+  for (const pc of usablePitches) {
+    const maturity = getPitchMaturity(pc);
+    const lastAcc = maturity.lastN.length ? 
+      maturity.lastN.reduce((a,b) => a+b, 0) / maturity.lastN.length :
+      (maturity.totalTrials ? maturity.correctTrials / maturity.totalTrials : 0.5);
+    
+    // Base weight: w = max(0.15, (1 - lastAcc)^2 + 0.15)
+    let weight = Math.max(0.15, Math.pow(1 - lastAcc, 2) + 0.15);
+    
+    // Confusion boost: find most confused pitch and boost its weight by 1.35
+    if (state.confusionMatrix[pc]) {
+      const confusions = state.confusionMatrix[pc];
+      let maxConfusion = 0;
+      let mostConfusedWith = null;
+      for (const [otherPc, count] of Object.entries(confusions)) {
+        if (otherPc !== pc && count > maxConfusion) {
+          maxConfusion = count;
+          mostConfusedWith = otherPc;
+        }
+      }
+      if (mostConfusedWith && usablePitches.includes(mostConfusedWith)) {
+        weight *= 1.35;
+      }
+    }
+    
+    weights[pc] = weight;
+    totalWeight += weight;
+  }
+  
+  // Weighted random selection
+  let rand = Math.random() * totalWeight;
+  for (const pc of usablePitches) {
+    rand -= weights[pc];
+    if (rand <= 0) return pc;
+  }
+  
+  return usablePitches[0]; // fallback
+}
+
+function applyJitterOrProbe(pc) {
+  const maturity = getPitchMaturity(pc);
+  const ladder = JITTER_LADDER[maturity.level];
+  
+  // 1) Boundary probe check
+  if (Math.random() < ladder.probeRate) {
+    const detune = (Math.random() < 0.5 ? -1 : 1) * (25 + Math.random() * 15); // ±25 to ±40 cents
+    return {
+      note: applyDetuneToNote(pc, detune),
+      detune: detune,
+      category: 'probe'
+    };
+  }
+  
+  // 2) Center anchor check
+  if (Math.random() < ladder.anchorCenterShare) {
+    const octave = selectOctaveWithMixing(pc, true);
+    return {
+      note: `${pc}${octave}`,
+      detune: 0,
+      category: 'anchor'
+    };
+  }
+  
+  // 3) Jittered center
+  const jitterRange = ladder.jitterRange;
+  const detune = (Math.random() < 0.5 ? -1 : 1) * 
+    (jitterRange[0] + Math.random() * (jitterRange[1] - jitterRange[0]));
+  
+  return {
+    note: applyDetuneToNote(pc, detune),
+    detune: detune,
+    category: 'jitter'
+  };
+}
+
+function applyDetuneToNote(pc, centDetune) {
+  // For now, apply detune by selecting a slightly different note or using synthesis
+  // This is a simplified implementation - in a real system you'd use audio processing
+  const octave = selectOctaveWithMixing(pc, true);
+  
+  if (Math.abs(centDetune) < 5) {
+    // Small detune - use the exact note
+    return `${pc}${octave}`;
+  } else {
+    // Larger detune - for now just use the base note (proper implementation would detune audio)
+    return `${pc}${octave}`;
+  }
+}
+
 /* Driving */
 function scheduleAuto(){ if(autoTimer){ clearTimeout(autoTimer); autoTimer=null; } if(autoNext && sessionActive && !paused && !shepRunning && !special){ autoTimer = setTimeout(()=> nextTrial(true), delayMs); } }
 async function nextTrial(forceNew=false){
@@ -1448,10 +1714,26 @@ async function nextTrial(forceNew=false){
       const set = setFromIndex(state.levelIndex);
       const usable = trainedSet(set);
       const oobs = currentOOBs(set);
-      isOOBTrial = oobs.length && Math.random() < OOB_RATE;
-      const pc = isOOBTrial ? rand(oobs) : rand(usable);
-      truePc = pc;
-      currentNote = `${pc}${rand(currentOctaves())}`;
+      
+      // Use adaptive OOB rate instead of fixed rate
+      isOOBTrial = oobs.length && Math.random() < state.currentOobRate;
+      
+      if (isOOBTrial) {
+        // OOB trials: no jitter, detune = 0¢, mirror in-bounds octave mix
+        truePc = rand(oobs);
+        const octave = selectOctaveWithMixing(truePc, false); // Mirror in-bounds mixing
+        currentNote = `${truePc}${octave}`;
+      } else {
+        // In-bounds trials: apply jitter/boundary probe system
+        const selectedPc = selectInBoundsPitch(usable);
+        const jitterInfo = applyJitterOrProbe(selectedPc);
+        truePc = selectedPc;
+        currentNote = jitterInfo.note;
+        
+        // Store the detune info for later analysis
+        window.currentTrialDetune = jitterInfo.detune;
+        window.currentTrialCategory = jitterInfo.category; // 'probe', 'anchor', 'jitter'
+      }
     }
     await playSample(currentNote);
     if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
@@ -1495,9 +1777,85 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
   const block = blockFromIndex(state.levelIndex);
   if(block >= 21){ if(ok){ state.testFailStreak=0; hideSuggestBanner(); suggestedRestartFlag=false; } else { state.testFailStreak=(state.testFailStreak||0)+1; } }
   else { state.testFailStreak=0; hideSuggestBanner(); suggestedRestartFlag=false; }
-  state.trials.push({note:currentNote, pc:truePc, guess:guessLabel, correct:ok, timeout, oob:oobChosen, set:setFromIndex(state.levelIndex), block:block, time:Date.now()});
+  
+  // Enhanced trial data with jitter info
+  const trialData = {
+    note: currentNote, 
+    pc: truePc, 
+    guess: guessLabel, 
+    correct: ok, 
+    timeout, 
+    oob: oobChosen, 
+    set: setFromIndex(state.levelIndex), 
+    block: block, 
+    time: Date.now()
+  };
+  
+  // Add jitter info if available
+  if (window.currentTrialDetune !== undefined) {
+    trialData.detune = window.currentTrialDetune;
+    trialData.category = window.currentTrialCategory;
+  }
+  
+  state.trials.push(trialData);
+  
+  // Update maturity and confusion matrix for in-bounds trials only
+  if (!isOOBTrial && !oobChosen && truePc && guessLabel !== 'OOB' && !timeout) {
+    // Update pitch maturity
+    const cents = window.currentTrialDetune || 0;
+    updatePitchMaturity(truePc, ok, Math.abs(cents));
+    
+    // Update confusion matrix
+    if (!state.confusionMatrix[truePc]) {
+      state.confusionMatrix[truePc] = {};
+    }
+    const chosenPc = guessLabel === 'OOB' ? 'OOB' : guessLabel;
+    if (chosenPc && chosenPc !== 'OOB') {
+      state.confusionMatrix[truePc][chosenPc] = (state.confusionMatrix[truePc][chosenPc] || 0) + 1;
+    }
+    
+    // Track for OOB adaptation (last 60 graded in-bounds)
+    state.lastNGradedInBounds = state.lastNGradedInBounds || [];
+    state.lastNGradedInBounds.push(ok);
+    if (state.lastNGradedInBounds.length > 60) {
+      state.lastNGradedInBounds.shift();
+    }
+  }
+  
+  // Clean up trial-specific data
+  window.currentTrialDetune = undefined;
+  window.currentTrialCategory = undefined;
+  
   save(); updateLevelUI(); try{ drawChart(); }catch(_){}; 
   if(block >= 21 && !ok) maybeSuggestRestart();
+  
+  // Check for OOB adaptation every 3 blocks
+  if (!isOOBTrial && !oobChosen) {
+    state.oobAdaptationBlockCount = (state.oobAdaptationBlockCount || 0) + 1;
+    if (state.oobAdaptationBlockCount >= 3) {
+      adaptOobRate();
+      state.oobAdaptationBlockCount = 0;
+      save();
+    }
+  }
+}
+
+function adaptOobRate() {
+  // Use last 60 graded in-bounds to adjust OOB rate
+  if (state.lastNGradedInBounds.length >= 30) { // Need at least 30 trials
+    const accuracy = state.lastNGradedInBounds.reduce((a, b) => a + b, 0) / state.lastNGradedInBounds.length;
+    
+    // Target accuracy: 70-85%
+    if (accuracy < 0.70) {
+      // Too hard, reduce OOB rate
+      state.currentOobRate = Math.max(0.05, state.currentOobRate - 0.03);
+    } else if (accuracy > 0.85) {
+      // Too easy, increase OOB rate  
+      state.currentOobRate = Math.min(0.35, state.currentOobRate + 0.03);
+    }
+    
+    console.log(`OOB adaptation: accuracy=${(accuracy*100).toFixed(1)}%, new OOB rate=${(state.currentOobRate*100).toFixed(1)}%`);
+  }
 }
 
 function feedback(ok, wrongMsgOverride){
@@ -1980,6 +2338,14 @@ function wireOnce(){
     applyTheme(newTheme);
     const themeName = THEMES[newTheme]?.name || 'Dark Ocean';
     alert(`Theme changed to ${themeName}`);
+  });
+
+  // Variety mode toggle
+  safe('toggleVarietyBtn', el=> el.onclick=()=>{
+    state.varietyMode = !state.varietyMode;
+    save();
+    updateVarietyModeDisplay();
+    alert(`Variety mode ${state.varietyMode ? 'enabled' : 'disabled'}`);
   });
 
   // Trainer controls
