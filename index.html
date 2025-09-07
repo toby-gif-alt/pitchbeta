@@ -108,9 +108,11 @@
         <div class="tPage" id="tPage2">
           <h3>⏱ Daily session</h3>
           <ul>
-            <li>Train for <strong>20 minutes</strong> (timer runs only while actively training).</li>
+            <li>Train for <strong>30 minutes</strong> delivered as <strong>5 blocks of 6 minutes each</strong> (timer runs only while actively training).</li>
             <li>Menus, Flappy, and the 20-s <strong>Shepard tone</strong> don’t count.</li>
             <li>Blocks <strong>1–20</strong> with feedback; <strong>21–24</strong> are tests (no feedback).</li>
+            <li>Minutes credit is <strong>all-or-nothing per block</strong> — you get 6 minutes credit only when completing the full 6:00.</li>
+            <li><strong>60-second breaks</strong> after each 6-minute block with Flappy mini-game.</li>
           </ul>
         </div>
         <div class="tPage" id="tPage3">
@@ -520,7 +522,11 @@ const THRESH_24=[0.20,0.25,0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.60,0.65,0.70,0.7
 function blockHasFeedback(block){ return block<=20; }
 function rtWindowForSet(n){const a=1183,b=2028;return Math.round(a+(n-1)*(b-a)/11);}
 const OOB_RATE=0.25;
-const SESS_DAILY_MS=20*60*1000;
+// Updated for 30-minute session with 5×6-minute blocks
+const DAILY_TARGET_MIN = 30;
+const BLOCK_LEN_MIN = 6;
+const BREAK_SEC = 60;
+const SESS_DAILY_MS = DAILY_TARGET_MIN * 60 * 1000;
 const WEEKLY_TARGET_MS=2*3600*1000;
 const LOCKOUT_MS=6*3600*1000;
 const LATENCY_CUSHION_MS=100;
@@ -567,7 +573,13 @@ try{
     audioType: AUDIO_TYPES.PIANO,
     assessmentScores: [],
     theme: 'default',
-    flappySoundEnabled: true
+    flappySoundEnabled: true,
+    // New block-based tracking
+    minutesToday: 0,
+    blocksCompleted: 0,
+    currentBlockStart: null,
+    inBreak: false,
+    breakStart: null
   };
 } catch(e){
   state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO };
@@ -590,6 +602,15 @@ if (!state.theme) {
 // Migration for flappySoundEnabled
 if (state.flappySoundEnabled === undefined) {
   state.flappySoundEnabled = true;
+  save();
+}
+// Migration for new block tracking
+if (state.minutesToday === undefined) {
+  state.minutesToday = 0;
+  state.blocksCompleted = 0;
+  state.currentBlockStart = null;
+  state.inBreak = false;
+  state.breakStart = null;
   save();
 }
 
@@ -660,11 +681,30 @@ function showScreen(id){
   const el = byId(id); if(el) el.style.display='block';
 }
 function ensureWeekRoll(){ const wi=currentWeekIdx(); if(state.thisWeekIdx!==wi){ state.thisWeekIdx=wi; state.thisWeekMs=0; save(); } }
-function isLocked(){ return state.lockoutUntil && Date.now() < state.lockoutUntil; }
+function isLocked(){ 
+  // Check if we've completed our daily quota
+  if (state.minutesToday >= DAILY_TARGET_MIN) {
+    if (!state.lockoutUntil) {
+      state.lockoutUntil = Date.now() + LOCKOUT_MS;
+      save();
+    }
+    return Date.now() < state.lockoutUntil;
+  }
+  return state.lockoutUntil && Date.now() < state.lockoutUntil; 
+}
 function updateCapsUI(){
   ensureWeekRoll();
-  const left = Math.max(0, SESS_DAILY_MS - msUsedQuota());
-  text('capInfo', `Left: ${fmtMMSS(left)}`);
+  
+  // Check if daily lockout should be active
+  const isLockedOut = state.minutesToday >= DAILY_TARGET_MIN;
+  if (isLockedOut && !state.lockoutUntil) {
+    state.lockoutUntil = Date.now() + LOCKOUT_MS;
+    save();
+  }
+  
+  const remainingMin = Math.max(0, DAILY_TARGET_MIN - state.minutesToday);
+  text('capInfo', `Left: ${remainingMin} min (${state.blocksCompleted}/5 blocks)`);
+  
   const usedW = state.thisWeekMs || 0;
   const wp = byId('weekPill');
   if(wp){
@@ -679,8 +719,19 @@ function updateCapsUI(){
   const locked = isLocked();
   const lp = byId('lockoutPill');
   if(lp){
-    if(locked){ lp.style.display='inline-flex'; lp.textContent = `🔒 Locked (${fmtHMM(state.lockoutUntil - Date.now())} left)`; }
-    else lp.style.display='none';
+    if(locked && state.minutesToday >= DAILY_TARGET_MIN){ 
+      lp.style.display='inline-flex'; 
+      lp.textContent = `✅ Great work! Come back tomorrow.`; 
+      lp.style.background = 'var(--good)';
+    }
+    else if(locked){ 
+      lp.style.display='inline-flex'; 
+      lp.textContent = `🔒 Locked (${fmtHMM(state.lockoutUntil - Date.now())} left)`; 
+      lp.style.background = 'var(--muted)';
+    }
+    else { 
+      lp.style.display='none'; 
+    }
   }
   const pf = byId('playFlappy'); if(pf) pf.disabled = !locked;
 }
@@ -1539,22 +1590,61 @@ function startSession(){
   updateCapsUI(); updateLevelUI(); paintNotes();
   text('promptPill','Press Play to start');
   stopAllTimers();
+  
+  // Initialize block tracking if starting a new session
+  if (!state.currentBlockStart && state.minutesToday < DAILY_TARGET_MIN) {
+    state.currentBlockStart = Date.now();
+    save();
+  }
+  
   tickId=setInterval(()=>{
     ensureWeekRoll();
-    if(sessionActive && !paused && !shepRunning){ state.thisWeekMs = (state.thisWeekMs||0) + 1000; save(); }
-    if(sessionActive && !paused){
-      const left = Math.max(0, SESS_DAILY_MS - msUsedQuota());
-      text('timerInfo', `Time left: ${fmtMMSS(left)}`);
-      if(left<=0){
-        const now = Date.now();
-        const rec=state.sessions[state.sessions.length-1];
-        if(rec && !rec.completed){ rec.completed=true; rec.end = now; }
-        state.lockoutUntil = now + LOCKOUT_MS;
-        state.capResetAt   = state.lockoutUntil;
-        save(); endSession(true);
+    
+    // Update weekly time if actively training
+    if(sessionActive && !paused && !shepRunning && !state.inBreak){ 
+      state.thisWeekMs = (state.thisWeekMs||0) + 1000; 
+      save(); 
+    }
+    
+    if(sessionActive && !paused && !state.inBreak){
+      // Block-based timing
+      if (state.currentBlockStart) {
+        const blockElapsed = Date.now() - state.currentBlockStart;
+        const blockLeftMs = Math.max(0, BLOCK_LEN_MIN * 60 * 1000 - blockElapsed);
+        const blockLeftSec = Math.ceil(blockLeftMs / 1000);
+        const blockNum = state.blocksCompleted + 1;
+        
+        text('timerInfo', `Block ${blockNum}/5 — Time left: ${fmtMMSS(blockLeftMs)}`);
+        
+        // Check if block is complete
+        if(blockLeftMs <= 0){
+          // Block completed! Credit the full 6 minutes
+          state.minutesToday += BLOCK_LEN_MIN;
+          state.blocksCompleted++;
+          state.currentBlockStart = null;
+          
+          const now = Date.now();
+          const rec=state.sessions[state.sessions.length-1];
+          if(rec && !rec.completed){ rec.completed=true; rec.end = now; }
+          
+          save();
+          
+          // Check if all blocks are done
+          if(state.blocksCompleted >= 5){
+            state.lockoutUntil = now + LOCKOUT_MS;
+            save();
+            endSession(true);
+            return;
+          } else {
+            // Start break
+            startBreak();
+            return;
+          }
+        }
       }
     }
-    updateCapsUI(); drawChart();
+    updateCapsUI(); 
+    try{ drawChart(); }catch(_){}
   },1000);
 }
 function endSession(auto){
@@ -1565,9 +1655,73 @@ function endSession(auto){
   save(); updateCapsUI(); try{ drawChart(); }catch(_){};
   if(auto){
     const left = state.lockoutUntil ? fmtHMM(state.lockoutUntil - Date.now()) : 'some time';
-    alert(`Cap reached. Locked for ${left}.`);
+    if (state.minutesToday >= DAILY_TARGET_MIN) {
+      alert(`Great work! You completed all 5 blocks (30 minutes). Come back tomorrow!`);
+    } else {
+      alert(`Cap reached. Locked for ${left}.`);
+    }
   }
 }
+
+/* ------------------ BREAK SYSTEM ------------------ */
+function startBreak(){
+  if(state.inBreak) return;
+  
+  state.inBreak = true;
+  state.breakStart = Date.now();
+  save();
+  
+  // Pause the session
+  pauseStart('block-break');
+  
+  // Show break message
+  text('promptPill', `Block ${state.blocksCompleted} complete! 60-second break starting...`);
+  
+  // Start break countdown
+  let breakLeft = BREAK_SEC;
+  const breakInterval = setInterval(() => {
+    breakLeft--;
+    text('promptPill', `Break: ${breakLeft}s remaining — Flappy available`);
+    
+    if (breakLeft <= 0) {
+      clearInterval(breakInterval);
+      endBreak();
+    }
+  }, 1000);
+  
+  // Allow Flappy during break but store the interval to clean up
+  window.currentBreakInterval = breakInterval;
+}
+
+function endBreak(){
+  if (!state.inBreak) return;
+  
+  state.inBreak = false;
+  state.breakStart = null;
+  
+  // If there are more blocks to do, start the next one
+  if (state.blocksCompleted < 5) {
+    state.currentBlockStart = Date.now();
+  }
+  
+  save();
+  
+  // Resume session
+  pauseEnd();
+  
+  if (state.blocksCompleted < 5) {
+    text('promptPill', `Break over! Starting block ${state.blocksCompleted + 1}/5`);
+  } else {
+    text('promptPill', 'All blocks complete! Training finished for today.');
+  }
+  
+  // Clean up break interval
+  if (window.currentBreakInterval) {
+    clearInterval(window.currentBreakInterval);
+    window.currentBreakInterval = null;
+  }
+}
+
 function pauseStart(reason){
   const rec=state.sessions[state.sessions.length-1]; if(!rec) return;
   rec.pauses=rec.pauses||[]; const last=rec.pauses[rec.pauses.length-1];
@@ -1588,7 +1742,27 @@ function pauseResume(){
 }
 
 /* ------------------ QUOTA ------------------ */
-function quotaStart(){ if(state.capResetAt && Date.now() >= state.capResetAt) return state.capResetAt; const d = new Date(); d.setHours(0,0,0,0); return d.getTime(); }
+function quotaStart(){ 
+  const now = Date.now();
+  if(state.capResetAt && now >= state.capResetAt) {
+    // Reset daily block tracking at midnight
+    const midnight = new Date();
+    midnight.setHours(0,0,0,0);
+    if (now >= midnight.getTime() + 24*60*60*1000) {
+      state.minutesToday = 0;
+      state.blocksCompleted = 0;
+      state.currentBlockStart = null;
+      state.inBreak = false;
+      state.breakStart = null;
+      state.lockoutUntil = null;
+      save();
+    }
+    return state.capResetAt; 
+  } 
+  const d = new Date(); 
+  d.setHours(0,0,0,0); 
+  return d.getTime(); 
+}
 function msUsedQuota(){ const start = quotaStart(); return (state.sessions || []).filter(s => s.start >= start).reduce((a, s) => a + activeDuration(s), 0); }
 
 /* ------------------ PROGRESS / CHARTS ------------------ */
@@ -1724,8 +1898,15 @@ function wireOnce(){
   safe('viewTracker', el=> el.onclick=()=> showTracker());
   safe('playFlappy',  el=> el.onclick=()=> openFlappyFromMenu());
   safe('resetLockout',el=> el.onclick=()=>{
-    if(!confirm('Reset lockout/timer now? This starts a fresh 20-minute window immediately.')) return;
-    state.lockoutUntil = null; state.capResetAt = Date.now(); state.lastSeen = Date.now();
+    if(!confirm('Reset lockout/timer now? This starts a fresh 30-minute (5×6-minute blocks) window immediately.')) return;
+    state.lockoutUntil = null; 
+    state.capResetAt = Date.now(); 
+    state.lastSeen = Date.now();
+    state.minutesToday = 0;
+    state.blocksCompleted = 0;
+    state.currentBlockStart = null;
+    state.inBreak = false;
+    state.breakStart = null;
     save(); updateCapsUI(); alert('Timer reset. You can start training now.');
   });
   safe('menuReset',   el=> el.onclick=()=> doFactoryReset());
