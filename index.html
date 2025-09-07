@@ -416,6 +416,41 @@
     </div>
   </div>
 
+  <!-- Pitch Recall Modal -->
+  <div id="recallModal" aria-modal="true" role="dialog" style="position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:1000;background:rgba(0,0,0,.55);pointer-events:auto">
+    <div id="recallBox" style="width:min(600px,92vw);background:var(--card);border:1px solid var(--muted);border-radius:16px;padding:18px 20px;box-shadow:0 20px 60px rgba(0,0,0,.5)">
+      <h2 id="recallTitle">🎵 Cold Recall Test</h2>
+      <p id="recallInstruction">Before training, please sing/hum the following notes to test your pitch memory:</p>
+      
+      <div id="recallProgress" style="margin:16px 0">
+        <span class="pill" id="recallCounter">Note 1 of 3</span>
+        <span class="pill" id="recallCurrentNote">F</span>
+      </div>
+      
+      <div style="text-align:center;margin:20px 0">
+        <div id="recallPrompt" style="font-size:18px;margin:12px 0">
+          <span>Sing or hum: <strong id="recallTargetNote">F</strong></span>
+        </div>
+        
+        <div style="margin:16px 0">
+          <button id="btnStartRecording" style="background:var(--good);font-size:16px;padding:12px 20px">🎤 Start Recording (2s)</button>
+          <button id="btnStopRecording" style="background:var(--bad);font-size:16px;padding:12px 20px;display:none">⏹ Stop Recording</button>
+        </div>
+        
+        <div id="recallFeedback" style="margin:16px 0;min-height:60px;display:none">
+          <div id="recallResults" style="font-size:16px;margin:8px 0"></div>
+          <div id="recallVerdict" style="font-size:14px;opacity:0.8"></div>
+        </div>
+      </div>
+      
+      <div id="recallButtons" style="display:flex;gap:10px;justify-content:flex-end;margin-top:12px">
+        <button id="btnSkipRecall" style="background:var(--muted)">Skip This Test</button>
+        <button id="btnNextRecall" style="background:var(--good);display:none">Next Note</button>
+        <button id="btnFinishRecall" style="background:var(--good);display:none">Start Training</button>
+      </div>
+    </div>
+  </div>
+
   <div id="bootError"></div>
 
 <script>
@@ -526,6 +561,8 @@ const WEEKLY_TARGET_MS=2*3600*1000;
 const BREAK_INTERVAL_MS=6*60*1000; // Break every 6 minutes
 const BREAK_DURATION_MS=60*1000; // 60-second mandatory break
 // Lockout until next calendar day (calculated dynamically)
+const RECALL_DURATION_MS=2000; // 2-second recording for recall tests
+const RECALL_SAMPLE_RATE=22050; // Lower sample rate for recall processing
 const LATENCY_CUSHION_MS=100;
 
 /* ------------------ THEME SYSTEM ------------------ */
@@ -654,6 +691,10 @@ function activeDuration(session){
 /* ------------------ FLAGS/TIMERS ------------------ */
 let sessionActive=false, paused=false;
 let rtTimer=null, autoTimer=null, tickId=null;
+
+/* Recall system state */
+let recallActive=false, recallType='cold', recallNotes=[], recallIndex=0;
+let recallStream=null, recallRecorder=null, recallData=[];
 function stopAllTimers(){ if(tickId){ clearInterval(tickId); tickId=null; } if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; } if(autoTimer){ clearTimeout(autoTimer); autoTimer=null; }
 
 /* one-shot suppression so strict modal doesn't appear right after specials */
@@ -880,6 +921,301 @@ async function playShepard20s(){
   await new Promise(r=>setTimeout(r,dur*1000));
   overlay.style.display='none'; shepRunning=false;
   if(wasActive){ pauseEnd(); safe('btnPause', el=> el.textContent='⏸ Pause'); }
+}
+
+/* ------------------ PITCH RECALL SYSTEM ------------------ */
+// Simplified pitch detection using autocorrelation
+function detectPitch(audioBuffer) {
+  const sampleRate = audioBuffer.sampleRate;
+  const buffer = audioBuffer.getChannelData(0);
+  const bufferSize = buffer.length;
+  
+  // Basic autocorrelation for pitch detection
+  const minPeriod = Math.floor(sampleRate / 800); // ~800 Hz max
+  const maxPeriod = Math.floor(sampleRate / 80);  // ~80 Hz min
+  
+  let bestCorrelation = 0;
+  let bestPeriod = 0;
+  
+  for (let period = minPeriod; period < maxPeriod && period < bufferSize / 2; period++) {
+    let correlation = 0;
+    for (let i = 0; i < bufferSize - period; i++) {
+      correlation += buffer[i] * buffer[i + period];
+    }
+    
+    if (correlation > bestCorrelation) {
+      bestCorrelation = correlation;
+      bestPeriod = period;
+    }
+  }
+  
+  if (bestPeriod === 0) return null;
+  
+  const frequency = sampleRate / bestPeriod;
+  return frequency;
+}
+
+function frequencyToCents(freq, referenceFreq = 440) {
+  if (!freq || freq <= 0) return null;
+  return Math.round(1200 * Math.log2(freq / referenceFreq));
+}
+
+function centsToNoteName(cents) {
+  // A4 = 440Hz = 0 cents reference
+  const noteNames = ['A', 'Bb', 'B', 'C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab'];
+  const semitonesFromA = Math.round(cents / 100);
+  const noteIndex = ((semitonesFromA % 12) + 12) % 12;
+  return noteNames[noteIndex];
+}
+
+function targetNoteToCents(note) {
+  // Convert note name to cents offset from A4
+  const noteOffsets = {A: 0, Bb: 100, B: 200, C: 300, Db: 400, D: 500, Eb: 600, E: 700, F: 800, Gb: 900, G: 1000, Ab: 1100};
+  return noteOffsets[note] || 0;
+}
+
+async function startRecallTest(type = 'cold') {
+  if (!state.userName) return;
+  
+  recallType = type;
+  recallActive = true;
+  recallIndex = 0;
+  recallData = [];
+  
+  // Determine which notes to test (2-3 learned notes)
+  const set = setFromIndex(state.levelIndex);
+  const learnedNotes = trainedSet(Math.min(set, 3)); // Use first 2-3 learned notes
+  recallNotes = learnedNotes.slice(0, Math.min(3, learnedNotes.length));
+  
+  if (recallNotes.length === 0) {
+    // No learned notes yet, skip recall
+    if (type === 'cold') startTrainingDirectly();
+    return;
+  }
+  
+  // Update modal
+  document.getElementById('recallTitle').textContent = type === 'cold' ? '🌅 Cold Recall Test' : '🔥 Warm Recall Test';
+  document.getElementById('recallInstruction').textContent = 
+    type === 'cold' 
+      ? 'Before training, please sing/hum the following notes to test your pitch memory:'
+      : 'After training, please sing/hum the following notes again:';
+  
+  updateRecallUI();
+  document.getElementById('recallModal').style.display = 'flex';
+}
+
+function updateRecallUI() {
+  if (!recallActive || recallIndex >= recallNotes.length) return;
+  
+  const currentNote = recallNotes[recallIndex];
+  document.getElementById('recallCounter').textContent = `Note ${recallIndex + 1} of ${recallNotes.length}`;
+  document.getElementById('recallCurrentNote').textContent = pcLabel(currentNote);
+  document.getElementById('recallTargetNote').textContent = pcLabel(currentNote);
+  
+  // Reset UI state
+  document.getElementById('recallFeedback').style.display = 'none';
+  document.getElementById('btnStartRecording').style.display = 'inline-block';
+  document.getElementById('btnStopRecording').style.display = 'none';
+  document.getElementById('btnNextRecall').style.display = 'none';
+  document.getElementById('btnFinishRecall').style.display = 'none';
+}
+
+async function startRecallRecording() {
+  try {
+    // Request microphone access
+    recallStream = await navigator.mediaDevices.getUserMedia({ 
+      audio: { 
+        sampleRate: RECALL_SAMPLE_RATE,
+        channelCount: 1,
+        echoCancellation: false,
+        noiseSuppression: false 
+      } 
+    });
+    
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: RECALL_SAMPLE_RATE });
+    const source = audioContext.createMediaStreamSource(recallStream);
+    
+    // Use MediaRecorder for simplicity
+    recallRecorder = new MediaRecorder(recallStream);
+    const chunks = [];
+    
+    recallRecorder.ondataavailable = (event) => {
+      chunks.push(event.data);
+    };
+    
+    recallRecorder.onstop = async () => {
+      const blob = new Blob(chunks, { type: 'audio/wav' });
+      const arrayBuffer = await blob.arrayBuffer();
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+      processRecallRecording(audioBuffer);
+      
+      // Clean up
+      recallStream.getTracks().forEach(track => track.stop());
+      recallStream = null;
+      audioContext.close();
+    };
+    
+    // Update UI
+    document.getElementById('btnStartRecording').style.display = 'none';
+    document.getElementById('btnStopRecording').style.display = 'inline-block';
+    
+    // Start recording
+    recallRecorder.start();
+    
+    // Auto-stop after 2 seconds
+    setTimeout(() => {
+      if (recallRecorder && recallRecorder.state === 'recording') {
+        recallRecorder.stop();
+      }
+    }, RECALL_DURATION_MS);
+    
+  } catch (error) {
+    console.error('Error accessing microphone:', error);
+    alert('Could not access microphone. Please check permissions and try again.');
+    document.getElementById('btnStartRecording').style.display = 'inline-block';
+    document.getElementById('btnStopRecording').style.display = 'none';
+  }
+}
+
+function stopRecallRecording() {
+  if (recallRecorder && recallRecorder.state === 'recording') {
+    recallRecorder.stop();
+  }
+}
+
+function processRecallRecording(audioBuffer) {
+  const targetNote = recallNotes[recallIndex];
+  const targetCents = targetNoteToCents(targetNote);
+  
+  // Analyze multiple segments of the recording for better accuracy
+  const segmentSize = Math.floor(audioBuffer.length / 4);
+  const frequencies = [];
+  
+  for (let i = 0; i < 4; i++) {
+    const start = i * segmentSize;
+    const segmentBuffer = audioBuffer.getChannelData(0).slice(start, start + segmentSize);
+    const segmentAudioBuffer = {
+      sampleRate: audioBuffer.sampleRate,
+      getChannelData: () => segmentBuffer,
+      length: segmentBuffer.length
+    };
+    
+    const freq = detectPitch(segmentAudioBuffer);
+    if (freq && freq > 80 && freq < 800) {
+      frequencies.push(freq);
+    }
+  }
+  
+  if (frequencies.length === 0) {
+    showRecallResult('No clear pitch detected. Please try again.', null, null);
+    return;
+  }
+  
+  // Calculate median frequency and convert to cents
+  frequencies.sort((a, b) => a - b);
+  const medianFreq = frequencies[Math.floor(frequencies.length / 2)];
+  const detectedCents = frequencyToCents(medianFreq);
+  const centsError = detectedCents - targetCents;
+  
+  // Calculate standard deviation
+  const avgCents = frequencies.map(f => frequencyToCents(f));
+  const mean = avgCents.reduce((a, b) => a + b, 0) / avgCents.length;
+  const variance = avgCents.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / avgCents.length;
+  const stdDev = Math.sqrt(variance);
+  
+  // Determine verdict
+  let verdict;
+  const absError = Math.abs(centsError);
+  if (absError <= 10 && stdDev <= 15) {
+    verdict = 'On target';
+  } else if (absError <= 30) {
+    verdict = 'Close';
+  } else {
+    verdict = 'Off';
+  }
+  
+  // Store result
+  const result = {
+    note: targetNote,
+    type: recallType,
+    date: Date.now(),
+    medianCents: detectedCents,
+    centsError: centsError,
+    stdDev: stdDev,
+    verdict: verdict,
+    frequency: medianFreq
+  };
+  
+  recallData.push(result);
+  state.recallResults.push(result);
+  save();
+  
+  showRecallResult(`${Math.abs(centsError)} cents ${centsError >= 0 ? 'sharp' : 'flat'}`, verdict, centsError);
+}
+
+function showRecallResult(message, verdict, centsError) {
+  const feedbackDiv = document.getElementById('recallFeedback');
+  const resultsDiv = document.getElementById('recallResults');
+  const verdictDiv = document.getElementById('recallVerdict');
+  
+  resultsDiv.textContent = message;
+  verdictDiv.textContent = verdict ? `Verdict: ${verdict}` : '';
+  
+  // Color code the result
+  if (verdict === 'On target') {
+    resultsDiv.style.color = 'var(--good)';
+  } else if (verdict === 'Close') {
+    resultsDiv.style.color = 'var(--accent)';
+  } else {
+    resultsDiv.style.color = 'var(--bad)';
+  }
+  
+  feedbackDiv.style.display = 'block';
+  
+  // Show appropriate next button
+  if (recallIndex < recallNotes.length - 1) {
+    document.getElementById('btnNextRecall').style.display = 'inline-block';
+  } else {
+    document.getElementById('btnFinishRecall').style.display = 'inline-block';
+  }
+}
+
+function nextRecallNote() {
+  recallIndex++;
+  if (recallIndex >= recallNotes.length) {
+    finishRecallTest();
+  } else {
+    updateRecallUI();
+  }
+}
+
+function skipRecallTest() {
+  recallActive = false;
+  document.getElementById('recallModal').style.display = 'none';
+  
+  if (recallType === 'cold') {
+    startTrainingDirectly();
+  } else {
+    // Warm recall finished, show session complete
+    alert('Training session complete!');
+    showScreen('menuScreen');
+  }
+}
+
+function finishRecallTest() {
+  recallActive = false;
+  document.getElementById('recallModal').style.display = 'none';
+  
+  if (recallType === 'cold') {
+    state.coldRecallDone = true;
+    save();
+    startTrainingDirectly();
+  } else {
+    state.warmRecallDone = true;
+    save();
+    alert('Training session and warm recall complete!');
+    showScreen('menuScreen');
+  }
 }
 
 /* ------------------ TRAINING FLOW ------------------ */
@@ -1564,44 +1900,25 @@ function startSession(){
     alert(`Training is locked for ${fmtHMM(left)}.\nYou can still play Flappy from the menu, or Reset lockout/timer.`);
     showScreen('menuScreen'); return;
   }
-  showScreen('trainerScreen');
-  if(!state.startDate) state.startDate=Date.now();
-  ensureWeekRoll();
-  sessionActive=true; paused=false;
-  (state.sessions||[]).push({start:Date.now(),end:null,pauses:[],completed:false}); 
-  // Initialize break timing for this session
-  const now = Date.now();
-  state.sessionBreakTime = now + BREAK_INTERVAL_MS; // First break in 6 minutes
-  state.lastBreakTime = now;
-  state.inBreak = false;
-  state.lastSeen = now; save();
-  updateCapsUI(); updateLevelUI(); paintNotes();
-  text('promptPill','Press Play to start');
-  stopAllTimers();
-  tickId=setInterval(()=>{
-    ensureWeekRoll();
-    if(sessionActive && !paused && !shepRunning){ state.thisWeekMs = (state.thisWeekMs||0) + 1000; save(); }
-    if(sessionActive && !paused){
-      const now = Date.now();
-      const left = Math.max(0, SESS_DAILY_MS - msUsedQuota());
-      
-      // Check for mandatory break every 6 minutes
-      if(!state.inBreak && now >= state.sessionBreakTime){
-        triggerMandatoryBreak();
-        return; // Exit early, break will handle resume
-      }
-      
-      text('timerInfo', `Time left: ${fmtMMSS(left)}`);
-      if(left<=0){
-        const rec=state.sessions[state.sessions.length-1];
-        if(rec && !rec.completed){ rec.completed=true; rec.end = now; }
-        state.lockoutUntil = nextMidnight(now); // Lock until next calendar day
-        state.capResetAt   = state.lockoutUntil;
-        save(); endSession(true);
-      }
-    }
-    updateCapsUI(); drawChart();
-  },1000);
+  
+  // Check if we need to do cold recall first
+  const today = todayKey(Date.now());
+  const lastColdRecall = state.recallResults
+    .filter(r => r.type === 'cold')
+    .map(r => todayKey(r.date))
+    .pop();
+  
+  if (!lastColdRecall || lastColdRecall < today) {
+    // Need to do cold recall first
+    state.coldRecallDone = false;
+    state.warmRecallDone = false;
+    save();
+    startRecallTest('cold');
+    return;
+  }
+  
+  // Go directly to training
+  startTrainingDirectly();
 }
 function endSession(auto){
   if(!sessionActive) return;
