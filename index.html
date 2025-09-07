@@ -388,7 +388,7 @@
   <div id="strictModal" aria-modal="true" role="dialog">
     <div id="strictBox" class="card">
       <h3>⚠️ Don’t break your session</h3>
-      <p>Training is meant to be one strict 20-minute session without interruption. Please finish, then wait until tomorrow.</p>
+      <p>Training is meant to be one strict 30-minute session without interruption. Please finish, then wait until tomorrow.</p>
       <div id="strictBtns">
         <button id="btnStrictResume">Resume Training</button>
         <button id="btnStrictMenu">Go to Menu</button>
@@ -1876,6 +1876,72 @@ function startSession(){
   // Go directly to training
   startTrainingDirectly();
 }
+
+function startTrainingDirectly(){
+  // Start the training session directly
+  sessionActive = true;
+  paused = false;
+  
+  // Create new session record
+  const sessionRecord = {
+    start: Date.now(),
+    end: null,
+    pauses: []
+  };
+  
+  state.sessions = state.sessions || [];
+  state.sessions.push(sessionRecord);
+  
+  // Set up break timing
+  state.sessionBreakTime = Date.now() + BREAK_INTERVAL_MS;
+  state.inBreak = false;
+  save();
+  
+  // Show trainer screen and start
+  showScreen('trainerScreen');
+  updateLevelUI();
+  paintNotes();
+  text('promptPill', 'Session started — press Play to begin training');
+  
+  // Start session timer that checks for breaks and cap
+  startSessionTimer();
+}
+
+function startSessionTimer(){
+  if(tickId) clearInterval(tickId);
+  
+  tickId = setInterval(() => {
+    if(!sessionActive || paused) return;
+    
+    const now = Date.now();
+    const usedMs = msUsedQuota();
+    
+    // Check if we've hit the daily cap
+    if(usedMs >= SESS_DAILY_MS) {
+      clearInterval(tickId);
+      tickId = null;
+      
+      // Set lockout until next calendar day
+      state.lockoutUntil = nextMidnight(now);
+      save();
+      
+      endSession(true);
+      return;
+    }
+    
+    // Check if we need a mandatory break
+    if(!state.inBreak && now >= state.sessionBreakTime) {
+      triggerMandatoryBreak();
+      return;
+    }
+    
+    // Update timer display
+    const left = Math.max(0, SESS_DAILY_MS - usedMs);
+    text('timerInfo', `Time left: ${fmtMMSS(left)}`);
+    
+  }, 1000); // Update every second
+}
+
 function endSession(auto){
   if(!sessionActive) return;
   sessionActive=false;
@@ -1894,11 +1960,17 @@ function pauseStart(reason){
   paused=true;
   if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
   if(autoTimer){ clearTimeout(autoTimer); autoTimer=null; }
+  
+  // Stop session timer when paused
+  if(tickId){ clearInterval(tickId); tickId=null; }
 }
 function pauseEnd(){
   const rec=state.sessions[state.sessions.length-1]; if(!rec||!rec.pauses||!rec.pauses.length) return;
   const last=rec.pauses[rec.pauses.length-1]; if(last && !last.end) last.end=Date.now();
   paused=false;
+  
+  // Restart session timer when unpaused
+  if(sessionActive) startSessionTimer();
 }
 function pauseResume(){
   if(!sessionActive) return;
@@ -2043,7 +2115,7 @@ function wireOnce(){
   safe('viewTracker', el=> el.onclick=()=> showTracker());
   safe('playFlappy',  el=> el.onclick=()=> openFlappyFromMenu());
   safe('resetLockout',el=> el.onclick=()=>{
-    if(!confirm('Reset lockout/timer now? This starts a fresh 20-minute window immediately.')) return;
+    if(!confirm('Reset lockout/timer now? This starts a fresh 30-minute window immediately.')) return;
     state.lockoutUntil = null; state.capResetAt = Date.now(); state.lastSeen = Date.now();
     save(); updateCapsUI(); alert('Timer reset. You can start training now.');
   });
@@ -2155,6 +2227,13 @@ function wireOnce(){
     startFlappyReward(); 
   });
 
+  // Recall modal buttons
+  safe('btnStartRecording', el=> el.onclick=()=> startRecallRecording());
+  safe('btnStopRecording', el=> el.onclick=()=> stopRecallRecording());
+  safe('btnSkipRecall', el=> el.onclick=()=> skipRecallTest());
+  safe('btnNextRecall', el=> el.onclick=()=> nextRecallNote());
+  safe('btnFinishRecall', el=> el.onclick=()=> finishRecallTest());
+
   // Initial screen
   if(!state.userName){ showScreen('startScreen'); }
   else { safe('greeting', g=> g.textContent=`Hello ${state.userName}!`); showScreen('menuScreen'); updateCapsUI(); }
@@ -2247,8 +2326,9 @@ function endMandatoryBreak(){
   const modalTitle = byId('flappyModal').querySelector('h3');
   if(modalTitle) modalTitle.textContent = '🐤 Flappy Break';
   
-  // End break state
+  // End break state and schedule next break
   state.inBreak = false;
+  state.sessionBreakTime = Date.now() + BREAK_INTERVAL_MS; // Next break in 6 minutes
   save();
   
   // Resume session
