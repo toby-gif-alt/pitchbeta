@@ -108,7 +108,7 @@
           <h3>⏱ Daily session</h3>
           <ul>
             <li>Train for <strong>30 minutes</strong> (timer runs only while actively training).</li>
-            <li>Breaks happen every <strong>6 minutes</strong> for 60 seconds with Flappy.</li>
+            <li><strong>60-second breaks after each 6-minute block</strong> with Flappy.</li>
             <li>Menus and Flappy don't count toward training time.</li>
             <li>Blocks <strong>1–20</strong> with feedback; <strong>21–24</strong> are tests (no feedback).</li>
           </ul>
@@ -116,8 +116,8 @@
         <div class="tPage" id="tPage3">
           <h3>🎹 Octaves (per study)</h3>
           <ul>
-            <li>Training tones span <strong>octaves 3-5</strong> with performance-based mixing.</li>
-            <li><strong>All audio types:</strong> C3–C6 range • <strong>Adaptive:</strong> Center/neighbor balance</li>
+            <li>Training tones span <strong>Octaves 3–5 (C3–C5)</strong> with performance-based mixing.</li>
+            <li><strong>All audio types:</strong> C3–C5 range • <strong>Adaptive:</strong> Center/neighbor balance</li>
             <li>This encourages learning the <em>chroma</em> (pitch class), not just pitch height.</li>
             <li>Tone length: <strong>800 ms</strong> with optional jitter for boundary training.</li>
           </ul>
@@ -172,7 +172,7 @@
       <button id="playFlappy">🐤 Flappy (lockout only)</button>
       <button id="resetLockout">⚡ Reset lockout/timer</button>
       <button id="menuReset">⟲ Reset (factory)</button>
-      <button id="debugToggle" style="opacity:0.6;font-size:11px;">Debug</button>
+      <button id="debugToggle" style="opacity:0.6;font-size:11px;display:none;">Debug</button>
     </div>
     
     <!-- Debug panel -->
@@ -194,9 +194,9 @@
       <div class="scopeWrap">
         <span style="opacity:.9">Audio type:</span>
         <select id="audioTypeSelect" class="scopeSelect">
-          <option value="piano">Piano (C3-C6)</option>
-          <option value="sine">Sine Wave (C3-C6)</option>
-          <option value="guitar">Guitar (C3-C6)</option>
+          <option value="piano">Piano (C3-C5)</option>
+          <option value="sine">Sine Wave (C3-C5)</option>
+          <option value="guitar">Guitar (C3-C5)</option>
         </select>
         <button id="applyAudioBtn" class="scopeBtn">Change</button>
       </div>
@@ -321,7 +321,7 @@
       <button class="note" id="btnOther" type="button">Other (OOB)</button>
     </div>
 
-    <p style="opacity:.75;margin-top:8px">800 ms tone • RT limit adapts with set size • 24 blocks per set • Octaves 3-5 with performance mixing</p>
+    <p style="opacity:.75;margin-top:8px">800 ms tone • RT limit adapts with set size • 24 blocks per set • Octaves 3–5 (C3–C5) with performance mixing</p>
   </div>
 
   <!-- Assessment Screen -->
@@ -696,12 +696,15 @@ function selectOOBNote(set) {
 const OOB_RATE=0.25; // Keep as fallback, but use adaptive rate
 const SESS_DAILY_MS=30*60*1000; // Changed from 20 to 30 minutes
 const WEEKLY_TARGET_MS=2*3600*1000;
-const BREAK_INTERVAL_MS=6*60*1000; // Break every 6 minutes
-const BREAK_DURATION_MS=60*1000; // 60-second mandatory break
+const BLOCK_LEN_MIN = 6; // Length of each training block in minutes
+const BREAK_SEC = 60; // Length of mandatory break in seconds
+const BREAK_INTERVAL_MS=BLOCK_LEN_MIN*60*1000; // Break every 6 minutes
+const BREAK_DURATION_MS=BREAK_SEC*1000; // 60-second mandatory break
 // Lockout until next calendar day (calculated dynamically)
 const RECALL_DURATION_MS=2000; // 2-second recording for recall tests
 const RECALL_SAMPLE_RATE=22050; // Lower sample rate for recall processing
 const LATENCY_CUSHION_MS=100;
+const DEV_UI = false; // Controls debug UI visibility
 
 /* ------------------ THEME SYSTEM ------------------ */
 function applyTheme(themeName) {
@@ -755,7 +758,8 @@ try{
     jitterLevels: {}, // Per-note jitter levels (JL0-JL3)
     confusionMatrix: {}, // 12x12 confusion tracking
     noteStats: {}, // Per-note rolling statistics
-    varietyModeEnabled: false // Timbre variety mode
+    varietyModeEnabled: false, // Timbre variety mode
+    minutesToday: 0 // Track minutes completed today in 6-minute blocks
   };
 } catch(e){
   state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO };
@@ -1460,9 +1464,18 @@ function centsToNoteName(cents) {
 }
 
 function targetNoteToCents(note) {
-  // Convert note name to cents offset from A4
+  // Convert note name to cents offset from A4, considering closest octave F1-F7
   const noteOffsets = {A: 0, Bb: 100, B: 200, C: 300, Db: 400, D: 500, Eb: 600, E: 700, F: 800, Gb: 900, G: 1000, Ab: 1100};
-  return noteOffsets[note] || 0;
+  const baseCents = noteOffsets[note] || 0;
+  
+  // Return array of possible target cents for octaves 1-7
+  const possibleCents = [];
+  for (let octave = 1; octave <= 7; octave++) {
+    const octaveCents = baseCents + (octave - 4) * 1200; // A4 is reference (0 cents)
+    possibleCents.push(octaveCents);
+  }
+  
+  return possibleCents;
 }
 
 async function startRecallTest(type = 'cold') {
@@ -1576,7 +1589,7 @@ function stopRecallRecording() {
 
 function processRecallRecording(audioBuffer) {
   const targetNote = recallNotes[recallIndex];
-  const targetCents = targetNoteToCents(targetNote);
+  const possibleTargetCents = targetNoteToCents(targetNote);
   
   // Analyze multiple segments of the recording for better accuracy
   const segmentSize = Math.floor(audioBuffer.length / 4);
@@ -1606,7 +1619,20 @@ function processRecallRecording(audioBuffer) {
   frequencies.sort((a, b) => a - b);
   const medianFreq = frequencies[Math.floor(frequencies.length / 2)];
   const detectedCents = frequencyToCents(medianFreq);
-  const centsError = detectedCents - targetCents;
+  
+  // Find the closest target octave
+  let closestTargetCents = possibleTargetCents[0];
+  let smallestError = Math.abs(detectedCents - possibleTargetCents[0]);
+  
+  for (const targetCents of possibleTargetCents) {
+    const error = Math.abs(detectedCents - targetCents);
+    if (error < smallestError) {
+      smallestError = error;
+      closestTargetCents = targetCents;
+    }
+  }
+  
+  const centsError = detectedCents - closestTargetCents;
   
   // Calculate standard deviation
   const avgCents = frequencies.map(f => frequencyToCents(f));
@@ -2178,13 +2204,8 @@ function beginAssessment() {
     const randomAudioType = rand(audioTypes);
     const randomPc = rand(PC);
     
-    // Use appropriate octave range for the audio type
-    let octaves;
-    if (randomAudioType === AUDIO_TYPES.GUITAR) {
-      octaves = [3, 4, 5];
-    } else {
-      octaves = [4, 5, 6];
-    }
+    // Use octaves 3-5 for all audio types
+    const octaves = [3, 4, 5];
     const randomOctave = rand(octaves);
     
     assessmentTrials.push({
@@ -2677,6 +2698,12 @@ function advanceCheck(){
     state.levelFailCounts[key]=0;
   }
   state.levelTrials=0; state.levelCorrect=0;
+  
+  // Track completed 6-minute block
+  if(passed) {
+    state.minutesToday += BLOCK_LEN_MIN;
+  }
+  
   if(passed && state.levelIndex<LEVELS_TOTAL){
     const oldSet = setFromIndex(state.levelIndex);
     state.levelIndex++;
@@ -3035,9 +3062,9 @@ function wireOnce(){
     state.audioType = newType;
     save();
     const labels = {
-      [AUDIO_TYPES.PIANO]: 'Piano (C3-C6)',
-      [AUDIO_TYPES.SINE]: 'Sine Wave (C3-C6)', 
-      [AUDIO_TYPES.GUITAR]: 'Guitar (C3-C6)'
+      [AUDIO_TYPES.PIANO]: 'Piano (C3-C5)',
+      [AUDIO_TYPES.SINE]: 'Sine Wave (C3-C5)', 
+      [AUDIO_TYPES.GUITAR]: 'Guitar (C3-C5)'
     };
     alert(`Audio changed to ${labels[newType] || 'Piano'}`);
   });
@@ -3066,18 +3093,23 @@ function wireOnce(){
   
   updateVarietyModeUI();
 
-  // Debug toggle
-  safe('debugToggle', el=> el.onclick=()=>{
-    const panel = byId('debugPanel');
-    if(panel.style.display === 'none') {
-      panel.style.display = 'block';
-      updateDebugInfo();
-      el.textContent = 'Hide Debug';
-    } else {
-      panel.style.display = 'none';
-      el.textContent = 'Debug';
-    }
-  });
+  // Debug toggle - only show if DEV_UI is enabled
+  if (DEV_UI) {
+    safe('debugToggle', el=> {
+      el.style.display = 'inline-block';
+      el.onclick=()=>{
+        const panel = byId('debugPanel');
+        if(panel.style.display === 'none') {
+          panel.style.display = 'block';
+          updateDebugInfo();
+          el.textContent = 'Hide Debug';
+        } else {
+          panel.style.display = 'none';
+          el.textContent = 'Debug';
+        }
+      };
+    });
+  }
 
   // Theme selection
   safe('themeSelect', el=> {
@@ -3216,6 +3248,9 @@ function startBreakTimer(){
 function endMandatoryBreak(){
   if(!state.inBreak) return;
   
+  // Store minutesToday before break ends to verify it doesn't change
+  const minutesTodayBeforeBreak = state.minutesToday;
+  
   // Close Flappy
   running = false;
   cancelAnimationFrame(flappyRAF);
@@ -3230,6 +3265,10 @@ function endMandatoryBreak(){
   state.inBreak = false;
   state.sessionBreakTime = Date.now() + BREAK_INTERVAL_MS; // Next break in 6 minutes
   save();
+  
+  // Console assert that minutesToday is unchanged during break
+  console.assert(state.minutesToday === minutesTodayBeforeBreak, 
+    `minutesToday changed during break: before=${minutesTodayBeforeBreak}, after=${state.minutesToday}`);
   
   // Resume session
   if(sessionActive) {
