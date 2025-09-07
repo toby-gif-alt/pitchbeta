@@ -1044,7 +1044,7 @@ async function playSample(note){
         src.start(t); src.stop(t + TONE_MS/1000);
         return;
       }catch(_e){}
-    } else if (state.audioType === AUDIO_TYPES.GUITAR) {
+    } else if (selectedTimbre === AUDIO_TYPES.GUITAR) {
       try{
         const {sample, semitones} = findClosestGuitarSample(note);
         const url = `${AUDIO_GUITAR}/${GUITAR_SAMPLES[sample]}`;
@@ -1065,7 +1065,7 @@ async function playSample(note){
         src.start(t); src.stop(t + TONE_MS/1000 / pitchRatio);
         return;
       }catch(_e){}
-    } else if (state.audioType === AUDIO_TYPES.SINE) {
+    } else if (selectedTimbre === AUDIO_TYPES.SINE) {
       // Skip to sine wave generation
     } else {
       // Default to piano, fallback to sine
@@ -1106,14 +1106,17 @@ async function playSample(note){
   }
 }
 
-/* Enhanced playSample with detune support */
-async function playSampleWithDetune(note, detuneCents = 0){
+/* Enhanced playSample with detune support and timbre selection */
+async function playSampleWithDetune(note, detuneCents = 0, forceTimbre = null){
   try{
     await resumeCtx();
     const ctx = getCtx();
     
+    // Use forced timbre or select based on variety mode
+    const selectedTimbre = forceTimbre || selectTimbreForTrial();
+    
     // Handle different audio types
-    if (state.audioType === AUDIO_TYPES.PIANO) {
+    if (selectedTimbre === AUDIO_TYPES.PIANO) {
       try{
         const url = `${AUDIO_PIANO}/${note}.mp3`;
         const buf = await loadBuffer(url);
@@ -1135,7 +1138,7 @@ async function playSampleWithDetune(note, detuneCents = 0){
         src.start(t); src.stop(t + TONE_MS/1000);
         return;
       }catch(_e){}
-    } else if (state.audioType === AUDIO_TYPES.GUITAR) {
+    } else if (selectedTimbre === AUDIO_TYPES.GUITAR) {
       try{
         const {sample, semitones} = findClosestGuitarSample(note);
         const url = `${AUDIO_GUITAR}/${GUITAR_SAMPLES[sample]}`;
@@ -1157,7 +1160,7 @@ async function playSampleWithDetune(note, detuneCents = 0){
         src.start(t); src.stop(t + TONE_MS/1000 / pitchRatio);
         return;
       }catch(_e){}
-    } else if (state.audioType === AUDIO_TYPES.SINE) {
+    } else if (selectedTimbre === AUDIO_TYPES.SINE) {
       // Skip to sine wave generation
     } else {
       // Default to piano, fallback to sine
@@ -2082,6 +2085,49 @@ function maybeRunShepard() {
   return Promise.resolve();
 }
 
+/* ------------------ TIMBRE VARIETY MODE ------------------ */
+
+function getWeekNumber() {
+  if (!state.startDate) return 1;
+  const weeksSinceStart = Math.floor((Date.now() - state.startDate) / (7 * 24 * 60 * 60 * 1000));
+  return Math.max(1, weeksSinceStart + 1);
+}
+
+function shouldUseVarietyMode() {
+  return state.timbreVarietyMode && getWeekNumber() >= 3;
+}
+
+function selectTimbreForTrial() {
+  if (!shouldUseVarietyMode()) {
+    return state.audioType;
+  }
+  
+  // Week 3+: 80% chosen timbre, 20% alternate
+  if (Math.random() < 0.8) {
+    return state.audioType;
+  } else {
+    // Select alternate timbre (cycle daily)
+    const dayOfYear = Math.floor(Date.now() / (24 * 60 * 60 * 1000));
+    const timbres = [AUDIO_TYPES.PIANO, AUDIO_TYPES.SINE, AUDIO_TYPES.GUITAR];
+    const alternates = timbres.filter(t => t !== state.audioType);
+    return alternates[dayOfYear % alternates.length];
+  }
+}
+
+function checkTimbreRescue(pc, timbre) {
+  // Check if this pitch is weak on this specific timbre
+  const timbreKey = `${pc}_${timbre}`;
+  const stats = state.pitchStats[timbreKey];
+  
+  if (!stats || stats.lastN.length < 20) return false;
+  
+  const recentAcc = stats.lastN.slice(-40).filter(t => t.correct).length / Math.min(40, stats.lastN.length);
+  const recentCents = stats.lastN.slice(-40).map(t => t.cents || 0);
+  const medianCents = Math.abs(recentCents.sort((a,b) => a-b)[Math.floor(recentCents.length/2)] || 0);
+  
+  return recentAcc < 0.75 || medianCents > 25;
+}
+
 /* ------------------ ENHANCED TRIAL GENERATION ------------------ */
 function scheduleAuto(){ if(autoTimer){ clearTimeout(autoTimer); autoTimer=null; } if(autoNext && sessionActive && !paused && !shepRunning && !special){ autoTimer = setTimeout(()=> nextTrial(true), delayMs); } }
 async function nextTrial(forceNew=false){
@@ -2196,7 +2242,18 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
   const block = blockFromIndex(state.levelIndex);
   if(block >= 21){ if(ok){ state.testFailStreak=0; hideSuggestBanner(); suggestedRestartFlag=false; } else { state.testFailStreak=(state.testFailStreak||0)+1; } }
   else { state.testFailStreak=0; hideSuggestBanner(); suggestedRestartFlag=false; }
-  state.trials.push({note:currentNote, pc:truePc, guess:guessLabel, correct:ok, timeout, oob:oobChosen, set:setFromIndex(state.levelIndex), block:block, time:Date.now()});
+  
+  // Use enhanced trial recording
+  recordTrialResponse({
+    correct: ok,
+    rtMs: timeout ? null : (rtTimer ? 0 : 1000), // Approximate RT
+    chosenPC: guessLabel,
+    truePC: truePc,
+    oob: oobChosen || isOOBTrial,
+    cents: currentTrialDetune || 0,
+    special: special ? special.mode : null
+  });
+  
   save(); updateLevelUI(); try{ drawChart(); }catch(_){}; 
   if(block >= 21 && !ok) maybeSuggestRestart();
 }
@@ -2274,40 +2331,511 @@ function advanceCheck(){
 }
 
 /* ------------------ SESSION ------------------ */
+/* ------------------ ENHANCED SESSION / BLOCK MANAGEMENT ------------------ */
+
+function checkDailyComplete() {
+  const today = todayKey(Date.now());
+  // Reset daily progress if it's a new day
+  if (!state.capResetAt || today >= state.capResetAt) {
+    state.minutesToday = 0;
+    state.blocksDoneToday = 0;
+    state.dailyCompleted = false;
+    state.capResetAt = today + 24 * 60 * 60 * 1000; // Next day
+    save();
+  }
+  return state.dailyCompleted || state.minutesToday >= 30;
+}
+
 function startSession(){
   stopAllTimers();
   sealDanglingSession();
+  
+  // Check if daily training is complete
+  if (checkDailyComplete()) {
+    alert('✅ Great work! You\'ve completed today\'s 30-minute training.\nCome back tomorrow for more training.');
+    showScreen('menuScreen');
+    return;
+  }
+  
   if(isLocked()){
     const left = state.lockoutUntil - Date.now();
     alert(`Training is locked for ${fmtHMM(left)}.\nYou can still play Flappy from the menu, or Reset lockout/timer.`);
     showScreen('menuScreen'); return;
   }
+  
+  // Check if we should start with Cold Recall
+  if (state.blocksDoneToday === 0 && !state.coldRecallResults.some(r => 
+    dateAtMidnight(r.date) === todayKey(Date.now())
+  )) {
+    showScreen('coldRecallScreen');
+    startColdRecall();
+    return;
+  }
+  
+  startTrainingBlock();
+}
+
+/* ------------------ COLD/WARM PITCH RECALL ------------------ */
+
+let recallState = {
+  active: false,
+  type: 'cold', // 'cold' or 'warm'
+  currentNote: 0,
+  notesToTest: [],
+  results: [],
+  samples: []
+};
+
+function startColdRecall() {
+  // Select 2-3 learned notes to test
+  const set = setFromIndex(state.levelIndex);
+  const learnedNotes = trainedSet(Math.min(set, 3)); // Test up to 3 notes
+  
+  recallState = {
+    active: true,
+    type: 'cold',
+    currentNote: 0,
+    notesToTest: learnedNotes.slice(0, 3), // Max 3 notes
+    results: [],
+    samples: []
+  };
+  
+  if (recallState.notesToTest.length === 0) {
+    // No notes learned yet, skip cold recall
+    alert('No pitches learned yet. Starting training...');
+    startTrainingBlock();
+    return;
+  }
+  
+  updateColdRecallUI();
+}
+
+function updateColdRecallUI() {
+  const noteIndex = recallState.currentNote;
+  const noteName = recallState.notesToTest[noteIndex];
+  
+  text('coldRecallProgress', `Note ${noteIndex + 1}/${recallState.notesToTest.length}`);
+  text('coldRecallPrompt', `Hum the pitch: ${pcLabel(noteName)}`);
+  
+  // Hide/show appropriate buttons
+  hide('coldRecallResults');
+  safe('startColdRecall', el => el.style.display = 'block');
+  safe('nextColdRecall', el => el.style.display = 'none');
+}
+
+async function startColdRecallRecording() {
+  try {
+    recallState.samples = [];
+    
+    // Update UI
+    text('coldRecallPrompt', `Recording... Hum: ${pcLabel(recallState.notesToTest[recallState.currentNote])}`);
+    safe('startColdRecall', el => el.style.display = 'none');
+    
+    // Start pitch detection
+    await startPitchDetection((freq, cents, samples) => {
+      // Update live UI
+      text('currentHz', Math.round(freq) + ' Hz');
+      text('currentCents', (cents > 0 ? '+' : '') + cents + ' ¢');
+      
+      // Update needle position (A = 0 cents as center)
+      const needle = byId('needleIndicator');
+      if (needle) {
+        const maxCents = 100; // ±100 cents range
+        const percentage = Math.max(0, Math.min(100, 50 + (cents / maxCents) * 50));
+        needle.style.left = percentage + '%';
+        
+        // Color based on accuracy
+        if (Math.abs(cents) <= 10) needle.style.background = 'var(--good)';
+        else if (Math.abs(cents) <= 30) needle.style.background = 'var(--accent)';
+        else needle.style.background = 'var(--bad)';
+      }
+      
+      recallState.samples = samples;
+    });
+    
+    // Record for 2 seconds
+    setTimeout(() => {
+      stopColdRecallRecording();
+    }, 2000);
+    
+  } catch (e) {
+    alert('Microphone access required for pitch recall. Skipping...');
+    skipColdRecall();
+  }
+}
+
+function stopColdRecallRecording() {
+  stopPitchDetection();
+  
+  if (recallState.samples.length > 0) {
+    const verdict = getRecallVerdict(recallState.samples);
+    const targetNote = recallState.notesToTest[recallState.currentNote];
+    
+    recallState.results.push({
+      note: targetNote,
+      samples: recallState.samples.length,
+      median: verdict.median,
+      sd: verdict.sd,
+      verdict: verdict.verdict
+    });
+    
+    // Show result
+    let verdictText = 'Off target';
+    let verdictColor = 'var(--bad)';
+    if (verdict.verdict === 'on_target') {
+      verdictText = 'On target!';
+      verdictColor = 'var(--good)';
+    } else if (verdict.verdict === 'close') {
+      verdictText = 'Close';
+      verdictColor = 'var(--accent)';
+    }
+    
+    text('coldRecallPrompt', `${pcLabel(targetNote)}: ${verdictText} (${verdict.median > 0 ? '+' : ''}${verdict.median}¢, SD: ${verdict.sd}¢)`);
+    
+    // Show next button
+    safe('nextColdRecall', el => el.style.display = 'block');
+  } else {
+    text('coldRecallPrompt', 'No audio detected. Try again.');
+    safe('startColdRecall', el => el.style.display = 'block');
+  }
+}
+
+function nextColdRecallNote() {
+  recallState.currentNote++;
+  
+  if (recallState.currentNote >= recallState.notesToTest.length) {
+    // All notes tested, show results
+    completeColdRecall();
+  } else {
+    updateColdRecallUI();
+  }
+}
+
+function completeColdRecall() {
+  // Save results
+  const result = {
+    date: Date.now(),
+    type: 'cold',
+    results: recallState.results
+  };
+  state.coldRecallResults.push(result);
+  save();
+  
+  // Show summary
+  let summary = '<h4>Cold Recall Summary:</h4>';
+  for (const r of recallState.results) {
+    const status = r.verdict === 'on_target' ? '✅' : r.verdict === 'close' ? '⚠️' : '❌';
+    summary += `<div>${status} ${pcLabel(r.note)}: ${r.median > 0 ? '+' : ''}${r.median}¢ (SD: ${r.sd}¢)</div>`;
+  }
+  
+  byId('coldRecallSummary').innerHTML = summary;
+  showBlock('coldRecallResults');
+  hide('coldRecallFeedback');
+}
+
+function skipColdRecall() {
+  recallState.active = false;
+  startTrainingBlock();
+}
+
+function startTrainingFromCold() {
+  recallState.active = false;
+  startTrainingBlock();
+}
+
+// Similar functions for Warm Recall
+function startWarmRecall() {
+  const set = setFromIndex(state.levelIndex);
+  const learnedNotes = trainedSet(Math.min(set, 3));
+  
+  recallState = {
+    active: true,
+    type: 'warm',
+    currentNote: 0,
+    notesToTest: learnedNotes.slice(0, 3),
+    results: [],
+    samples: []
+  };
+  
+  updateWarmRecallUI();
+}
+
+function updateWarmRecallUI() {
+  const noteIndex = recallState.currentNote;
+  const noteName = recallState.notesToTest[noteIndex];
+  
+  text('warmRecallProgress', `Note ${noteIndex + 1}/${recallState.notesToTest.length}`);
+  text('warmRecallPrompt', `Hum the pitch: ${pcLabel(noteName)}`);
+  
+  hide('warmRecallResults');
+  safe('startWarmRecallMic', el => el.style.display = 'block');
+  safe('nextWarmRecall', el => el.style.display = 'none');
+}
+
+async function startWarmRecallRecording() {
+  try {
+    recallState.samples = [];
+    
+    text('warmRecallPrompt', `Recording... Hum: ${pcLabel(recallState.notesToTest[recallState.currentNote])}`);
+    safe('startWarmRecallMic', el => el.style.display = 'none');
+    
+    await startPitchDetection((freq, cents, samples) => {
+      text('currentHzWarm', Math.round(freq) + ' Hz');
+      text('currentCentsWarm', (cents > 0 ? '+' : '') + cents + ' ¢');
+      
+      const needle = byId('needleIndicatorWarm');
+      if (needle) {
+        const maxCents = 100;
+        const percentage = Math.max(0, Math.min(100, 50 + (cents / maxCents) * 50));
+        needle.style.left = percentage + '%';
+        
+        if (Math.abs(cents) <= 10) needle.style.background = 'var(--good)';
+        else if (Math.abs(cents) <= 30) needle.style.background = 'var(--accent)';
+        else needle.style.background = 'var(--bad)';
+      }
+      
+      recallState.samples = samples;
+    });
+    
+    setTimeout(() => {
+      stopWarmRecallRecording();
+    }, 2000);
+    
+  } catch (e) {
+    alert('Microphone access required for pitch recall. Skipping...');
+    skipWarmRecall();
+  }
+}
+
+function stopWarmRecallRecording() {
+  stopPitchDetection();
+  
+  if (recallState.samples.length > 0) {
+    const verdict = getRecallVerdict(recallState.samples);
+    const targetNote = recallState.notesToTest[recallState.currentNote];
+    
+    recallState.results.push({
+      note: targetNote,
+      samples: recallState.samples.length,
+      median: verdict.median,
+      sd: verdict.sd,
+      verdict: verdict.verdict
+    });
+    
+    let verdictText = 'Off target';
+    if (verdict.verdict === 'on_target') verdictText = 'On target!';
+    else if (verdict.verdict === 'close') verdictText = 'Close';
+    
+    text('warmRecallPrompt', `${pcLabel(targetNote)}: ${verdictText} (${verdict.median > 0 ? '+' : ''}${verdict.median}¢, SD: ${verdict.sd}¢)`);
+    safe('nextWarmRecall', el => el.style.display = 'block');
+  } else {
+    text('warmRecallPrompt', 'No audio detected. Try again.');
+    safe('startWarmRecallMic', el => el.style.display = 'block');
+  }
+}
+
+function nextWarmRecallNote() {
+  recallState.currentNote++;
+  
+  if (recallState.currentNote >= recallState.notesToTest.length) {
+    completeWarmRecall();
+  } else {
+    updateWarmRecallUI();
+  }
+}
+
+function completeWarmRecall() {
+  const result = {
+    date: Date.now(),
+    type: 'warm',
+    results: recallState.results
+  };
+  state.warmRecallResults.push(result);
+  save();
+  
+  let summary = '<h4>Warm Recall Summary:</h4>';
+  for (const r of recallState.results) {
+    const status = r.verdict === 'on_target' ? '✅' : r.verdict === 'close' ? '⚠️' : '❌';
+    summary += `<div>${status} ${pcLabel(r.note)}: ${r.median > 0 ? '+' : ''}${r.median}¢ (SD: ${r.sd}¢)</div>`;
+  }
+  
+  byId('warmRecallSummary').innerHTML = summary;
+  showBlock('warmRecallResults');
+  hide('warmRecallFeedback');
+}
+
+function skipWarmRecall() {
+  recallState.active = false;
+  showScreen('menuScreen');
+}
+
+function startTrainingBlock() {
   showScreen('trainerScreen');
   if(!state.startDate) state.startDate=Date.now();
   ensureWeekRoll();
-  sessionActive=true; paused=false;
-  (state.sessions||[]).push({start:Date.now(),end:null,pauses:[],completed:false}); 
-  state.lastSeen = Date.now(); save();
-  updateCapsUI(); updateLevelUI(); paintNotes();
-  text('promptPill','Press Play to start');
+  
+  sessionActive=true; 
+  paused=false;
+  state.inBreak = false;
+  state.blockStartTime = Date.now();
+  
+  const session = {
+    start: Date.now(),
+    end: null,
+    pauses: [],
+    completed: false,
+    block: state.blocksDoneToday + 1
+  };
+  (state.sessions||[]).push(session); 
+  state.lastSeen = Date.now(); 
+  save();
+  
+  updateCapsUI(); 
+  updateLevelUI(); 
+  paintNotes();
+  text('promptPill','Press Play to start block ' + (state.blocksDoneToday + 1));
+  
   stopAllTimers();
   tickId=setInterval(()=>{
     ensureWeekRoll();
-    if(sessionActive && !paused && !shepRunning){ state.thisWeekMs = (state.thisWeekMs||0) + 1000; save(); }
-    if(sessionActive && !paused){
-      const left = Math.max(0, SESS_DAILY_MS - msUsedQuota());
-      text('timerInfo', `Time left: ${fmtMMSS(left)}`);
-      if(left<=0){
-        const now = Date.now();
-        const rec=state.sessions[state.sessions.length-1];
-        if(rec && !rec.completed){ rec.completed=true; rec.end = now; }
-        state.lockoutUntil = now + LOCKOUT_MS;
-        state.capResetAt   = state.lockoutUntil;
-        save(); endSession(true);
+    if(sessionActive && !paused && !shepRunning){ 
+      state.thisWeekMs = (state.thisWeekMs||0) + 1000; 
+      save(); 
+    }
+    
+    if(sessionActive && !paused && state.blockStartTime){
+      const blockElapsed = Date.now() - state.blockStartTime;
+      const blockLeft = Math.max(0, BLOCK_MS - blockElapsed);
+      
+      // Update UI
+      text('timerInfo', `Block time: ${fmtMMSS(blockLeft)}`);
+      const totalLeft = Math.max(0, SESS_DAILY_MS - (state.minutesToday * 60 * 1000 + blockElapsed));
+      text('capInfo', `Total left: ${fmtMMSS(totalLeft)}`);
+      
+      // Check if block is complete
+      if(blockLeft <= 0){
+        completeCurrentBlock();
       }
     }
-    updateCapsUI(); drawChart();
+    updateCapsUI(); 
+    drawChart();
   },1000);
+}
+
+function completeCurrentBlock() {
+  const now = Date.now();
+  const rec = state.sessions[state.sessions.length-1];
+  if(rec && !rec.end) {
+    rec.end = now;
+    rec.completed = true;
+  }
+  
+  // Credit exactly 6 minutes to daily total
+  state.minutesToday += 6;
+  state.blocksDoneToday++;
+  
+  sessionActive = false;
+  stopAllTimers();
+  save();
+  
+  // Check if all 5 blocks are complete
+  if (state.blocksDoneToday >= BLOCKS_PER_SESSION) {
+    state.dailyCompleted = true;
+    save();
+    showDailyComplete();
+  } else {
+    startBreak();
+  }
+}
+
+function startBreak() {
+  state.inBreak = true;
+  state.breakStartTime = Date.now();
+  state.breakTimeLeft = BREAK_MS;
+  save();
+  
+  showScreen('breakScreen');
+  text('breakProgress', `Block ${state.blocksDoneToday}/${BLOCKS_PER_SESSION} complete`);
+  
+  // Break countdown timer
+  const breakTimer = setInterval(() => {
+    if (!state.inBreak) {
+      clearInterval(breakTimer);
+      return;
+    }
+    
+    const elapsed = Date.now() - state.breakStartTime;
+    const left = Math.max(0, BREAK_MS - elapsed);
+    text('breakTimer', `Break: ${fmtMMSS(left)}`);
+    
+    if (left <= 0) {
+      endBreak();
+      clearInterval(breakTimer);
+    }
+  }, 1000);
+}
+
+function endBreak() {
+  state.inBreak = false;
+  state.breakStartTime = null;
+  save();
+  
+  // Check if there are pending Flappy sessions that should end
+  const flappyModal = byId('flappyModal');
+  if (flappyModal && flappyModal.style.display === 'flex') {
+    // Allow current Flappy run to finish, but show message
+    text('breakInstructions', 'Break over! Finish your current Flappy run, then continue training.');
+    return;
+  }
+  
+  startTrainingBlock();
+}
+
+function showDailyComplete() {
+  showScreen('dailyCompleteScreen');
+  text('dailyProgress', `All ${BLOCKS_PER_SESSION} blocks complete`);
+  text('dailyTime', `${state.minutesToday} minutes trained`);
+}
+
+function isLocked(){
+  // No lockout needed with the new system - daily completion is the limit
+  return false;
+}
+
+function updateCapsUI(){
+  ensureWeekRoll();
+  
+  checkDailyComplete();
+  
+  const minutesLeft = Math.max(0, 30 - state.minutesToday);
+  text('capInfo', `Left: ${fmtMMSS(minutesLeft * 60 * 1000)}`);
+  
+  const blocksLeft = Math.max(0, BLOCKS_PER_SESSION - state.blocksDoneToday);
+  text('blockInfo', `Blocks: ${state.blocksDoneToday}/${BLOCKS_PER_SESSION}`);
+  
+  const usedW = state.thisWeekMs || 0;
+  const wp = byId('weekPill');
+  if(wp){
+    wp.textContent = `This week: ${fmtHrsMins(usedW)}`;
+    let color = '#dc2626';
+    if(usedW >= 1*3600000 && usedW < 2*3600000) color = 'var(--text)';
+    else if(usedW >= 2*3600000 && usedW < 3*3600000) color = '#16a34a';
+    else if(usedW >= 3*3600000) color = '#fbbf24';
+    wp.style.color = color;
+    wp.title = `Target: ${fmtHMM(WEEKLY_TARGET_MS)}`;
+  }
+  
+  // Update daily complete banner
+  const banner = byId('dailyCompleteBanner');
+  const startBtn = byId('menuStart');
+  if (checkDailyComplete()) {
+    if (banner) banner.style.display = 'block';
+    if (startBtn) startBtn.disabled = true;
+  } else {
+    if (banner) banner.style.display = 'none';
+    if (startBtn) startBtn.disabled = false;
+  }
+}
 }
 function endSession(auto){
   if(!sessionActive) return;
@@ -2476,11 +3004,42 @@ function wireOnce(){
   safe('viewTracker', el=> el.onclick=()=> showTracker());
   safe('playFlappy',  el=> el.onclick=()=> openFlappyFromMenu());
   safe('resetLockout',el=> el.onclick=()=>{
-    if(!confirm('Reset lockout/timer now? This starts a fresh 20-minute window immediately.')) return;
-    state.lockoutUntil = null; state.capResetAt = Date.now(); state.lastSeen = Date.now();
-    save(); updateCapsUI(); alert('Timer reset. You can start training now.');
+    if(!confirm('Reset daily progress now? This will restart your 30-minute training window.')) return;
+    state.minutesToday = 0; 
+    state.blocksDoneToday = 0; 
+    state.dailyCompleted = false;
+    state.capResetAt = Date.now(); 
+    state.lastSeen = Date.now();
+    save(); updateCapsUI(); alert('Daily progress reset. You can start training now.');
   });
   safe('menuReset',   el=> el.onclick=()=> doFactoryReset());
+
+  // Cold/Warm Recall
+  safe('startColdRecall', el=> el.onclick=()=> startColdRecallRecording());
+  safe('nextColdRecall', el=> el.onclick=()=> nextColdRecallNote());
+  safe('coldRecallSkip', el=> el.onclick=()=> skipColdRecall());
+  safe('startTrainingFromCold', el=> el.onclick=()=> startTrainingFromCold());
+  
+  safe('startWarmRecallMic', el=> el.onclick=()=> startWarmRecallRecording());
+  safe('nextWarmRecall', el=> el.onclick=()=> nextWarmRecallNote());
+  safe('warmRecallSkip', el=> el.onclick=()=> skipWarmRecall());
+  safe('backMenuFromWarm', el=> el.onclick=()=> showScreen('menuScreen'));
+  
+  // Break screen
+  safe('playFlappyBreak', el=> el.onclick=()=> openFlappyModal());
+  safe('muteFlappyBreak', el=> el.onclick=()=> {
+    state.flappySoundEnabled = !state.flappySoundEnabled;
+    save();
+    el.textContent = state.flappySoundEnabled ? '🔊 Sound On' : '🔇 Sound Off';
+  });
+  
+  // Daily complete screen  
+  safe('startWarmRecall', el=> el.onclick=()=> {
+    showScreen('warmRecallScreen');
+    startWarmRecall();
+  });
+  safe('playFlappyDaily', el=> el.onclick=()=> openFlappyModal());
+  safe('backMenuDaily', el=> el.onclick=()=> showScreen('menuScreen'));
 
   // Assessment warning modal
   safe('btnProceedAssessment', el=> el.onclick=()=> proceedWithAssessment());
@@ -2530,14 +3089,33 @@ function wireOnce(){
   });
   safe('applyAudioBtn', el=> el.onclick=()=>{
     const newType = byId('audioTypeSelect')?.value || AUDIO_TYPES.PIANO;
+    const varietyMode = byId('timbreVarietyMode')?.checked || false;
+    
     state.audioType = newType;
+    state.timbreVarietyMode = varietyMode;
     save();
+    
     const labels = {
-      [AUDIO_TYPES.PIANO]: 'Piano (C4-B6)',
-      [AUDIO_TYPES.SINE]: 'Sine Wave (C4-B6)', 
+      [AUDIO_TYPES.PIANO]: 'Piano (C3-B5)',
+      [AUDIO_TYPES.SINE]: 'Sine Wave (C3-B5)', 
       [AUDIO_TYPES.GUITAR]: 'Guitar (C3-B5)'
     };
-    alert(`Audio changed to ${labels[newType] || 'Piano'}`);
+    
+    let message = `Audio changed to ${labels[newType] || 'Piano'}`;
+    if (varietyMode) {
+      const week = getWeekNumber();
+      if (week >= 3) {
+        message += '\nVariety Mode: 80% chosen timbre, 20% alternate';
+      } else {
+        message += `\nVariety Mode: Will activate in week 3 (currently week ${week})`;
+      }
+    }
+    alert(message);
+  });
+  
+  // Initialize timbre variety checkbox
+  safe('timbreVarietyMode', el=> {
+    el.checked = state.timbreVarietyMode || false;
   });
 
   // Theme selection
