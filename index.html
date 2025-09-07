@@ -3773,35 +3773,48 @@ function withSimulatedRandom(fn) {
   }
 }
 
-// Helper functions that may not exist - provide fallbacks
-function selectInBoundsNote(usable) {
-  if (typeof window.selectInBoundsNote === 'function') {
-    return window.selectInBoundsNote(usable);
-  }
-  // Fallback: random selection from usable set
-  return usable[Math.floor(simRNG() * usable.length)];
+// Simulation wrapper functions to use existing implementations
+function simSelectInBoundsNote(usable) {
+  return withSimulatedRandom(() => {
+    // Use the real selectInBoundsNote function which has proper logic
+    return selectInBoundsNote(usable);
+  });
 }
 
-function selectOctaveForNote(pc) {
-  if (typeof window.selectOctaveForNote === 'function') {
-    return window.selectOctaveForNote(pc);
-  }
-  // Fallback: weighted random from [3,4,5] with bias toward 4
-  const weights = [0.15, 0.7, 0.15]; // Favor octave 4
-  const rand = simRNG();
-  let cumulative = 0;
-  for (let i = 0; i < weights.length; i++) {
-    cumulative += weights[i];
-    if (rand <= cumulative) {
-      return 3 + i;
+function simSelectOctaveForNote(pc) {
+  return withSimulatedRandom(() => {
+    // Use existing octave selection logic if available
+    if (typeof currentOctaves === 'function') {
+      const octaves = currentOctaves();
+      const weights = [0.15, 0.7, 0.15]; // Favor octave 4
+      const rand = Math.random();
+      let cumulative = 0;
+      for (let i = 0; i < weights.length; i++) {
+        cumulative += weights[i];
+        if (rand <= cumulative) {
+          return octaves[i] || (3 + i);
+        }
+      }
+      return 4; // Fallback
     }
-  }
-  return 4; // Fallback
+    // Fallback: weighted random from [3,4,5] with bias toward 4
+    const weights = [0.15, 0.7, 0.15]; // Favor octave 4
+    const rand = Math.random();
+    let cumulative = 0;
+    for (let i = 0; i < weights.length; i++) {
+      cumulative += weights[i];
+      if (rand <= cumulative) {
+        return 3 + i;
+      }
+    }
+    return 4; // Fallback
+  });
 }
 
-function initializeJitterLevel(pc) {
-  if (typeof window.initializeJitterLevel === 'function') {
-    return window.initializeJitterLevel(pc);
+function simInitializeJitterLevel(pc) {
+  // Use existing jitter initialization logic if available
+  if (typeof initializeJitterLevelsForNote === 'function') {
+    return initializeJitterLevelsForNote(pc);
   }
   // Fallback: initialize to JL1
   if (!state.jitterLevels) state.jitterLevels = {};
@@ -3810,30 +3823,36 @@ function initializeJitterLevel(pc) {
   }
 }
 
-function shouldUseProbe(pc) {
-  if (typeof window.shouldUseProbe === 'function') {
-    return window.shouldUseProbe(pc);
-  }
-  // Fallback: 5% chance of probe
-  return simRNG() < 0.05;
+function simShouldUseProbe(pc) {
+  return withSimulatedRandom(() => {
+    // Look for existing probe logic
+    if (typeof needsProbe === 'function') {
+      return needsProbe(pc);
+    }
+    // Fallback: 5% chance of probe
+    return Math.random() < 0.05;
+  });
 }
 
-function calculateJitter(pc, isProbe) {
-  if (typeof window.calculateJitter === 'function') {
-    return window.calculateJitter(pc, isProbe);
-  }
-  // Fallback jitter calculation
-  if (isProbe) {
-    // Probe: ±25-40¢ range
-    const sign = simRNG() < 0.5 ? -1 : 1;
-    return sign * (25 + simRNG() * 15); // 25-40 cents
-  } else {
-    // Regular jitter: ±5-15¢ based on level
-    const level = state.jitterLevels[pc] || 1;
-    const maxJitter = Math.min(15, 5 + level * 3);
-    const sign = simRNG() < 0.5 ? -1 : 1;
-    return sign * simRNG() * maxJitter;
-  }
+function simCalculateJitter(pc, isProbe) {
+  return withSimulatedRandom(() => {
+    // Use existing jitter calculation if available
+    if (typeof generateJitter === 'function') {
+      return generateJitter(pc, isProbe);
+    }
+    // Fallback jitter calculation
+    if (isProbe) {
+      // Probe: ±25-40¢ range
+      const sign = Math.random() < 0.5 ? -1 : 1;
+      return sign * (25 + Math.random() * 15); // 25-40 cents
+    } else {
+      // Regular jitter: ±5-15¢ based on level
+      const level = state.jitterLevels[pc] || 1;
+      const maxJitter = Math.min(15, 5 + level * 3);
+      const sign = Math.random() < 0.5 ? -1 : 1;
+      return sign * Math.random() * maxJitter;
+    }
+  });
 }
 
 // Simulate a single trial
@@ -3847,19 +3866,19 @@ function simulateTrial(set, blockNum, trialNum) {
     
     if (wasOOB) {
       truePc = selectOOBNote(set);
-      const octave = selectOctaveForNote(truePc);
+      const octave = simSelectOctaveForNote(truePc);
       currentNote = `${truePc}${octave}`;
       jitterInfo = { jitter: 0, isProbe: false, level: null };
     } else {
-      truePc = selectInBoundsNote(usable);
-      const octave = selectOctaveForNote(truePc);
+      truePc = simSelectInBoundsNote(usable);
+      const octave = simSelectOctaveForNote(truePc);
       currentNote = `${truePc}${octave}`;
       
       // Initialize jitter level if needed
-      initializeJitterLevel(truePc);
+      simInitializeJitterLevel(truePc);
       
-      const isProbe = shouldUseProbe(truePc);
-      const jitter = calculateJitter(truePc, isProbe);
+      const isProbe = simShouldUseProbe(truePc);
+      const jitter = simCalculateJitter(truePc, isProbe);
       
       jitterInfo = {
         jitter: jitter,
@@ -4089,6 +4108,11 @@ window.exportSimWeek = async function(opts) {
   
   return results;
 };
+
+// Log dev functions availability for confirmation
+console.log('Dev functions available:');
+console.log('- runSimWeek:', typeof window.runSimWeek === 'function' ? 'available' : 'NOT AVAILABLE');
+console.log('- exportSimWeek:', typeof window.exportSimWeek === 'function' ? 'available' : 'NOT AVAILABLE');
 
 /* ------------------ INIT ------------------ */
 window.addEventListener('load', wireOnce);
