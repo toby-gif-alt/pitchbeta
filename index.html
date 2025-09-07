@@ -605,6 +605,11 @@ if (state.currentBlockStartTime === undefined) {
   state.breakStartTime = null;
   save();
 }
+// Migration for pitch recall results
+if (state.recallResults === undefined) {
+  state.recallResults = [];
+  save();
+}
 
 // Apply theme on load
 applyTheme(state.theme);
@@ -707,13 +712,394 @@ function endBreak(){
   save();
 }
 
+/* ------------------ COLD/WARM PITCH RECALL SYSTEM ------------------ */
+let pitchDetector = null;
+let recallActive = false;
+let recallData = {
+  type: null, // 'cold' or 'warm'
+  notes: [],
+  currentNote: 0,
+  results: []
+};
+
+async function initPitchDetector(){
+  if(pitchDetector) return pitchDetector;
+  
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = getCtx();
+    const source = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    
+    analyser.fftSize = 4096;
+    analyser.smoothingTimeConstant = 0.3;
+    source.connect(analyser);
+    
+    pitchDetector = {
+      analyser,
+      dataArray: new Float32Array(analyser.frequencyBinCount),
+      sampleRate: ctx.sampleRate,
+      stream
+    };
+    
+    return pitchDetector;
+  } catch(e) {
+    console.error('Microphone access denied:', e);
+    return null;
+  }
+}
+
+function frequencyToCents(freq, baseFreq = 440) {
+  if(!freq || freq <= 0 || !baseFreq || baseFreq <= 0) return 0;
+  return 1200 * Math.log2(freq / baseFreq);
+}
+
+function detectPitch() {
+  if(!pitchDetector) return null;
+  
+  const { analyser, dataArray, sampleRate } = pitchDetector;
+  analyser.getFloatTimeDomainData(dataArray);
+  
+  // Simple autocorrelation-based pitch detection
+  const bufferSize = dataArray.length;
+  const autocorrelation = new Array(bufferSize / 2);
+  
+  for(let lag = 0; lag < bufferSize / 2; lag++) {
+    let sum = 0;
+    for(let i = 0; i < bufferSize / 2; i++) {
+      sum += dataArray[i] * dataArray[i + lag];
+    }
+    autocorrelation[lag] = sum;
+  }
+  
+  // Find the first peak after the initial peak
+  let maxVal = -1;
+  let maxIndex = 0;
+  const minPeriod = Math.floor(sampleRate / 1200); // 1200 Hz max
+  const maxPeriod = Math.floor(sampleRate / 60);   // 60 Hz min
+  
+  for(let i = minPeriod; i < Math.min(maxPeriod, autocorrelation.length); i++) {
+    if(autocorrelation[i] > maxVal) {
+      maxVal = autocorrelation[i];
+      maxIndex = i;
+    }
+  }
+  
+  if(maxVal < 0.3) return null; // Threshold for voice detection
+  
+  const frequency = sampleRate / maxIndex;
+  return frequency;
+}
+
+async function startPitchRecall(type) {
+  if(recallActive) return;
+  
+  recallActive = true;
+  recallData.type = type;
+  recallData.notes = [];
+  recallData.currentNote = 0;
+  recallData.results = [];
+  
+  // Get 2-3 learned notes
+  const set = setFromIndex(state.levelIndex);
+  const trained = trainedSet(set);
+  const numNotes = Math.min(3, trained.length);
+  recallData.notes = trained.slice(0, numNotes);
+  
+  if(!await initPitchDetector()) {
+    alert('Microphone access is required for pitch recall. Please allow microphone access and try again.');
+    recallActive = false;
+    return;
+  }
+  
+  showPitchRecallModal();
+}
+
+function showPitchRecallModal() {
+  const modal = byId('pitchRecallModal');
+  if(!modal) {
+    createPitchRecallModal();
+    return showPitchRecallModal();
+  }
+  
+  const isWarm = recallData.type === 'warm';
+  const title = isWarm ? '🔥 Warm Recall' : '❄️ Cold Recall';
+  const desc = isWarm ? 
+    'After 5 blocks of training, test your pitch memory:' :
+    'Before training begins, test your current pitch memory:';
+  
+  byId('recallTitle').textContent = title;
+  byId('recallDescription').textContent = desc;
+  updateRecallProgress();
+  
+  modal.style.display = 'flex';
+  
+  if(recallData.currentNote < recallData.notes.length) {
+    nextRecallNote();
+  }
+}
+
+function createPitchRecallModal() {
+  const modal = document.createElement('div');
+  modal.id = 'pitchRecallModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;z-index:80';
+  
+  modal.innerHTML = `
+    <div style="width:min(600px,90vw);background:var(--card);border:1px solid var(--muted);border-radius:16px;padding:20px;text-align:center">
+      <h2 id="recallTitle">Pitch Recall</h2>
+      <p id="recallDescription">Test your pitch memory</p>
+      <div id="recallProgress" style="margin:16px 0;font-size:18px;font-weight:600"></div>
+      <div id="recallNote" style="margin:20px 0;font-size:24px;font-weight:700;color:var(--accent)"></div>
+      <p id="recallInstructions" style="margin:16px 0;opacity:0.9">Hum the note for 2 seconds. No reference beep by default.</p>
+      <div id="recallPitchInfo" style="margin:16px 0;font-family:monospace;font-size:16px;min-height:60px;padding:10px;background:var(--muted2);border-radius:8px">
+        <div>Hz: <span id="recallHz">--</span></div>
+        <div>Cents: <span id="recallCents">--</span></div>
+        <div>Status: <span id="recallStatus">Ready...</span></div>
+      </div>
+      <div style="margin:16px 0">
+        <button id="btnRecallStart" style="background:var(--good);margin:0 8px">Start Recording (2s)</button>
+        <button id="btnRecallReference" style="background:var(--accent);color:var(--bg);margin:0 8px">Reference Beep</button>
+        <button id="btnRecallSkip" style="background:var(--muted);margin:0 8px">Skip This Note</button>
+      </div>
+      <div style="margin-top:20px">
+        <button id="btnRecallClose" style="background:var(--bad)">Close Recall</button>
+      </div>
+    </div>
+  `;
+  
+  document.body.appendChild(modal);
+  
+  // Add event listeners
+  byId('btnRecallStart').onclick = startRecallRecording;
+  byId('btnRecallReference').onclick = playRecallReference;
+  byId('btnRecallSkip').onclick = skipCurrentRecallNote;
+  byId('btnRecallClose').onclick = closePitchRecall;
+}
+
+function updateRecallProgress() {
+  const current = recallData.currentNote + 1;
+  const total = recallData.notes.length;
+  byId('recallProgress').textContent = `Note ${current} of ${total}`;
+}
+
+function nextRecallNote() {
+  if(recallData.currentNote >= recallData.notes.length) {
+    completePitchRecall();
+    return;
+  }
+  
+  const pc = recallData.notes[recallData.currentNote];
+  byId('recallNote').textContent = pcLabel(pc);
+  byId('recallStatus').textContent = 'Ready...';
+  byId('recallHz').textContent = '--';
+  byId('recallCents').textContent = '--';
+  byId('btnRecallStart').disabled = false;
+  updateRecallProgress();
+}
+
+let recallRecording = false;
+let recallSamples = [];
+
+async function startRecallRecording() {
+  if(recallRecording || !pitchDetector) return;
+  
+  recallRecording = true;
+  recallSamples = [];
+  byId('btnRecallStart').disabled = true;
+  byId('recallStatus').textContent = 'Recording... (2s)';
+  
+  const startTime = Date.now();
+  const duration = 2000; // 2 seconds
+  
+  const recordLoop = () => {
+    if(!recallRecording) return;
+    
+    const elapsed = Date.now() - startTime;
+    if(elapsed >= duration) {
+      finishRecallRecording();
+      return;
+    }
+    
+    const freq = detectPitch();
+    if(freq && freq >= 60 && freq <= 1200) {
+      recallSamples.push(freq);
+      byId('recallHz').textContent = freq.toFixed(1);
+      
+      // Calculate cents from expected note
+      const pc = recallData.notes[recallData.currentNote];
+      const expectedFreq = 440 * Math.pow(2, (PC.indexOf(pc) - 9) / 12); // A4 = 440Hz, A is index 9
+      const cents = frequencyToCents(freq, expectedFreq);
+      byId('recallCents').textContent = cents.toFixed(1) + '¢';
+    }
+    
+    requestAnimationFrame(recordLoop);
+  };
+  
+  recordLoop();
+}
+
+function finishRecallRecording() {
+  recallRecording = false;
+  
+  if(recallSamples.length === 0) {
+    byId('recallStatus').textContent = 'No pitch detected. Try again or skip.';
+    byId('btnRecallStart').disabled = false;
+    return;
+  }
+  
+  // Calculate statistics
+  const pc = recallData.notes[recallData.currentNote];
+  const expectedFreq = 440 * Math.pow(2, (PC.indexOf(pc) - 9) / 12);
+  
+  const cents = recallSamples.map(f => frequencyToCents(f, expectedFreq));
+  const medianCents = cents.sort((a,b) => a-b)[Math.floor(cents.length/2)];
+  const mean = cents.reduce((a,b) => a+b, 0) / cents.length;
+  const variance = cents.reduce((a,b) => a + Math.pow(b - mean, 2), 0) / cents.length;
+  const stdCents = Math.sqrt(variance);
+  
+  // Determine verdict
+  let verdict;
+  if(Math.abs(medianCents) <= 10 && stdCents <= 15) {
+    verdict = 'On target';
+    byId('recallStatus').style.color = 'var(--good)';
+  } else if(Math.abs(medianCents) <= 30) {
+    verdict = 'Close';
+    byId('recallStatus').style.color = 'var(--accent)';
+  } else {
+    verdict = 'Off';
+    byId('recallStatus').style.color = 'var(--bad)';
+  }
+  
+  byId('recallStatus').textContent = `${verdict} (median: ${medianCents.toFixed(1)}¢, SD: ${stdCents.toFixed(1)}¢)`;
+  
+  // Store result
+  recallData.results.push({
+    notePc: pc,
+    medianCents,
+    stdCents,
+    verdict,
+    samples: recallSamples.length
+  });
+  
+  // Move to next note after a short delay
+  setTimeout(() => {
+    recallData.currentNote++;
+    nextRecallNote();
+  }, 2000);
+}
+
+async function playRecallReference() {
+  const pc = recallData.notes[recallData.currentNote];
+  const octave = 4; // Use middle octave for reference
+  const note = `${pc}${octave}`;
+  
+  try {
+    await resumeCtx();
+    
+    // Play a shorter version using sine wave
+    const ctx = getCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    
+    const baseFreq = 440 * Math.pow(2, (PC.indexOf(pc) - 9) / 12); // A4 = 440Hz
+    osc.frequency.setValueAtTime(baseFreq, ctx.currentTime);
+    osc.type = 'sine';
+    
+    gain.gain.setValueAtTime(0.3, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+    
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.3);
+    
+  } catch(e) {
+    console.error('Failed to play reference:', e);
+  }
+}
+
+function skipCurrentRecallNote() {
+  recallData.results.push({
+    notePc: recallData.notes[recallData.currentNote],
+    medianCents: null,
+    stdCents: null,
+    verdict: 'Skipped',
+    samples: 0
+  });
+  
+  recallData.currentNote++;
+  nextRecallNote();
+}
+
+function completePitchRecall() {
+  // Store results in state
+  const today = todayKey(Date.now());
+  if(!state.recallResults) state.recallResults = [];
+  
+  state.recallResults.push({
+    date: today,
+    type: recallData.type,
+    results: recallData.results
+  });
+  save();
+  
+  // Show summary
+  const totalNotes = recallData.results.length;
+  const onTarget = recallData.results.filter(r => r.verdict === 'On target').length;
+  const close = recallData.results.filter(r => r.verdict === 'Close').length;
+  
+  byId('recallNote').textContent = 'Complete!';
+  byId('recallStatus').textContent = `${onTarget} on target, ${close} close out of ${totalNotes} notes`;
+  byId('recallStatus').style.color = 'var(--text)';
+  byId('btnRecallStart').style.display = 'none';
+  byId('btnRecallReference').style.display = 'none';
+  byId('btnRecallSkip').style.display = 'none';
+  
+  // Auto-close after 3 seconds
+  setTimeout(() => {
+    closePitchRecall();
+  }, 3000);
+}
+
+function closePitchRecall() {
+  recallActive = false;
+  
+  if(pitchDetector && pitchDetector.stream) {
+    pitchDetector.stream.getTracks().forEach(track => track.stop());
+    pitchDetector = null;
+  }
+  
+  const modal = byId('pitchRecallModal');
+  if(modal) modal.style.display = 'none';
+  
+  // Continue with session
+  if(recallData.type === 'cold') {
+    // Cold recall completed, resume session and start first block
+    if(sessionActive) {
+      pauseEnd(); // Resume the session timer
+      
+      if(!state.currentBlockStartTime && !state.inBreak){
+        startNewBlock();
+      }
+      
+      text('promptPill', 'Cold recall complete - Press Play to start training');
+      updateLevelUI();
+    }
+  } else if(recallData.type === 'warm') {
+    // Warm recall completed after 5 blocks - end session
+    if(sessionActive) {
+      endSession(false);
+      alert('✅ All 5 blocks completed! Warm recall shows your progress.');
+      showScreen('menuScreen');
+    }
+  }
+}
+
 /* ------------------ FLAGS/TIMERS ------------------ */
 let sessionActive=false, paused=false;
 let rtTimer=null, autoTimer=null, tickId=null;
 function stopAllTimers(){ if(tickId){ clearInterval(tickId); tickId=null; } if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; } if(autoTimer){ clearTimeout(autoTimer); autoTimer=null; }
-
-/* one-shot suppression so strict modal doesn't appear right after specials */
 }
+/* one-shot suppression so strict modal doesn't appear right after specials */
 let suppressStrictOnce=false;
 
 /* ------------------ SANITY ------------------ */
@@ -1643,6 +2029,22 @@ function startSession(){
   (state.sessions||[]).push({start:Date.now(),end:null,pauses:[],completed:false}); 
   state.lastSeen = Date.now(); 
   
+  // Check if this is the first block of the day - run cold recall
+  if((state.blocksCompletedToday || 0) === 0 && !state.currentBlockStartTime) {
+    // Run cold recall before starting first block
+    text('promptPill', 'Starting cold recall assessment...');
+    updateCapsUI(); updateLevelUI(); paintNotes();
+    save();
+    
+    // Pause the session timer during recall (recall doesn't count toward 30 minutes)
+    pauseStart('cold-recall');
+    
+    setTimeout(() => {
+      startPitchRecall('cold');
+    }, 1000);
+    return;
+  }
+  
   // Start first block if not already in one
   if(!state.currentBlockStartTime && !state.inBreak){
     startNewBlock();
@@ -1677,12 +2079,21 @@ function startSession(){
         if(isBlockComplete()){
           completeCurrentBlock();
           if((state.blocksCompletedToday || 0) >= 5){
-            // All blocks completed for the day
+            // All blocks completed for the day - start warm recall
             const now = Date.now();
             const rec=state.sessions[state.sessions.length-1];
             if(rec && !rec.completed){ rec.completed=true; rec.end = now; }
-            save(); endSession(true);
-            alert(`✅ Great work! You've completed all 5 blocks today. Come back tomorrow.`);
+            
+            // Pause session during warm recall (doesn't count toward time)
+            pauseStart('warm-recall');
+            text('promptPill', 'All 5 blocks complete! Starting warm recall...');
+            
+            save();
+            
+            setTimeout(() => {
+              startPitchRecall('warm');
+            }, 1500);
+            
             return;
           } else {
             text('promptPill', 'Block complete! Break starting...');
