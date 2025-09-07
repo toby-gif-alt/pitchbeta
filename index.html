@@ -116,10 +116,10 @@
         <div class="tPage" id="tPage3">
           <h3>🎹 Octaves (per study)</h3>
           <ul>
-            <li>Training tones span <strong>three octaves</strong> and are randomized within blocks.</li>
-            <li><strong>Piano/Sine:</strong> C4–B6 • <strong>Guitar:</strong> C3–B5</li>
+            <li>Training tones span <strong>octaves 3-5</strong> with performance-based mixing.</li>
+            <li><strong>All audio types:</strong> C3–C6 range • <strong>Adaptive:</strong> Center/neighbor balance</li>
             <li>This encourages learning the <em>chroma</em> (pitch class), not just pitch height.</li>
-            <li>Tone length: <strong>800 ms</strong>.</li>
+            <li>Tone length: <strong>800 ms</strong> with optional jitter for boundary training.</li>
           </ul>
         </div>
         <div class="tPage" id="tPage4">
@@ -188,11 +188,23 @@
       <div class="scopeWrap">
         <span style="opacity:.9">Audio type:</span>
         <select id="audioTypeSelect" class="scopeSelect">
-          <option value="piano">Piano (C4-B6)</option>
-          <option value="sine">Sine Wave (C4-B6)</option>
-          <option value="guitar">Guitar (C3-B5)</option>
+          <option value="piano">Piano (C3-C6)</option>
+          <option value="sine">Sine Wave (C3-C6)</option>
+          <option value="guitar">Guitar (C3-C6)</option>
         </select>
         <button id="applyAudioBtn" class="scopeBtn">Change</button>
+      </div>
+    </div>
+    
+    <!-- Timbre Variety Mode -->
+    <div class="row" style="margin-top:8px;gap:12px">
+      <div class="scopeWrap">
+        <span style="opacity:.9">Variety mode:</span>
+        <label style="display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="varietyModeToggle" style="margin: 0;">
+          <span id="varietyModeLabel">Will activate after week 3</span>
+        </label>
+        <button id="varietyInfoBtn" class="scopeBtn" style="padding: 8px 12px;">?</button>
       </div>
     </div>
     
@@ -301,7 +313,7 @@
       <button class="note" id="btnOther" type="button">Other (OOB)</button>
     </div>
 
-    <p style="opacity:.75;margin-top:8px">800 ms tone • RT limit adapts with set size • 24 blocks per set • Octaves randomized (C4–B6)</p>
+    <p style="opacity:.75;margin-top:8px">800 ms tone • RT limit adapts with set size • 24 blocks per set • Octaves 3-5 with performance mixing</p>
   </div>
 
   <!-- Assessment Screen -->
@@ -547,7 +559,133 @@ const TONE_MS=800;
 const THRESH_24=[0.20,0.25,0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.60,0.65,0.70,0.75,0.78,0.80,0.83,0.85,0.88,0.90,0.90,0.90,0.90,0.90,0.90];
 function blockHasFeedback(block){ return block<=20; }
 function rtWindowForSet(n){const a=1183,b=2028;return Math.round(a+(n-1)*(b-a)/11);}
-const OOB_RATE=0.25;
+/* ------------------ ENHANCED OOB SYSTEM ------------------ */
+function initializeOOBState() {
+  if (!state.oobStats) {
+    state.oobStats = {
+      adaptiveRate: 0.25, // Start with 25%
+      lastAdjustment: Date.now(),
+      recentTrials: [], // Rolling window for in-bounds trials
+      oobTrials: [], // Rolling window for OOB trials
+      streakCount: 0, // Current OOB streak
+      healthCheckActive: false
+    };
+  }
+}
+
+function updateOOBRate() {
+  initializeOOBState();
+  
+  const stats = state.oobStats;
+  const now = Date.now();
+  
+  // Only adjust every 3 blocks (roughly)
+  if (now - stats.lastAdjustment < 3 * 24 * 2000) return; // Rough time estimate
+  
+  // Get last 60 graded in-bounds answers
+  const recentInBounds = stats.recentTrials.slice(-60);
+  if (recentInBounds.length < 30) return; // Need minimum data
+  
+  const accuracy = recentInBounds.filter(t => t.correct).length / recentInBounds.length;
+  
+  // Target 70-85% accuracy
+  let adjustment = 0;
+  if (accuracy < 0.70) {
+    adjustment = -0.03; // Reduce OOB to make it easier
+  } else if (accuracy > 0.85) {
+    adjustment = 0.03; // Increase OOB to make it harder
+  }
+  
+  // Apply adjustment with clamping
+  stats.adaptiveRate = Math.max(0.05, Math.min(0.35, stats.adaptiveRate + adjustment));
+  stats.lastAdjustment = now;
+  
+  save();
+}
+
+function shouldGenerateOOB(set) {
+  initializeOOBState();
+  updateOOBRate();
+  
+  const stats = state.oobStats;
+  const oobs = currentOOBs(set);
+  
+  if (oobs.length === 0) return false;
+  
+  // Streak guard: ≤2 OOB in a row
+  if (stats.streakCount >= 2) return false;
+  
+  // Check OOB health - if OOB accuracy is poor, temporarily reduce rate
+  if (stats.healthCheckActive) {
+    return Math.random() < Math.min(0.12, stats.adaptiveRate);
+  }
+  
+  return Math.random() < stats.adaptiveRate;
+}
+
+function recordOOBTrial(wasOOB, correct) {
+  initializeOOBState();
+  
+  const stats = state.oobStats;
+  
+  if (wasOOB) {
+    // Track OOB streak
+    stats.streakCount = correct ? 0 : stats.streakCount + 1;
+    
+    // Add to OOB trials tracking
+    stats.oobTrials.push({ correct, timestamp: Date.now() });
+    if (stats.oobTrials.length > 20) {
+      stats.oobTrials = stats.oobTrials.slice(-20);
+    }
+    
+    // Check OOB health
+    if (stats.oobTrials.length >= 20) {
+      const oobAccuracy = stats.oobTrials.filter(t => t.correct).length / stats.oobTrials.length;
+      stats.healthCheckActive = oobAccuracy < 0.60;
+    }
+  } else {
+    // Reset OOB streak for in-bounds trials
+    stats.streakCount = 0;
+    
+    // Add to recent in-bounds trials for adaptation
+    stats.recentTrials.push({ correct, timestamp: Date.now() });
+    if (stats.recentTrials.length > 60) {
+      stats.recentTrials = stats.recentTrials.slice(-60);
+    }
+  }
+  
+  save();
+}
+
+// Enhanced OOB selection with octave mirroring
+function selectOOBNote(set) {
+  const oobs = currentOOBs(set);
+  if (oobs.length === 0) return null;
+  
+  // Prefer OOB chroma far from trained notes if health check is active
+  if (state.oobStats?.healthCheckActive) {
+    const trainedPcs = trainedSet(set);
+    const farOOBs = oobs.filter(oob => {
+      return !trainedPcs.some(trained => {
+        const oobIdx = PC2I[oob];
+        const trainedIdx = PC2I[trained];
+        const dist = Math.min(
+          Math.abs(oobIdx - trainedIdx),
+          12 - Math.abs(oobIdx - trainedIdx)
+        );
+        return dist <= 1; // Avoid ±1 semitone
+      });
+    });
+    
+    if (farOOBs.length > 0) {
+      return rand(farOOBs);
+    }
+  }
+  
+  return rand(oobs);
+}
+
+const OOB_RATE=0.25; // Keep as fallback, but use adaptive rate
 const SESS_DAILY_MS=30*60*1000; // Changed from 20 to 30 minutes
 const WEEKLY_TARGET_MS=2*3600*1000;
 const BREAK_INTERVAL_MS=6*60*1000; // Break every 6 minutes
@@ -793,25 +931,41 @@ function findClosestGuitarSample(targetNote) {
 }
 
 /* Always play a tone (sample -> oscillator -> fallback) */
-async function playSample(note){
+async function playSample(note, jitterCents = 0, forceTimbre = null){
   try{
     await resumeCtx();
     const ctx = getCtx();
     
+    // Determine which timbre to use
+    const noteWithoutOctave = note.replace(/\d/, '');
+    const preferredTimbre = forceTimbre || state.audioType;
+    const actualTimbre = forceTimbre || getTimbreForTrial(preferredTimbre, noteWithoutOctave);
+    
+    // Store the timbre used for this trial
+    currentTrialTimbre = actualTimbre;
+    
     // Handle different audio types
-    if (state.audioType === AUDIO_TYPES.PIANO) {
+    if (actualTimbre === AUDIO_TYPES.PIANO) {
       try{
         const url = `${AUDIO_PIANO}/${note}.mp3`;
         const buf = await loadBuffer(url);
         const src = ctx.createBufferSource();
         src.buffer = buf;
+        
+        // Apply jitter via playback rate if specified
+        if (jitterCents !== 0) {
+          const pitchRatio = Math.pow(2, jitterCents / 1200);
+          src.playbackRate.value = pitchRatio;
+        }
+        
         const g = ctx.createGain(); g.gain.value = 1;
         src.connect(g).connect(ctx.destination);
         const t = ctx.currentTime;
-        src.start(t); src.stop(t + TONE_MS/1000);
+        const duration = jitterCents !== 0 ? TONE_MS/1000 / src.playbackRate.value : TONE_MS/1000;
+        src.start(t); src.stop(t + duration);
         return;
       }catch(_e){}
-    } else if (state.audioType === AUDIO_TYPES.GUITAR) {
+    } else if (actualTimbre === AUDIO_TYPES.GUITAR) {
       try{
         const {sample, semitones} = findClosestGuitarSample(note);
         const url = `${AUDIO_GUITAR}/${GUITAR_SAMPLES[sample]}`;
@@ -819,9 +973,10 @@ async function playSample(note){
         const src = ctx.createBufferSource();
         src.buffer = buf;
         
-        // Apply pitch shifting
-        const pitchRatio = Math.pow(2, semitones / 12);
-        src.playbackRate.value = pitchRatio;
+        // Apply pitch shifting with jitter
+        const basePitchRatio = Math.pow(2, semitones / 12);
+        const jitterRatio = jitterCents !== 0 ? Math.pow(2, jitterCents / 1200) : 1;
+        src.playbackRate.value = basePitchRatio * jitterRatio;
         
         // Guitar samples are louder, so reduce gain
         const g = ctx.createGain(); 
@@ -829,10 +984,10 @@ async function playSample(note){
         
         src.connect(g).connect(ctx.destination);
         const t = ctx.currentTime;
-        src.start(t); src.stop(t + TONE_MS/1000 / pitchRatio);
+        src.start(t); src.stop(t + TONE_MS/1000 / src.playbackRate.value);
         return;
       }catch(_e){}
-    } else if (state.audioType === AUDIO_TYPES.SINE) {
+    } else if (actualTimbre === AUDIO_TYPES.SINE) {
       // Skip to sine wave generation
     } else {
       // Default to piano, fallback to sine
@@ -841,10 +996,18 @@ async function playSample(note){
         const buf = await loadBuffer(url);
         const src = ctx.createBufferSource();
         src.buffer = buf;
+        
+        // Apply jitter via playback rate if specified
+        if (jitterCents !== 0) {
+          const pitchRatio = Math.pow(2, jitterCents / 1200);
+          src.playbackRate.value = pitchRatio;
+        }
+        
         const g = ctx.createGain(); g.gain.value = 1;
         src.connect(g).connect(ctx.destination);
         const t = ctx.currentTime;
-        src.start(t); src.stop(t + TONE_MS/1000);
+        const duration = jitterCents !== 0 ? TONE_MS/1000 / src.playbackRate.value : TONE_MS/1000;
+        src.start(t); src.stop(t + duration);
         return;
       }catch(_e){}
     }
@@ -854,7 +1017,13 @@ async function playSample(note){
     const pc=m?m[1]:'A', o=m?+m[2]:4;
     const idx={C:0,Db:1,D:2,Eb:3,E:4,F:5,Gb:6,G:7,Ab:8,A:9,Bb:10,B:11};
     const semis=(idx[pc]??9)+(o-4)*12;
-    const freq=440*Math.pow(2,(semis-9)/12);
+    let freq=440*Math.pow(2,(semis-9)/12);
+    
+    // Apply jitter to frequency
+    if (jitterCents !== 0) {
+      freq = freq * Math.pow(2, jitterCents / 1200);
+    }
+    
     const osc = ctx.createOscillator(); const g = ctx.createGain();
     osc.type='sine'; osc.frequency.value=freq;
     const t0 = ctx.currentTime;
@@ -890,7 +1059,269 @@ async function playFlappySound(){
   }catch(_e){}
 }
 
-/* ------------------ PITCH RECALL SYSTEM ------------------ */
+/* ------------------ JITTER SYSTEM ------------------ */
+// Jitter Level Constants
+const JITTER_LEVELS = {
+  JL0: { // Onboarding (new pitch or new timbre)
+    jitterRange: [-8, 8], // ±3-8¢
+    probeRate: 0.02, // 0-3%
+    probeRange: [-30, 30], // ±25-40¢
+    promoteAcc: 0.75,
+    promoteMedian: 20,
+    trials: 40
+  },
+  JL1: { // Early stable
+    jitterRange: [-10, 10], // ±5-10¢
+    probeRate: 0.05, // ~5%
+    probeRange: [-35, 35],
+    promoteAcc: 0.80,
+    promoteMedian: 15,
+    trials: 40
+  },
+  JL2: { // Mid stable
+    jitterRange: [-15, 15], // ±5-15¢
+    probeRate: 0.08, // ~8%
+    probeRange: [-40, 40],
+    promoteAcc: 0.90,
+    promoteMedian: 10,
+    promoteSD: 15,
+    trials: 40
+  },
+  JL3: { // Mature
+    jitterRange: [-15, 15], // ±5-15¢ (global default)
+    probeRate: 0.11, // ~10-12%
+    probeRange: [-40, 40],
+    demoteAcc: 0.75,
+    demoteMedian: 25,
+    demoteSD: 30,
+    trials: 20
+  }
+};
+
+function initializeJitterLevel(note) {
+  if (!state.jitterLevels) state.jitterLevels = {};
+  if (!state.jitterLevels[note]) {
+    state.jitterLevels[note] = 'JL0'; // Start at onboarding level
+  }
+  if (!state.noteStats) state.noteStats = {};
+  if (!state.noteStats[note]) {
+    state.noteStats[note] = {
+      trials: [],
+      accuracy: 0,
+      medianError: 0,
+      stdDev: 0,
+      lastUpdated: Date.now()
+    };
+  }
+}
+
+function updateNoteStats(note, isCorrect, centsError = 0) {
+  initializeJitterLevel(note);
+  
+  const stats = state.noteStats[note];
+  const trial = {
+    correct: isCorrect,
+    centsError: centsError,
+    timestamp: Date.now()
+  };
+  
+  // Add trial and maintain rolling window
+  stats.trials.push(trial);
+  const maxTrials = 40; // Rolling window size
+  if (stats.trials.length > maxTrials) {
+    stats.trials = stats.trials.slice(-maxTrials);
+  }
+  
+  // Calculate rolling statistics
+  const recentTrials = stats.trials.slice(-maxTrials);
+  stats.accuracy = recentTrials.filter(t => t.correct).length / recentTrials.length;
+  
+  // Calculate median error and standard deviation
+  const errors = recentTrials.map(t => Math.abs(t.centsError || 0));
+  errors.sort((a, b) => a - b);
+  stats.medianError = errors.length > 0 ? errors[Math.floor(errors.length / 2)] : 0;
+  
+  const mean = errors.reduce((a, b) => a + b, 0) / errors.length;
+  const variance = errors.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / errors.length;
+  stats.stdDev = Math.sqrt(variance);
+  
+  stats.lastUpdated = Date.now();
+  
+  // Check for level promotion/demotion
+  updateJitterLevel(note);
+  save();
+}
+
+function updateJitterLevel(note) {
+  const currentLevel = state.jitterLevels[note];
+  const stats = state.noteStats[note];
+  const config = JITTER_LEVELS[currentLevel];
+  
+  if (!stats || stats.trials.length < 20) return; // Need minimum trials
+  
+  switch (currentLevel) {
+    case 'JL0':
+      if (stats.accuracy >= config.promoteAcc && stats.medianError <= config.promoteMedian && stats.trials.length >= config.trials) {
+        state.jitterLevels[note] = 'JL1';
+      }
+      break;
+    case 'JL1':
+      if (stats.accuracy >= config.promoteAcc && stats.medianError <= config.promoteMedian) {
+        state.jitterLevels[note] = 'JL2';
+      } else if (stats.accuracy < 0.60 || stats.medianError > 30) {
+        state.jitterLevels[note] = 'JL0'; // Demote to rescue
+      }
+      break;
+    case 'JL2':
+      if (stats.accuracy >= config.promoteAcc && stats.medianError <= config.promoteMedian && stats.stdDev <= config.promoteSD) {
+        state.jitterLevels[note] = 'JL3';
+      } else if (stats.accuracy < 0.75 || stats.medianError > 25) {
+        state.jitterLevels[note] = 'JL1';
+      }
+      break;
+    case 'JL3':
+      if (stats.accuracy < config.demoteAcc || stats.medianError > config.demoteMedian || stats.stdDev > config.demoteSD) {
+        state.jitterLevels[note] = 'JL2'; // Demote one level
+      }
+      break;
+  }
+}
+
+function calculateJitter(note, isProbe = false) {
+  initializeJitterLevel(note);
+  
+  const level = state.jitterLevels[note];
+  const config = JITTER_LEVELS[level];
+  
+  if (isProbe) {
+    // Boundary probe
+    const range = config.probeRange;
+    const sign = Math.random() < 0.5 ? -1 : 1;
+    const min = Math.abs(range[0]) * 0.6; // 25¢ minimum
+    const max = Math.abs(range[1]); // 40¢ maximum
+    return sign * (min + Math.random() * (max - min));
+  } else {
+    // Regular jitter
+    const range = config.jitterRange;
+    return range[0] + Math.random() * (range[1] - range[0]);
+  }
+}
+
+function shouldUseProbe(note) {
+  initializeJitterLevel(note);
+  const level = state.jitterLevels[note];
+  const config = JITTER_LEVELS[level];
+  return Math.random() < config.probeRate;
+}
+
+function selectInBoundsNote(usableNotes) {
+  if (usableNotes.length === 0) return 'F'; // Fallback
+  
+  // Get weak notes and confusion pairs
+  const weakNotes = getWeakNotes().map(w => w.note);
+  const confusionPairs = getConfusionPairs();
+  
+  // Create weighted selection
+  const weights = {};
+  const baseWeight = 1; // Minimum weight for all notes
+  
+  // Initialize all notes with base weight
+  usableNotes.forEach(note => {
+    weights[note] = baseWeight;
+  });
+  
+  // Boost weight for weak notes
+  weakNotes.forEach(note => {
+    if (weights[note] !== undefined) {
+      weights[note] += 2; // Extra weight for weak notes
+    }
+  });
+  
+  // Boost weight for notes in top confusion pairs
+  confusionPairs.slice(0, 2).forEach(pair => {
+    if (weights[pair.truePc] !== undefined) {
+      weights[pair.truePc] += 1.5; // Extra weight for confused notes
+    }
+  });
+  
+  // Weighted random selection
+  const totalWeight = Object.values(weights).reduce((a, b) => a + b, 0);
+  let random = Math.random() * totalWeight;
+  
+  for (const [note, weight] of Object.entries(weights)) {
+    random -= weight;
+    if (random <= 0) {
+      return note;
+    }
+  }
+  
+  return rand(usableNotes); // Fallback to random
+}
+
+/* ------------------ CONFUSION MATRIX & SCHEDULING ------------------ */
+function updateConfusionMatrix(truePc, guessPc) {
+  if (!state.confusionMatrix) state.confusionMatrix = {};
+  
+  const key = `${truePc}->${guessPc}`;
+  state.confusionMatrix[key] = (state.confusionMatrix[key] || 0) + 1;
+}
+
+function getConfusionPairs() {
+  // Return the most confused note pairs for targeted training
+  if (!state.confusionMatrix) return [];
+  
+  const pairs = Object.entries(state.confusionMatrix)
+    .map(([key, count]) => {
+      const [truePc, guessPc] = key.split('->');
+      return { truePc, guessPc, count };
+    })
+    .sort((a, b) => b.count - a.count);
+  
+  return pairs.slice(0, 3); // Top 3 confusion pairs
+}
+
+function getWeakNotes() {
+  // Return notes that need more training based on recent performance
+  if (!state.noteStats) return [];
+  
+  const weakNotes = Object.entries(state.noteStats)
+    .filter(([note, stats]) => {
+      return stats.trials.length >= 10 && (
+        stats.accuracy < 0.75 || 
+        stats.medianError > 25
+      );
+    })
+    .map(([note, stats]) => ({ note, accuracy: stats.accuracy, medianError: stats.medianError }))
+    .sort((a, b) => a.accuracy - b.accuracy);
+  
+  return weakNotes.slice(0, 3); // Top 3 weak notes
+}
+
+function updateVarietyModeUI() {
+  const label = byId('varietyModeLabel');
+  const toggle = byId('varietyModeToggle');
+  
+  if (!label || !toggle) return;
+  
+  if (!state.startDate) {
+    label.textContent = "Will activate after week 3";
+    return;
+  }
+  
+  const weeksSinceStart = Math.floor((Date.now() - state.startDate) / (7 * 24 * 60 * 60 * 1000));
+  
+  if (weeksSinceStart < 3) {
+    label.textContent = `Will activate in ${3 - weeksSinceStart} week(s)`;
+  } else if (state.varietyModeEnabled && shouldUseVarietyMode()) {
+    label.textContent = "Active: 80%/20% mix";
+  } else if (state.varietyModeEnabled) {
+    label.textContent = "Enabled, will activate week 3+";
+  } else {
+    label.textContent = "Available now - click to enable";
+  }
+}
+
+/* ------------------ ENHANCED AUDIO WITH JITTER ------------------ */
 // Simplified pitch detection using autocorrelation
 function detectPitch(audioBuffer) {
   const sampleRate = audioBuffer.sampleRate;
@@ -1188,6 +1619,8 @@ function finishRecallTest() {
 /* ------------------ TRAINING FLOW ------------------ */
 let autoNext=false, delayMs=1000;
 let currentNote=null, truePc=null, isOOBTrial=false;
+let currentTrialJitter=null; // Track jitter info for current trial
+let currentTrialTimbre=null; // Track timbre used for current trial
 let firstRtBonusMs=0, inFlightTrial=false;
 let suggestedRestartFlag=false;
 
@@ -1221,11 +1654,244 @@ function getPlusMinusTwoSemitones(targetPc){
   }
   return pitches;
 }
-function currentOctaves(){ 
-  if (state.audioType === AUDIO_TYPES.GUITAR) {
-    return [3,4,5]; // Guitar uses C3-B5
+/* ------------------ TIMBRE VARIETY SYSTEM ------------------ */
+function initializeTimbreState() {
+  if (!state.timbreStats) {
+    state.timbreStats = {
+      weekStarted: null,
+      dailyAlternate: null,
+      lastRotation: null,
+      perTimbreRescue: {} // Track per-timbre performance for rescue
+    };
   }
-  return [4,5,6]; // Piano uses C4-B6
+}
+
+function shouldUseVarietyMode() {
+  if (!state.varietyModeEnabled) return false;
+  
+  initializeTimbreState();
+  
+  // Check if we've been training for 3+ weeks
+  if (!state.startDate) return false;
+  
+  const weeksSinceStart = Math.floor((Date.now() - state.startDate) / (7 * 24 * 60 * 60 * 1000));
+  return weeksSinceStart >= 3;
+}
+
+function getTimbreForTrial(preferredTimbre, note) {
+  if (!shouldUseVarietyMode()) {
+    return preferredTimbre;
+  }
+  
+  initializeTimbreState();
+  
+  // Check if we need to rotate daily alternate
+  const today = Math.floor(Date.now() / (24 * 60 * 60 * 1000));
+  if (state.timbreStats.lastRotation !== today) {
+    // Rotate to different timbre
+    const timbres = [AUDIO_TYPES.PIANO, AUDIO_TYPES.SINE, AUDIO_TYPES.GUITAR];
+    const alternates = timbres.filter(t => t !== preferredTimbre);
+    state.timbreStats.dailyAlternate = rand(alternates);
+    state.timbreStats.lastRotation = today;
+    save();
+  }
+  
+  // Check for per-timbre rescue
+  const noteTimbreKey = `${note}-${preferredTimbre}`;
+  const alternateTimbreKey = `${note}-${state.timbreStats.dailyAlternate}`;
+  
+  const preferredStats = state.timbreStats.perTimbreRescue[noteTimbreKey];
+  const alternateStats = state.timbreStats.perTimbreRescue[alternateTimbreKey];
+  
+  // If this note is weak on the alternate timbre, give it more examples
+  if (alternateStats && (alternateStats.accuracy < 0.70 || alternateStats.medianError > 30)) {
+    return state.timbreStats.dailyAlternate;
+  }
+  
+  // Week 3+: 80% chosen timbre, 20% alternate
+  return Math.random() < 0.80 ? preferredTimbre : state.timbreStats.dailyAlternate;
+}
+
+function updateTimbreStats(timbre, note, correct, centsError = 0) {
+  if (!shouldUseVarietyMode()) return;
+  
+  initializeTimbreState();
+  
+  const key = `${note}-${timbre}`;
+  if (!state.timbreStats.perTimbreRescue[key]) {
+    state.timbreStats.perTimbreRescue[key] = {
+      trials: [],
+      accuracy: 0,
+      medianError: 0
+    };
+  }
+  
+  const stats = state.timbreStats.perTimbreRescue[key];
+  stats.trials.push({ correct, centsError, timestamp: Date.now() });
+  
+  // Keep last 20 trials
+  if (stats.trials.length > 20) {
+    stats.trials = stats.trials.slice(-20);
+  }
+  
+  // Update metrics
+  stats.accuracy = stats.trials.filter(t => t.correct).length / stats.trials.length;
+  const errors = stats.trials.map(t => Math.abs(t.centsError || 0));
+  errors.sort((a, b) => a - b);
+  stats.medianError = errors.length > 0 ? errors[Math.floor(errors.length / 2)] : 0;
+  
+  save();
+}
+
+/* ------------------ OCTAVE MIXING SYSTEM ------------------ */
+function initializeOctaveState() {
+  if (!state.octaveStats) {
+    state.octaveStats = {
+      currentMix: { center: 0.90, neighbors: 0.10 }, // Start with 90/10
+      centerOctave: 4, // Default center octave
+      trialCount: 0,
+      setTrials: [], // Current set's trial data
+      performanceWindows: {
+        window8_12: null,
+        window12_16: null, 
+        window16_20: null,
+        window20_24: null
+      }
+    };
+  }
+}
+
+function getOctaveRange() {
+  // All audio types now use octaves 3-5
+  return [3, 4, 5];
+}
+
+function selectOctaveForNote(note) {
+  initializeOctaveState();
+  
+  const stats = state.octaveStats;
+  const octaves = getOctaveRange();
+  const centerOctave = stats.centerOctave;
+  const neighbors = octaves.filter(o => o !== centerOctave);
+  
+  // Check for per-note override (weak notes get more center)
+  const noteStats = state.noteStats?.[note];
+  let centerBoost = 0;
+  if (noteStats && (noteStats.accuracy < 0.75 || noteStats.medianError > 25)) {
+    centerBoost = 0.20; // +20% center for weak notes
+  }
+  
+  const centerProb = Math.min(0.95, stats.currentMix.center + centerBoost);
+  const neighborProb = 1 - centerProb;
+  
+  // ~10% surprise checks (count within neighbor share)
+  const surpriseCheck = Math.random() < 0.10;
+  
+  if (Math.random() < centerProb && !surpriseCheck) {
+    return centerOctave;
+  } else {
+    // Select from neighbors, including surprise checks
+    return rand(neighbors);
+  }
+}
+
+function updateOctaveMixing(trialData) {
+  initializeOctaveState();
+  
+  const stats = state.octaveStats;
+  stats.trialCount++;
+  
+  // Only count graded in-bounds trials
+  if (!trialData.oob && trialData.set) {
+    stats.setTrials.push(trialData);
+    
+    // Check performance windows at specific trial counts
+    const trialNum = stats.setTrials.length;
+    
+    if (trialNum === 12) {
+      checkOctaveStep(8, 12, 'window8_12');
+    } else if (trialNum === 16) {
+      checkOctaveStep(12, 16, 'window12_16');
+    } else if (trialNum === 20) {
+      checkOctaveStep(16, 20, 'window16_20');
+    } else if (trialNum === 24) {
+      checkOctaveStep(20, 24, 'window20_24');
+      processEndOfSetPromotion();
+    }
+  }
+  
+  save();
+}
+
+function checkOctaveStep(startTrial, endTrial, windowKey) {
+  const stats = state.octaveStats;
+  const windowTrials = stats.setTrials.slice(startTrial - 1, endTrial);
+  
+  if (windowTrials.length < 4) return; // Need minimum trials
+  
+  const accuracy = windowTrials.filter(t => t.correct).length / windowTrials.length;
+  const errors = windowTrials.map(t => Math.abs(t.jitter?.jitter || 0));
+  const medianError = errors.sort((a, b) => a - b)[Math.floor(errors.length / 2)];
+  
+  const windowData = { accuracy, medianError, trials: windowTrials.length };
+  stats.performanceWindows[windowKey] = windowData;
+  
+  // Apply stepping rules
+  if (windowKey === 'window8_12') {
+    if (accuracy >= 0.80 && medianError <= 15) {
+      stats.currentMix = { center: 0.70, neighbors: 0.30 };
+    } else {
+      // Re-check at trial 16
+      stats.recheckAt16 = true;
+    }
+  } else if (windowKey === 'window12_16' && stats.recheckAt16) {
+    if (accuracy >= 0.80 && medianError <= 15) {
+      stats.currentMix = { center: 0.70, neighbors: 0.30 };
+    }
+    delete stats.recheckAt16;
+  } else if (windowKey === 'window16_20') {
+    if (accuracy >= 0.85 && medianError <= 12) {
+      stats.currentMix = { center: 0.60, neighbors: 0.40 };
+    }
+  }
+}
+
+function processEndOfSetPromotion() {
+  const stats = state.octaveStats;
+  const window20_24 = stats.performanceWindows.window20_24;
+  
+  if (!window20_24) return;
+  
+  const { accuracy, medianError } = window20_24;
+  const errors = stats.setTrials.slice(-4).map(t => Math.abs(t.jitter?.jitter || 0));
+  const mean = errors.reduce((a, b) => a + b, 0) / errors.length;
+  const variance = errors.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / errors.length;
+  const stdDev = Math.sqrt(variance);
+  
+  // Determine next set baseline
+  if (accuracy >= 0.90 && medianError <= 10 && stdDev <= 15) {
+    stats.currentMix = { center: 0.50, neighbors: 0.50 }; // 50/50
+  } else if (accuracy >= 0.85 && medianError <= 12) {
+    stats.currentMix = { center: 0.60, neighbors: 0.40 }; // 60/40
+  } else if (accuracy < 0.80) {
+    stats.currentMix = { center: 0.90, neighbors: 0.10 }; // Back to 90/10 if struggling
+  } else {
+    stats.currentMix = { center: 0.70, neighbors: 0.30 }; // Default to 70/30
+  }
+  
+  // Reset for next set
+  stats.setTrials = [];
+  stats.performanceWindows = {
+    window8_12: null,
+    window12_16: null,
+    window16_20: null,
+    window20_24: null
+  };
+}
+
+function currentOctaves(){ 
+  // All audio types now use octaves 3-5
+  return [3, 4, 5];
 }
 function rand(a){ return a[Math.floor(Math.random()*a.length)]; }
 function pcLabel(pc){ return PC_LABEL[pc] || pc; }
@@ -1722,13 +2388,51 @@ async function nextTrial(forceNew=false){
     if(!currentNote || forceNew){
       const set = setFromIndex(state.levelIndex);
       const usable = trainedSet(set);
-      const oobs = currentOOBs(set);
-      isOOBTrial = oobs.length && Math.random() < OOB_RATE;
-      const pc = isOOBTrial ? rand(oobs) : rand(usable);
-      truePc = pc;
-      currentNote = `${pc}${rand(currentOctaves())}`;
+      
+      // Use enhanced OOB system
+      isOOBTrial = shouldGenerateOOB(set);
+      
+      if (isOOBTrial) {
+        const pc = selectOOBNote(set);
+        truePc = pc;
+      } else {
+        // Apply confusion-aware scheduling for in-bounds
+        const pc = selectInBoundsNote(usable);
+        truePc = pc;
+      }
+      
+      currentNote = `${truePc}${selectOctaveForNote(truePc)}`;
     }
-    await playSample(currentNote);
+    
+    // Apply jitter system for in-bounds trials only
+    let appliedJitter = 0;
+    let isProbe = false;
+    if (!isOOBTrial) {
+      // Initialize jitter level for this note if needed
+      initializeJitterLevel(truePc);
+      
+      // Check if this should be a boundary probe
+      isProbe = shouldUseProbe(truePc);
+      
+      // Calculate jitter/probe amount
+      appliedJitter = calculateJitter(truePc, isProbe);
+      
+      // Store jitter info for this trial
+      currentTrialJitter = {
+        jitter: appliedJitter,
+        isProbe: isProbe,
+        level: state.jitterLevels[truePc]
+      };
+    } else {
+      // OOB trials have no jitter (0¢ detune, stationary)
+      currentTrialJitter = {
+        jitter: 0,
+        isProbe: false,
+        level: null
+      };
+    }
+    
+    await playSample(currentNote, appliedJitter);
     if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
     const baseRt = rtWindowForSet(setFromIndex(state.levelIndex));
     const rtms = baseRt + firstRtBonusMs + LATENCY_CUSHION_MS;
@@ -1770,7 +2474,46 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
   const block = blockFromIndex(state.levelIndex);
   if(block >= 21){ if(ok){ state.testFailStreak=0; hideSuggestBanner(); suggestedRestartFlag=false; } else { state.testFailStreak=(state.testFailStreak||0)+1; } }
   else { state.testFailStreak=0; hideSuggestBanner(); suggestedRestartFlag=false; }
-  state.trials.push({note:currentNote, pc:truePc, guess:guessLabel, correct:ok, timeout, oob:oobChosen, set:setFromIndex(state.levelIndex), block:block, time:Date.now()});
+  
+  // Enhanced trial data with jitter information
+  const trialData = {
+    note: currentNote,
+    pc: truePc,
+    guess: guessLabel,
+    correct: ok,
+    timeout,
+    oob: oobChosen,
+    set: setFromIndex(state.levelIndex),
+    block: block,
+    time: Date.now(),
+    jitter: currentTrialJitter,
+    actualTimbre: currentTrialTimbre // Store which timbre was actually used
+  };
+  
+  state.trials.push(trialData);
+  
+  // Update note statistics for in-bounds trials
+  if (!isOOBTrial && truePc) {
+    const centsError = currentTrialJitter ? currentTrialJitter.jitter : 0;
+    updateNoteStats(truePc, ok, centsError);
+    
+    // Update timbre-specific statistics
+    if (currentTrialTimbre) {
+      updateTimbreStats(currentTrialTimbre, truePc, ok, centsError);
+    }
+    
+    // Update confusion matrix if incorrect
+    if (!ok && guessLabel !== 'OOB' && guessLabel !== truePc) {
+      updateConfusionMatrix(truePc, guessLabel);
+    }
+  }
+  
+  // Record OOB trial data for adaptive system
+  recordOOBTrial(isOOBTrial, ok);
+  
+  // Update octave mixing performance
+  updateOctaveMixing(trialData);
+  
   save(); updateLevelUI(); try{ drawChart(); }catch(_){}; 
   if(block >= 21 && !ok) maybeSuggestRestart();
 }
@@ -1948,9 +2691,21 @@ function endSession(auto){
   stopAllTimers();
   const rec=state.sessions[state.sessions.length-1]; if(rec && !rec.end) rec.end=Date.now();
   save(); updateCapsUI(); try{ drawChart(); }catch(_){};
+  
   if(auto){
-    const left = state.lockoutUntil ? fmtHMM(state.lockoutUntil - Date.now()) : 'some time';
-    alert(`Cap reached. Locked for ${left}.`);
+    // Session completed naturally (30 minutes reached)
+    if(!state.warmRecallDone) {
+      // Trigger warm recall test
+      startRecallTest('warm');
+      return;
+    } else {
+      const left = state.lockoutUntil ? fmtHMM(state.lockoutUntil - Date.now()) : 'some time';
+      alert(`Training session complete! Come back tomorrow for your next session.`);
+      showScreen('menuScreen');
+    }
+  } else {
+    // Manual session end
+    showScreen('menuScreen');
   }
 }
 function pauseStart(reason){
@@ -2172,12 +2927,36 @@ function wireOnce(){
     state.audioType = newType;
     save();
     const labels = {
-      [AUDIO_TYPES.PIANO]: 'Piano (C4-B6)',
-      [AUDIO_TYPES.SINE]: 'Sine Wave (C4-B6)', 
-      [AUDIO_TYPES.GUITAR]: 'Guitar (C3-B5)'
+      [AUDIO_TYPES.PIANO]: 'Piano (C3-C6)',
+      [AUDIO_TYPES.SINE]: 'Sine Wave (C3-C6)', 
+      [AUDIO_TYPES.GUITAR]: 'Guitar (C3-C6)'
     };
     alert(`Audio changed to ${labels[newType] || 'Piano'}`);
   });
+
+  // Variety mode toggle
+  safe('varietyModeToggle', el=> {
+    el.checked = state.varietyModeEnabled || false;
+    el.onchange = ()=> {
+      state.varietyModeEnabled = el.checked;
+      updateVarietyModeUI();
+      save();
+    };
+  });
+  
+  safe('varietyInfoBtn', el=> el.onclick=()=>{
+    const explanation = `Variety Mode adds timbre diversity to your training:
+
+• Weeks 1-2: 100% your chosen audio type (faster early learning)
+• Week 3+: 80% chosen type, 20% rotating alternate type
+• Changes daily to prevent over-adaptation
+• Weak notes get extra practice in struggling timbres
+• Helps build robust pitch recognition across instruments`;
+    
+    alert(explanation);
+  });
+  
+  updateVarietyModeUI();
 
   // Theme selection
   safe('themeSelect', el=> {
