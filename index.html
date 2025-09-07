@@ -108,9 +108,11 @@
         <div class="tPage" id="tPage2">
           <h3>⏱ Daily session</h3>
           <ul>
-            <li>Train for <strong>20 minutes</strong> (timer runs only while actively training).</li>
+            <li>Train for <strong>30 minutes</strong> delivered as <strong>5 blocks of 6 minutes each</strong> (timer runs only while actively training).</li>
             <li>Menus, Flappy, and the 20-s <strong>Shepard tone</strong> don’t count.</li>
             <li>Blocks <strong>1–20</strong> with feedback; <strong>21–24</strong> are tests (no feedback).</li>
+            <li>Minutes credit is <strong>all-or-nothing per block</strong> — you get 6 minutes credit only when completing the full 6:00.</li>
+            <li><strong>60-second breaks</strong> after each 6-minute block with Flappy mini-game.</li>
           </ul>
         </div>
         <div class="tPage" id="tPage3">
@@ -210,6 +212,18 @@
           <option value="forest">Mystic Forest</option>
         </select>
         <button id="applyThemeBtn" class="scopeBtn">Change</button>
+      </div>
+    </div>
+    
+    <!-- Variety Mode -->
+    <div class="row" style="margin-top:8px;gap:12px">
+      <div class="scopeWrap">
+        <span style="opacity:.9">Variety mode:</span>
+        <span id="varietyStatus" style="margin-left:8px;padding:4px 8px;border-radius:8px;background:var(--muted)">Off</span>
+        <button id="toggleVarietyBtn" class="scopeBtn">Toggle</button>
+      </div>
+      <div style="font-size:12px;opacity:0.8;margin-left:8px">
+        Weeks 1-2: 100% chosen timbre • Week 3+: 80% chosen, 20% alternate
       </div>
     </div>
 
@@ -395,7 +409,7 @@
   <div id="strictModal" aria-modal="true" role="dialog">
     <div id="strictBox" class="card">
       <h3>⚠️ Don’t break your session</h3>
-      <p>Training is meant to be one strict 20-minute session without interruption. Please finish, then wait until tomorrow.</p>
+      <p>Training is meant to be completed as structured 30-minute sessions (5×6-minute blocks) without interruption. Please finish your current block, then take the scheduled break.</p>
       <div id="strictBtns">
         <button id="btnStrictResume">Resume Training</button>
         <button id="btnStrictMenu">Go to Menu</button>
@@ -411,6 +425,39 @@
       <div id="newPitchBtns">
         <button id="btnHearNewPitch">🔊 Hear It</button>
         <button id="btnContinueTraining">Continue</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pitch Recall Modal -->
+  <div id="pitchRecallModal" aria-modal="true" role="dialog" style="position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;z-index:80">
+    <div class="card" style="max-width:600px;margin:20px;text-align:center">
+      <h2 id="recallTitle">🎤 Cold Recall</h2>
+      <p id="recallInstructions">Hum the following pitches for 2 seconds each (no reference beep):</p>
+      
+      <div id="recallProgress" style="margin:20px 0">
+        <div style="font-size:18px;margin:10px 0">
+          <span id="recallCurrentNote">F</span> - <span id="recallTimer">2.0s</span>
+        </div>
+        <div style="font-size:14px;opacity:0.8">
+          <span id="recallNoteProgress">1 / 3</span>
+        </div>
+      </div>
+      
+      <div id="recallLiveDisplay" style="margin:16px 0;padding:12px;background:var(--muted2);border-radius:8px">
+        <div>Hz: <span id="recallHz">--</span></div>
+        <div>Cents: <span id="recallCents">--</span></div>
+      </div>
+      
+      <div id="recallControls" style="margin-top:20px">
+        <button id="btnStartRecall" style="background:var(--good)">🎤 Start Recording</button>
+        <button id="btnSkipRecall" style="background:var(--muted);margin-left:8px">Skip</button>
+      </div>
+      
+      <div id="recallResults" style="display:none;margin-top:20px">
+        <h3>Results</h3>
+        <div id="recallResultsContent"></div>
+        <button id="btnRecallComplete" style="background:var(--good);margin-top:12px">Continue</button>
       </div>
     </div>
   </div>
@@ -520,10 +567,29 @@ const THRESH_24=[0.20,0.25,0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.60,0.65,0.70,0.7
 function blockHasFeedback(block){ return block<=20; }
 function rtWindowForSet(n){const a=1183,b=2028;return Math.round(a+(n-1)*(b-a)/11);}
 const OOB_RATE=0.25;
-const SESS_DAILY_MS=20*60*1000;
+// Updated for 30-minute session with 5×6-minute blocks
+const DAILY_TARGET_MIN = 30;
+const BLOCK_LEN_MIN = 6;
+const BREAK_SEC = 60;
+const SESS_DAILY_MS = DAILY_TARGET_MIN * 60 * 1000;
 const WEEKLY_TARGET_MS=2*3600*1000;
 const LOCKOUT_MS=6*3600*1000;
 const LATENCY_CUSHION_MS=100;
+
+// Jitter Tones & Boundary Probes
+const BOUNDARY_PROBE_RATE = 0.10;
+const N_RECALL_NOTES = 3;
+
+// Jitter Ladder by maturity level
+const JITTER_LADDER = {
+  JL0: { jitterRange: [3, 8], anchorCenterShare: 0.30, probeRate: 0.03 },
+  JL1: { jitterRange: [5, 10], anchorCenterShare: 0.25, probeRate: 0.05 },
+  JL2: { jitterRange: [5, 15], anchorCenterShare: 0.15, probeRate: 0.08 },
+  JL3: { jitterRange: [5, 15], anchorCenterShare: 0.12, probeRate: 0.10 }
+};
+
+// Octave mixing
+const SURPRISE_OCT_RATE = 0.10;
 
 /* ------------------ THEME SYSTEM ------------------ */
 function applyTheme(themeName) {
@@ -567,7 +633,29 @@ try{
     audioType: AUDIO_TYPES.PIANO,
     assessmentScores: [],
     theme: 'default',
-    flappySoundEnabled: true
+    flappySoundEnabled: true,
+    // New block-based tracking
+    minutesToday: 0,
+    blocksCompleted: 0,
+    currentBlockStart: null,
+    inBreak: false,
+    breakStart: null,
+    // Pitch maturity and confusion tracking
+    pitchMaturity: {}, // pc -> { level: 'JL0'|'JL1'|'JL2'|'JL3', lastN: [], totalTrials: 0, correctTrials: 0 }
+    confusionMatrix: {}, // [truePC][chosenPC] -> count
+    lastNGradedInBounds: [], // last 60 graded in-bounds for OOB adaptation
+    currentOobRate: 0.25,
+    oobAdaptationBlockCount: 0,
+    // Variety mode
+    varietyMode: false,
+    // Pitch recall tracking
+    coldRecallComplete: false,
+    warmRecallComplete: false,
+    recallResults: [], // {date, type: 'cold'|'warm', items: [{notePc, medianCents, stdCents, medianHz, verdict}]}
+    // OOB health tracking
+    lastNOobResults: [],
+    oobHealthRestricted: false,
+    oobHealthBlocksLeft: 0
   };
 } catch(e){
   state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO };
@@ -590,6 +678,27 @@ if (!state.theme) {
 // Migration for flappySoundEnabled
 if (state.flappySoundEnabled === undefined) {
   state.flappySoundEnabled = true;
+  save();
+}
+// Migration for new block tracking
+if (state.minutesToday === undefined) {
+  state.minutesToday = 0;
+  state.blocksCompleted = 0;
+  state.currentBlockStart = null;
+  state.inBreak = false;
+  state.breakStart = null;
+  state.pitchMaturity = {};
+  state.confusionMatrix = {};
+  state.lastNGradedInBounds = [];
+  state.currentOobRate = 0.25;
+  state.oobAdaptationBlockCount = 0;
+  state.varietyMode = false;
+  state.coldRecallComplete = false;
+  state.warmRecallComplete = false;
+  state.recallResults = [];
+  state.lastNOobResults = [];
+  state.oobHealthRestricted = false;
+  state.oobHealthBlocksLeft = 0;
   save();
 }
 
@@ -660,11 +769,32 @@ function showScreen(id){
   const el = byId(id); if(el) el.style.display='block';
 }
 function ensureWeekRoll(){ const wi=currentWeekIdx(); if(state.thisWeekIdx!==wi){ state.thisWeekIdx=wi; state.thisWeekMs=0; save(); } }
-function isLocked(){ return state.lockoutUntil && Date.now() < state.lockoutUntil; }
+function isLocked(){ 
+  // Check if we've completed our daily quota
+  if (state.minutesToday >= DAILY_TARGET_MIN) {
+    if (!state.lockoutUntil) {
+      state.lockoutUntil = Date.now() + LOCKOUT_MS;
+      save();
+    }
+    return Date.now() < state.lockoutUntil;
+  }
+  return state.lockoutUntil && Date.now() < state.lockoutUntil; 
+}
 function updateCapsUI(){
   ensureWeekRoll();
-  const left = Math.max(0, SESS_DAILY_MS - msUsedQuota());
-  text('capInfo', `Left: ${fmtMMSS(left)}`);
+  
+  // Check if daily lockout should be active
+  const isLockedOut = state.minutesToday >= DAILY_TARGET_MIN;
+  if (isLockedOut && !state.lockoutUntil) {
+    state.lockoutUntil = Date.now() + LOCKOUT_MS;
+    save();
+  }
+  
+  const remainingMin = Math.max(0, DAILY_TARGET_MIN - state.minutesToday);
+  text('capInfo', `Left: ${remainingMin} min (${state.blocksCompleted}/5 blocks)`);
+  
+  updateVarietyModeDisplay();
+  
   const usedW = state.thisWeekMs || 0;
   const wp = byId('weekPill');
   if(wp){
@@ -679,10 +809,29 @@ function updateCapsUI(){
   const locked = isLocked();
   const lp = byId('lockoutPill');
   if(lp){
-    if(locked){ lp.style.display='inline-flex'; lp.textContent = `🔒 Locked (${fmtHMM(state.lockoutUntil - Date.now())} left)`; }
-    else lp.style.display='none';
+    if(locked && state.minutesToday >= DAILY_TARGET_MIN){ 
+      lp.style.display='inline-flex'; 
+      lp.textContent = `✅ Great work! Come back tomorrow.`; 
+      lp.style.background = 'var(--good)';
+    }
+    else if(locked){ 
+      lp.style.display='inline-flex'; 
+      lp.textContent = `🔒 Locked (${fmtHMM(state.lockoutUntil - Date.now())} left)`; 
+      lp.style.background = 'var(--muted)';
+    }
+    else { 
+      lp.style.display='none'; 
+    }
   }
   const pf = byId('playFlappy'); if(pf) pf.disabled = !locked;
+}
+
+function updateVarietyModeDisplay() {
+  const status = byId('varietyStatus');
+  if (status) {
+    status.textContent = state.varietyMode ? 'On' : 'Off';
+    status.style.background = state.varietyMode ? 'var(--good)' : 'var(--muted)';
+  }
 }
 function setFromIndex(i){return Math.floor((i-1)/LEVELS_PER_SET)+1;}
 function blockFromIndex(i){return ((i-1)%LEVELS_PER_SET)+1;}
@@ -866,11 +1015,29 @@ function currentOOBs(setSize){
   const learned = trainedSet(setSize).map(n=>PC2I[n]).sort((a,b)=>a-b);
   const low=learned[0], high=learned[learned.length-1];
   const up1=(high+1)%12, up2=(high+2)%12, dn1=(low+11)%12, dn2=(low+10)%12;
-  const out=[];
-  if(!learned.includes(up1)) out.push(PC[up1]);
-  if(!learned.includes(up2) && !learned.includes(up1)) out.push(PC[up2]);
-  if(!learned.includes(dn1)) out.push(PC[dn1]);
-  if(!learned.includes(dn2) && !learned.includes(dn1)) out.push(PC[dn2]);
+  let out=[];
+  
+  // During health restrictions, use semitone distance ≥ 2 from trained pitches
+  if (state.oobHealthRestricted) {
+    for (let i = 0; i < 12; i++) {
+      if (!learned.includes(i)) {
+        // Check if this pitch is at least 2 semitones away from all learned pitches
+        const minDistance = Math.min(...learned.map(l => Math.min(Math.abs(i - l), 12 - Math.abs(i - l))));
+        if (minDistance >= 2) {
+          out.push(PC[i]);
+        }
+      }
+    }
+    // Cap OOB rate to 12% during health restrictions
+    state.currentOobRate = Math.min(state.currentOobRate, 0.12);
+  } else {
+    // Normal OOB selection
+    if(!learned.includes(up1)) out.push(PC[up1]);
+    if(!learned.includes(up2) && !learned.includes(up1)) out.push(PC[up2]);
+    if(!learned.includes(dn1)) out.push(PC[dn1]);
+    if(!learned.includes(dn2) && !learned.includes(dn1)) out.push(PC[dn2]);
+  }
+  
   return out;
 }
 function getPlusMinusTwoSemitones(targetPc){
@@ -885,10 +1052,64 @@ function getPlusMinusTwoSemitones(targetPc){
   return pitches;
 }
 function currentOctaves(){ 
-  if (state.audioType === AUDIO_TYPES.GUITAR) {
-    return [3,4,5]; // Guitar uses C3-B5
+  // Always use octaves 3-5 across all timbres (center = 4)
+  return [3, 4, 5];
+}
+
+function selectOctaveWithMixing(pc, isInBounds = true) {
+  if (!isInBounds) {
+    // OOB trials mirror the in-bounds octave mix
+    return selectOctaveWithMixing(pc, true);
   }
-  return [4,5,6]; // Piano uses C4-B6
+  
+  // For now, use basic mixing - in a full implementation this would
+  // track set windows and progression
+  const octaves = currentOctaves();
+  const centerOct = 4;
+  const neighborOcts = [3, 5];
+  
+  // Basic progression: start with heavy center bias, gradually increase neighbors
+  const set = setFromIndex(state.levelIndex);
+  const block = blockFromIndex(state.levelIndex);
+  const trialsInSet = (block - 1) * 20 + state.levelTrials; // approximate
+  
+  let centerShare = 0.90; // Start with high center bias
+  let neighborShare = 0.10;
+  
+  // Simple progression based on set experience
+  if (trialsInSet > 100) {
+    centerShare = 0.70;
+    neighborShare = 0.30;
+  }
+  if (trialsInSet > 200) {
+    centerShare = 0.60;
+    neighborShare = 0.40;
+  }
+  
+  // Per-note override: weak pitches get +0.20 toward center
+  const maturity = getPitchMaturity(pc);
+  if (maturity.lastN.length >= 10) {
+    const recentAcc = maturity.lastN.slice(-10).reduce((a,b) => a+b, 0) / Math.min(10, maturity.lastN.length);
+    const medianCents = maturity.medianCents.length ? 
+      maturity.medianCents.slice(-10).sort((a,b) => a-b)[Math.floor(maturity.medianCents.slice(-10).length/2)] : 0;
+    
+    if (recentAcc < 0.75 || medianCents > 25) {
+      centerShare = Math.min(1.0, centerShare + 0.20);
+      neighborShare = Math.max(0.0, neighborShare - 0.20);
+    }
+  }
+  
+  // Select octave based on shares
+  if (Math.random() < centerShare) {
+    return centerOct;
+  } else {
+    // Within neighbor share, check for surprise octave rate
+    if (Math.random() < SURPRISE_OCT_RATE) {
+      return rand(neighborOcts); // Surprise octave
+    } else {
+      return rand(neighborOcts); // Regular neighbor
+    }
+  }
 }
 function rand(a){ return a[Math.floor(Math.random()*a.length)]; }
 function pcLabel(pc){ return PC_LABEL[pc] || pc; }
@@ -1377,6 +1598,167 @@ function chooseOOB(){
   scheduleAuto();
 }
 
+/* ------------------ JITTER & PROBE SYSTEM ------------------ */
+function getPitchMaturity(pc) {
+  if (!state.pitchMaturity[pc]) {
+    state.pitchMaturity[pc] = {
+      level: 'JL0',
+      lastN: [], // up to 40 booleans for recent trials
+      totalTrials: 0,
+      correctTrials: 0,
+      medianCents: [],
+      stdCents: []
+    };
+  }
+  return state.pitchMaturity[pc];
+}
+
+function updatePitchMaturity(pc, correct, cents) {
+  const maturity = getPitchMaturity(pc);
+  
+  // Update rolling window (lastN = 40)
+  maturity.lastN.push(correct);
+  if (maturity.lastN.length > 40) {
+    maturity.lastN.shift();
+  }
+  
+  // Update totals
+  maturity.totalTrials++;
+  if (correct) maturity.correctTrials++;
+  
+  // Store cents for analysis
+  if (cents !== undefined) {
+    maturity.medianCents.push(Math.abs(cents));
+    if (maturity.medianCents.length > 40) {
+      maturity.medianCents.shift();
+    }
+  }
+  
+  // Evaluate maturity transitions if we have enough data
+  if (maturity.lastN.length >= 20) {
+    const recentAcc = maturity.lastN.slice(-40).reduce((a,b) => a+b, 0) / Math.min(40, maturity.lastN.length);
+    const medianCents = maturity.medianCents.length ? 
+      maturity.medianCents.slice().sort((a,b) => a-b)[Math.floor(maturity.medianCents.length/2)] : 999;
+    const stdCents = maturity.medianCents.length > 1 ? 
+      Math.sqrt(maturity.medianCents.reduce((a,v) => a + Math.pow(v - medianCents, 2), 0) / maturity.medianCents.length) : 999;
+    
+    // Progression rules
+    if (maturity.level === 'JL0' && recentAcc >= 0.75 && medianCents <= 20) {
+      maturity.level = 'JL1';
+    } else if (maturity.level === 'JL1' && recentAcc >= 0.80 && medianCents <= 15) {
+      maturity.level = 'JL2';
+    } else if (maturity.level === 'JL2' && recentAcc >= 0.90 && medianCents <= 10 && stdCents <= 15) {
+      maturity.level = 'JL3';
+    }
+    
+    // Regression rule (last 20 trials)
+    if (maturity.lastN.length >= 20) {
+      const recent20Acc = maturity.lastN.slice(-20).reduce((a,b) => a+b, 0) / 20;
+      if (recent20Acc < 0.75 || medianCents > 25 || stdCents > 30) {
+        if (maturity.level === 'JL3') maturity.level = 'JL2';
+        else if (maturity.level === 'JL2') maturity.level = 'JL1';
+        else if (maturity.level === 'JL1') maturity.level = 'JL0';
+      }
+    }
+  }
+  
+  save();
+}
+
+function selectInBoundsPitch(usablePitches) {
+  // Confusion-aware scheduling
+  const weights = {};
+  let totalWeight = 0;
+  
+  for (const pc of usablePitches) {
+    const maturity = getPitchMaturity(pc);
+    const lastAcc = maturity.lastN.length ? 
+      maturity.lastN.reduce((a,b) => a+b, 0) / maturity.lastN.length :
+      (maturity.totalTrials ? maturity.correctTrials / maturity.totalTrials : 0.5);
+    
+    // Base weight: w = max(0.15, (1 - lastAcc)^2 + 0.15)
+    let weight = Math.max(0.15, Math.pow(1 - lastAcc, 2) + 0.15);
+    
+    // Confusion boost: find most confused pitch and boost its weight by 1.35
+    if (state.confusionMatrix[pc]) {
+      const confusions = state.confusionMatrix[pc];
+      let maxConfusion = 0;
+      let mostConfusedWith = null;
+      for (const [otherPc, count] of Object.entries(confusions)) {
+        if (otherPc !== pc && count > maxConfusion) {
+          maxConfusion = count;
+          mostConfusedWith = otherPc;
+        }
+      }
+      if (mostConfusedWith && usablePitches.includes(mostConfusedWith)) {
+        weight *= 1.35;
+      }
+    }
+    
+    weights[pc] = weight;
+    totalWeight += weight;
+  }
+  
+  // Weighted random selection
+  let rand = Math.random() * totalWeight;
+  for (const pc of usablePitches) {
+    rand -= weights[pc];
+    if (rand <= 0) return pc;
+  }
+  
+  return usablePitches[0]; // fallback
+}
+
+function applyJitterOrProbe(pc) {
+  const maturity = getPitchMaturity(pc);
+  const ladder = JITTER_LADDER[maturity.level];
+  
+  // 1) Boundary probe check
+  if (Math.random() < ladder.probeRate) {
+    const detune = (Math.random() < 0.5 ? -1 : 1) * (25 + Math.random() * 15); // ±25 to ±40 cents
+    return {
+      note: applyDetuneToNote(pc, detune),
+      detune: detune,
+      category: 'probe'
+    };
+  }
+  
+  // 2) Center anchor check
+  if (Math.random() < ladder.anchorCenterShare) {
+    const octave = selectOctaveWithMixing(pc, true);
+    return {
+      note: `${pc}${octave}`,
+      detune: 0,
+      category: 'anchor'
+    };
+  }
+  
+  // 3) Jittered center
+  const jitterRange = ladder.jitterRange;
+  const detune = (Math.random() < 0.5 ? -1 : 1) * 
+    (jitterRange[0] + Math.random() * (jitterRange[1] - jitterRange[0]));
+  
+  return {
+    note: applyDetuneToNote(pc, detune),
+    detune: detune,
+    category: 'jitter'
+  };
+}
+
+function applyDetuneToNote(pc, centDetune) {
+  // For now, apply detune by selecting a slightly different note or using synthesis
+  // This is a simplified implementation - in a real system you'd use audio processing
+  const octave = selectOctaveWithMixing(pc, true);
+  
+  if (Math.abs(centDetune) < 5) {
+    // Small detune - use the exact note
+    return `${pc}${octave}`;
+  } else {
+    // Larger detune - for now just use the base note (proper implementation would detune audio)
+    return `${pc}${octave}`;
+  }
+}
+
 /* Driving */
 function scheduleAuto(){ if(autoTimer){ clearTimeout(autoTimer); autoTimer=null; } if(autoNext && sessionActive && !paused && !shepRunning && !special){ autoTimer = setTimeout(()=> nextTrial(true), delayMs); } }
 async function nextTrial(forceNew=false){
@@ -1397,10 +1779,26 @@ async function nextTrial(forceNew=false){
       const set = setFromIndex(state.levelIndex);
       const usable = trainedSet(set);
       const oobs = currentOOBs(set);
-      isOOBTrial = oobs.length && Math.random() < OOB_RATE;
-      const pc = isOOBTrial ? rand(oobs) : rand(usable);
-      truePc = pc;
-      currentNote = `${pc}${rand(currentOctaves())}`;
+      
+      // Use adaptive OOB rate instead of fixed rate
+      isOOBTrial = oobs.length && Math.random() < state.currentOobRate;
+      
+      if (isOOBTrial) {
+        // OOB trials: no jitter, detune = 0¢, mirror in-bounds octave mix
+        truePc = rand(oobs);
+        const octave = selectOctaveWithMixing(truePc, false); // Mirror in-bounds mixing
+        currentNote = `${truePc}${octave}`;
+      } else {
+        // In-bounds trials: apply jitter/boundary probe system
+        const selectedPc = selectInBoundsPitch(usable);
+        const jitterInfo = applyJitterOrProbe(selectedPc);
+        truePc = selectedPc;
+        currentNote = jitterInfo.note;
+        
+        // Store the detune info for later analysis
+        window.currentTrialDetune = jitterInfo.detune;
+        window.currentTrialCategory = jitterInfo.category; // 'probe', 'anchor', 'jitter'
+      }
     }
     await playSample(currentNote);
     if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
@@ -1444,9 +1842,135 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
   const block = blockFromIndex(state.levelIndex);
   if(block >= 21){ if(ok){ state.testFailStreak=0; hideSuggestBanner(); suggestedRestartFlag=false; } else { state.testFailStreak=(state.testFailStreak||0)+1; } }
   else { state.testFailStreak=0; hideSuggestBanner(); suggestedRestartFlag=false; }
-  state.trials.push({note:currentNote, pc:truePc, guess:guessLabel, correct:ok, timeout, oob:oobChosen, set:setFromIndex(state.levelIndex), block:block, time:Date.now()});
+  
+  // Enhanced trial data with jitter info
+  const trialData = {
+    note: currentNote, 
+    pc: truePc, 
+    guess: guessLabel, 
+    correct: ok, 
+    timeout, 
+    oob: oobChosen, 
+    set: setFromIndex(state.levelIndex), 
+    block: block, 
+    time: Date.now()
+  };
+  
+  // Add jitter info if available
+  if (window.currentTrialDetune !== undefined) {
+    trialData.detune = window.currentTrialDetune;
+    trialData.category = window.currentTrialCategory;
+  }
+  
+  state.trials.push(trialData);
+  
+  // Update maturity and confusion matrix for in-bounds trials only
+  if (!isOOBTrial && !oobChosen && truePc && guessLabel !== 'OOB' && !timeout) {
+    // Update pitch maturity
+    const cents = window.currentTrialDetune || 0;
+    updatePitchMaturity(truePc, ok, Math.abs(cents));
+    
+    // Update confusion matrix
+    if (!state.confusionMatrix[truePc]) {
+      state.confusionMatrix[truePc] = {};
+    }
+    const chosenPc = guessLabel === 'OOB' ? 'OOB' : guessLabel;
+    if (chosenPc && chosenPc !== 'OOB') {
+      state.confusionMatrix[truePc][chosenPc] = (state.confusionMatrix[truePc][chosenPc] || 0) + 1;
+    }
+    
+    // Track for OOB adaptation (last 60 graded in-bounds)
+    state.lastNGradedInBounds = state.lastNGradedInBounds || [];
+    state.lastNGradedInBounds.push(ok);
+    if (state.lastNGradedInBounds.length > 60) {
+      state.lastNGradedInBounds.shift();
+    }
+  }
+  
+  // Track OOB results for health check
+  if (isOOBTrial || oobChosen) {
+    state.lastNOobResults = state.lastNOobResults || [];
+    state.lastNOobResults.push(ok);
+    if (state.lastNOobResults.length > 20) {
+      state.lastNOobResults.shift();
+    }
+    
+    // Check OOB health
+    checkOobHealth();
+  }
+  
+  // Clean up trial-specific data
+  window.currentTrialDetune = undefined;
+  window.currentTrialCategory = undefined;
+  
   save(); updateLevelUI(); try{ drawChart(); }catch(_){}; 
   if(block >= 21 && !ok) maybeSuggestRestart();
+  
+  // Check for OOB adaptation every 3 blocks
+  if (!isOOBTrial && !oobChosen) {
+    state.oobAdaptationBlockCount = (state.oobAdaptationBlockCount || 0) + 1;
+    if (state.oobAdaptationBlockCount >= 3) {
+      adaptOobRate();
+      state.oobAdaptationBlockCount = 0;
+      save();
+    }
+  }
+}
+
+function adaptOobRate() {
+  // Use last 60 graded in-bounds to adjust OOB rate
+  if (state.lastNGradedInBounds.length >= 30) { // Need at least 30 trials
+    const accuracy = state.lastNGradedInBounds.reduce((a, b) => a + b, 0) / state.lastNGradedInBounds.length;
+    
+    // Target accuracy: 70-85%
+    if (accuracy < 0.70) {
+      // Too hard, reduce OOB rate
+      state.currentOobRate = Math.max(0.05, state.currentOobRate - 0.03);
+    } else if (accuracy > 0.85) {
+      // Too easy, increase OOB rate  
+      state.currentOobRate = Math.min(0.35, state.currentOobRate + 0.03);
+    }
+    
+    console.log(`OOB adaptation: accuracy=${(accuracy*100).toFixed(1)}%, new OOB rate=${(state.currentOobRate*100).toFixed(1)}%`);
+  }
+}
+
+function checkOobHealth() {
+  // OOB health check for novices/small sets
+  if (!state.lastNOobResults || state.lastNOobResults.length < 20) return;
+  
+  const oobAcc = state.lastNOobResults.reduce((a, b) => a + b, 0) / state.lastNOobResults.length;
+  
+  if (oobAcc < 0.60 && !state.oobHealthRestricted) {
+    // Activate health restrictions
+    state.oobHealthRestricted = true;
+    state.oobHealthBlocksLeft = 2;
+    console.log(`OOB health check: accuracy ${(oobAcc*100).toFixed(1)}% < 60%, activating restrictions for 2 blocks`);
+    save();
+  } else if (oobAcc >= 0.75 && state.oobHealthRestricted) {
+    // Remove health restrictions
+    state.oobHealthRestricted = false;
+    state.oobHealthBlocksLeft = 0;
+    console.log(`OOB health check: accuracy ${(oobAcc*100).toFixed(1)}% ≥ 75%, removing restrictions`);
+    save();
+  }
+  
+  // Decrement health restriction blocks
+  if (state.oobHealthRestricted && state.oobHealthBlocksLeft > 0) {
+    state.oobHealthBlocksLeft--;
+    if (state.oobHealthBlocksLeft <= 0) {
+      // Re-evaluate after restriction period
+      const newAcc = state.lastNOobResults.slice(-20).reduce((a, b) => a + b, 0) / Math.min(20, state.lastNOobResults.length);
+      if (newAcc >= 0.75) {
+        state.oobHealthRestricted = false;
+        console.log(`OOB health restriction ended: accuracy ${(newAcc*100).toFixed(1)}%`);
+      } else {
+        state.oobHealthBlocksLeft = 2; // Extend for another 2 blocks
+        console.log(`OOB health restriction extended: accuracy ${(newAcc*100).toFixed(1)}%`);
+      }
+      save();
+    }
+  }
 }
 
 function feedback(ok, wrongMsgOverride){
@@ -1530,6 +2054,17 @@ function startSession(){
     alert(`Training is locked for ${fmtHMM(left)}.\nYou can still play Flappy from the menu, or Reset lockout/timer.`);
     showScreen('menuScreen'); return;
   }
+  
+  // Check for cold recall test
+  if (shouldDoRecall('cold')) {
+    startRecallTest('cold');
+    return; // Will continue to training after recall
+  }
+  
+  continueToTraining();
+}
+
+function continueToTraining(){
   showScreen('trainerScreen');
   if(!state.startDate) state.startDate=Date.now();
   ensureWeekRoll();
@@ -1539,22 +2074,61 @@ function startSession(){
   updateCapsUI(); updateLevelUI(); paintNotes();
   text('promptPill','Press Play to start');
   stopAllTimers();
+  
+  // Initialize block tracking if starting a new session
+  if (!state.currentBlockStart && state.minutesToday < DAILY_TARGET_MIN) {
+    state.currentBlockStart = Date.now();
+    save();
+  }
+  
   tickId=setInterval(()=>{
     ensureWeekRoll();
-    if(sessionActive && !paused && !shepRunning){ state.thisWeekMs = (state.thisWeekMs||0) + 1000; save(); }
-    if(sessionActive && !paused){
-      const left = Math.max(0, SESS_DAILY_MS - msUsedQuota());
-      text('timerInfo', `Time left: ${fmtMMSS(left)}`);
-      if(left<=0){
-        const now = Date.now();
-        const rec=state.sessions[state.sessions.length-1];
-        if(rec && !rec.completed){ rec.completed=true; rec.end = now; }
-        state.lockoutUntil = now + LOCKOUT_MS;
-        state.capResetAt   = state.lockoutUntil;
-        save(); endSession(true);
+    
+    // Update weekly time if actively training
+    if(sessionActive && !paused && !shepRunning && !state.inBreak){ 
+      state.thisWeekMs = (state.thisWeekMs||0) + 1000; 
+      save(); 
+    }
+    
+    if(sessionActive && !paused && !state.inBreak){
+      // Block-based timing
+      if (state.currentBlockStart) {
+        const blockElapsed = Date.now() - state.currentBlockStart;
+        const blockLeftMs = Math.max(0, BLOCK_LEN_MIN * 60 * 1000 - blockElapsed);
+        const blockLeftSec = Math.ceil(blockLeftMs / 1000);
+        const blockNum = state.blocksCompleted + 1;
+        
+        text('timerInfo', `Block ${blockNum}/5 — Time left: ${fmtMMSS(blockLeftMs)}`);
+        
+        // Check if block is complete
+        if(blockLeftMs <= 0){
+          // Block completed! Credit the full 6 minutes
+          state.minutesToday += BLOCK_LEN_MIN;
+          state.blocksCompleted++;
+          state.currentBlockStart = null;
+          
+          const now = Date.now();
+          const rec=state.sessions[state.sessions.length-1];
+          if(rec && !rec.completed){ rec.completed=true; rec.end = now; }
+          
+          save();
+          
+          // Check if all blocks are done
+          if(state.blocksCompleted >= 5){
+            state.lockoutUntil = now + LOCKOUT_MS;
+            save();
+            endSession(true);
+            return;
+          } else {
+            // Start break
+            startBreak();
+            return;
+          }
+        }
       }
     }
-    updateCapsUI(); drawChart();
+    updateCapsUI(); 
+    try{ drawChart(); }catch(_){}
   },1000);
 }
 function endSession(auto){
@@ -1563,11 +2137,393 @@ function endSession(auto){
   stopAllTimers();
   const rec=state.sessions[state.sessions.length-1]; if(rec && !rec.end) rec.end=Date.now();
   save(); updateCapsUI(); try{ drawChart(); }catch(_){};
+  
   if(auto){
     const left = state.lockoutUntil ? fmtHMM(state.lockoutUntil - Date.now()) : 'some time';
-    alert(`Cap reached. Locked for ${left}.`);
+    if (state.minutesToday >= DAILY_TARGET_MIN) {
+      // Check for warm recall before showing completion message
+      if (shouldDoRecall('warm')) {
+        startRecallTest('warm');
+        return; // Will show completion after recall
+      }
+      alert(`Great work! You completed all 5 blocks (30 minutes). Come back tomorrow!`);
+    } else {
+      alert(`Cap reached. Locked for ${left}.`);
+    }
   }
 }
+
+/* ------------------ PITCH RECALL SYSTEM ------------------ */
+let recallState = null; // {type: 'cold'|'warm', notes: [], currentIndex: 0, results: []}
+let recallAudioContext = null;
+let recallAnalyser = null;
+let recallMicrophone = null;
+let recallTimer = null;
+
+async function initPitchDetection() {
+  try {
+    if (!recallAudioContext) {
+      recallAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    
+    if (recallAudioContext.state === 'suspended') {
+      await recallAudioContext.resume();
+    }
+    
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recallMicrophone = recallAudioContext.createMediaStreamSource(stream);
+    recallAnalyser = recallAudioContext.createAnalyser();
+    recallAnalyser.fftSize = 4096;
+    recallMicrophone.connect(recallAnalyser);
+    
+    return true;
+  } catch (error) {
+    console.error('Failed to initialize pitch detection:', error);
+    return false;
+  }
+}
+
+function detectPitch() {
+  if (!recallAnalyser) return { hz: 0, cents: 0 };
+  
+  const bufferLength = recallAnalyser.fftSize;
+  const buffer = new Float32Array(bufferLength);
+  recallAnalyser.getFloatTimeDomainData(buffer);
+  
+  // Simple autocorrelation-based pitch detection
+  const sampleRate = recallAudioContext.sampleRate;
+  const minPeriod = Math.floor(sampleRate / 1200); // 1200 Hz max
+  const maxPeriod = Math.floor(sampleRate / 60);   // 60 Hz min
+  
+  let bestCorrelation = -1;
+  let bestPeriod = -1;
+  
+  // RMS gate - only detect if signal is strong enough
+  const rms = Math.sqrt(buffer.reduce((sum, val) => sum + val * val, 0) / buffer.length);
+  if (rms < 0.01) return { hz: 0, cents: 0 };
+  
+  for (let period = minPeriod; period <= maxPeriod; period++) {
+    let correlation = 0;
+    for (let i = 0; i < bufferLength - period; i++) {
+      correlation += buffer[i] * buffer[i + period];
+    }
+    correlation /= (bufferLength - period);
+    
+    if (correlation > bestCorrelation) {
+      bestCorrelation = correlation;
+      bestPeriod = period;
+    }
+  }
+  
+  if (bestPeriod === -1 || bestCorrelation < 0.3) {
+    return { hz: 0, cents: 0 };
+  }
+  
+  const frequency = sampleRate / bestPeriod;
+  const cents = 1200 * Math.log2(frequency / 440); // Cents relative to A4
+  
+  return { hz: frequency, cents: cents };
+}
+
+function shouldDoRecall(type) {
+  if (type === 'cold') {
+    return state.blocksCompleted === 0 && !state.coldRecallComplete;
+  } else if (type === 'warm') {
+    return state.blocksCompleted === 5 && !state.warmRecallComplete;
+  }
+  return false;
+}
+
+function startRecallTest(type) {
+  const set = setFromIndex(state.levelIndex);
+  const learnedNotes = trainedSet(set);
+  const numNotes = Math.min(N_RECALL_NOTES, Math.max(2, learnedNotes.length));
+  
+  // Select random notes from learned set
+  const selectedNotes = [];
+  const shuffled = [...learnedNotes].sort(() => Math.random() - 0.5);
+  for (let i = 0; i < numNotes; i++) {
+    selectedNotes.push(shuffled[i % shuffled.length]);
+  }
+  
+  recallState = {
+    type: type,
+    notes: selectedNotes,
+    currentIndex: 0,
+    results: []
+  };
+  
+  showRecallModal();
+}
+
+function showRecallModal() {
+  const modal = byId('pitchRecallModal');
+  const title = byId('recallTitle');
+  const instructions = byId('recallInstructions');
+  
+  if (recallState.type === 'cold') {
+    title.textContent = '🎤 Cold Recall';
+    instructions.textContent = 'Before starting training, hum these learned pitches (2 seconds each, no reference beep):';
+  } else {
+    title.textContent = '🎤 Warm Recall';
+    instructions.textContent = 'Training complete! Now hum these learned pitches (2 seconds each, no reference beep):';
+  }
+  
+  updateRecallDisplay();
+  modal.style.display = 'flex';
+}
+
+function updateRecallDisplay() {
+  if (!recallState) return;
+  
+  const currentNote = recallState.notes[recallState.currentIndex];
+  text('recallCurrentNote', pcLabel(currentNote));
+  text('recallNoteProgress', `${recallState.currentIndex + 1} / ${recallState.notes.length}`);
+  text('recallTimer', '2.0s');
+  text('recallHz', '--');
+  text('recallCents', '--');
+  
+  byId('recallProgress').style.display = 'block';
+  byId('recallResults').style.display = 'none';
+  byId('recallControls').style.display = 'block';
+}
+
+async function startRecording() {
+  const success = await initPitchDetection();
+  if (!success) {
+    alert('Could not access microphone. Recall test will be skipped.');
+    skipRecall();
+    return;
+  }
+  
+  const currentNote = recallState.notes[recallState.currentIndex];
+  const measurements = [];
+  let timeLeft = 2000; // 2 seconds
+  
+  byId('btnStartRecall').disabled = true;
+  byId('btnSkipRecall').disabled = true;
+  
+  recallTimer = setInterval(() => {
+    const pitch = detectPitch();
+    
+    if (pitch.hz > 0) {
+      measurements.push({
+        hz: pitch.hz,
+        cents: Math.abs(pitch.cents)
+      });
+    }
+    
+    text('recallHz', pitch.hz > 0 ? pitch.hz.toFixed(1) : '--');
+    text('recallCents', pitch.hz > 0 ? pitch.cents.toFixed(1) : '--');
+    
+    timeLeft -= 100;
+    text('recallTimer', (timeLeft / 1000).toFixed(1) + 's');
+    
+    if (timeLeft <= 0) {
+      clearInterval(recallTimer);
+      completeCurrentRecall(currentNote, measurements);
+    }
+  }, 100);
+}
+
+function completeCurrentRecall(notePc, measurements) {
+  let medianHz = 0, medianCents = 0, stdCents = 0, verdict = 'Off';
+  
+  if (measurements.length > 0) {
+    const hzValues = measurements.map(m => m.hz).sort((a, b) => a - b);
+    const centsValues = measurements.map(m => m.cents).sort((a, b) => a - b);
+    
+    medianHz = hzValues[Math.floor(hzValues.length / 2)];
+    medianCents = centsValues[Math.floor(centsValues.length / 2)];
+    
+    // Calculate standard deviation of cents
+    const meanCents = centsValues.reduce((a, b) => a + b, 0) / centsValues.length;
+    stdCents = Math.sqrt(centsValues.reduce((sum, val) => sum + Math.pow(val - meanCents, 2), 0) / centsValues.length);
+    
+    // Determine verdict
+    if (medianCents <= 10 && stdCents <= 15) {
+      verdict = 'On target';
+    } else if (medianCents <= 30) {
+      verdict = 'Close';
+    } else {
+      verdict = 'Off';
+    }
+  }
+  
+  recallState.results.push({
+    notePc: notePc,
+    medianHz: medianHz,
+    medianCents: medianCents,
+    stdCents: stdCents,
+    verdict: verdict
+  });
+  
+  recallState.currentIndex++;
+  
+  if (recallState.currentIndex < recallState.notes.length) {
+    // Next note
+    updateRecallDisplay();
+    byId('btnStartRecall').disabled = false;
+    byId('btnSkipRecall').disabled = false;
+  } else {
+    // All done
+    showRecallResults();
+  }
+}
+
+function showRecallResults() {
+  const results = recallState.results;
+  const content = byId('recallResultsContent');
+  
+  let html = '<div style="text-align:left">';
+  for (const result of results) {
+    const color = result.verdict === 'On target' ? 'var(--good)' : 
+                 result.verdict === 'Close' ? 'var(--accent)' : 'var(--bad)';
+    html += `
+      <div style="margin:8px 0;padding:8px;background:var(--muted2);border-radius:6px">
+        <strong>${pcLabel(result.notePc)}</strong>: 
+        <span style="color:${color}">${result.verdict}</span>
+        ${result.medianHz > 0 ? `(${result.medianHz.toFixed(1)} Hz, ±${result.medianCents.toFixed(1)}¢)` : '(No detection)'}
+      </div>
+    `;
+  }
+  html += '</div>';
+  
+  content.innerHTML = html;
+  
+  byId('recallProgress').style.display = 'none';
+  byId('recallControls').style.display = 'none';
+  byId('recallResults').style.display = 'block';
+}
+
+function completeRecall() {
+  // Store results
+  const recallResult = {
+    date: Date.now(),
+    type: recallState.type,
+    items: recallState.results
+  };
+  
+  state.recallResults.push(recallResult);
+  
+  if (recallState.type === 'cold') {
+    state.coldRecallComplete = true;
+  } else {
+    state.warmRecallComplete = true;
+  }
+  
+  save();
+  
+  // Clean up
+  if (recallMicrophone) {
+    recallMicrophone.disconnect();
+    recallMicrophone = null;
+  }
+  if (recallAnalyser) {
+    recallAnalyser.disconnect();
+    recallAnalyser = null;
+  }
+  
+  byId('pitchRecallModal').style.display = 'none';
+  recallState = null;
+}
+
+function skipRecall() {
+  if (recallState.type === 'cold') {
+    state.coldRecallComplete = true;
+  } else {
+    state.warmRecallComplete = true;
+  }
+  
+  save();
+  byId('pitchRecallModal').style.display = 'none';
+  recallState = null;
+}
+
+/* ------------------ BREAK SYSTEM ------------------ */
+function startBreak(){
+  if(state.inBreak) return;
+  
+  state.inBreak = true;
+  state.breakStart = Date.now();
+  save();
+  
+  // Pause the session
+  pauseStart('block-break');
+  
+  // Show break message
+  text('promptPill', `🎉 Block ${state.blocksCompleted} complete! 60-second break...`);
+  
+  // Start break countdown
+  let breakLeft = BREAK_SEC;
+  const breakInterval = setInterval(() => {
+    breakLeft--;
+    text('promptPill', `Break: ${breakLeft}s remaining — 🐤 Flappy available`);
+    
+    if (breakLeft <= 0) {
+      clearInterval(breakInterval);
+      endBreak();
+    }
+  }, 1000);
+  
+  // Store the interval to clean up later
+  window.currentBreakInterval = breakInterval;
+  
+  // Show a break dialog with Flappy option
+  showBreakDialog();
+}
+
+function showBreakDialog() {
+  if(confirm(`🎉 Great job! Block ${state.blocksCompleted} completed.\n\nTake a 60-second break. Play Flappy Bird? (Click OK for Flappy, Cancel to wait)`)) {
+    openBreakFlappy();
+  }
+}
+
+function openBreakFlappy() {
+  // Open Flappy during break
+  byId('flappyModal').style.display='flex'; 
+  const c=byId('flappyCanvas'); 
+  if(!c) return; 
+  fCtx=c.getContext('2d'); 
+  resetFlappy(); 
+  attachFlappyControls();
+  
+  // Update description for break context
+  const description = byId('flappyModal').querySelector('p:last-child');
+  if (description) {
+    description.textContent = 'Break time! Tap/click (or Space) to flap. Each flap plays a random pitch.';
+  }
+}
+
+function endBreak(){
+  if (!state.inBreak) return;
+  
+  state.inBreak = false;
+  state.breakStart = null;
+  
+  // If there are more blocks to do, start the next one
+  if (state.blocksCompleted < 5) {
+    state.currentBlockStart = Date.now();
+  }
+  
+  save();
+  
+  // Resume session
+  pauseEnd();
+  
+  if (state.blocksCompleted < 5) {
+    text('promptPill', `Break over! Starting block ${state.blocksCompleted + 1}/5`);
+  } else {
+    text('promptPill', 'All blocks complete! Training finished for today.');
+  }
+  
+  // Clean up break interval
+  if (window.currentBreakInterval) {
+    clearInterval(window.currentBreakInterval);
+    window.currentBreakInterval = null;
+  }
+}
+
 function pauseStart(reason){
   const rec=state.sessions[state.sessions.length-1]; if(!rec) return;
   rec.pauses=rec.pauses||[]; const last=rec.pauses[rec.pauses.length-1];
@@ -1588,7 +2544,29 @@ function pauseResume(){
 }
 
 /* ------------------ QUOTA ------------------ */
-function quotaStart(){ if(state.capResetAt && Date.now() >= state.capResetAt) return state.capResetAt; const d = new Date(); d.setHours(0,0,0,0); return d.getTime(); }
+function quotaStart(){ 
+  const now = Date.now();
+  if(state.capResetAt && now >= state.capResetAt) {
+    // Reset daily block tracking at midnight
+    const midnight = new Date();
+    midnight.setHours(0,0,0,0);
+    if (now >= midnight.getTime() + 24*60*60*1000) {
+      state.minutesToday = 0;
+      state.blocksCompleted = 0;
+      state.currentBlockStart = null;
+      state.inBreak = false;
+      state.breakStart = null;
+      state.lockoutUntil = null;
+      state.coldRecallComplete = false;
+      state.warmRecallComplete = false;
+      save();
+    }
+    return state.capResetAt; 
+  } 
+  const d = new Date(); 
+  d.setHours(0,0,0,0); 
+  return d.getTime(); 
+}
 function msUsedQuota(){ const start = quotaStart(); return (state.sessions || []).filter(s => s.start >= start).reduce((a, s) => a + activeDuration(s), 0); }
 
 /* ------------------ PROGRESS / CHARTS ------------------ */
@@ -1724,8 +2702,17 @@ function wireOnce(){
   safe('viewTracker', el=> el.onclick=()=> showTracker());
   safe('playFlappy',  el=> el.onclick=()=> openFlappyFromMenu());
   safe('resetLockout',el=> el.onclick=()=>{
-    if(!confirm('Reset lockout/timer now? This starts a fresh 20-minute window immediately.')) return;
-    state.lockoutUntil = null; state.capResetAt = Date.now(); state.lastSeen = Date.now();
+    if(!confirm('Reset lockout/timer now? This starts a fresh 30-minute (5×6-minute blocks) window immediately.')) return;
+    state.lockoutUntil = null; 
+    state.capResetAt = Date.now(); 
+    state.lastSeen = Date.now();
+    state.minutesToday = 0;
+    state.blocksCompleted = 0;
+    state.currentBlockStart = null;
+    state.inBreak = false;
+    state.breakStart = null;
+    state.coldRecallComplete = false;
+    state.warmRecallComplete = false;
     save(); updateCapsUI(); alert('Timer reset. You can start training now.');
   });
   safe('menuReset',   el=> el.onclick=()=> doFactoryReset());
@@ -1801,6 +2788,14 @@ function wireOnce(){
     alert(`Theme changed to ${themeName}`);
   });
 
+  // Variety mode toggle
+  safe('toggleVarietyBtn', el=> el.onclick=()=>{
+    state.varietyMode = !state.varietyMode;
+    save();
+    updateVarietyModeDisplay();
+    alert(`Variety mode ${state.varietyMode ? 'enabled' : 'disabled'}`);
+  });
+
   // Trainer controls
   safe('btnPlay',        el=> el.onclick=async()=>{ firstRtBonusMs=2000; await resumeCtx(); if(paused){ pauseEnd(); } safe('btnPause', b=> b.textContent='⏸ Pause'); if(special) nextSpecialTrial(); else nextTrial(true); });
   safe('btnPause',       el=> el.onclick=()=> pauseResume());
@@ -1834,6 +2829,22 @@ function wireOnce(){
   safe('btnContinueTraining', el=> el.onclick=()=>{ 
     closeNewPitchModal(); 
     startFlappyReward(); 
+  });
+
+  // Pitch recall modal buttons
+  safe('btnStartRecall', el=> el.onclick=()=> startRecording());
+  safe('btnSkipRecall', el=> el.onclick=()=> skipRecall());
+  safe('btnRecallComplete', el=> el.onclick=()=> {
+    completeRecall();
+    if (recallState?.type === 'cold') {
+      continueToTraining(); // Continue to training after cold recall
+    } else {
+      // After warm recall, show completion message
+      alert(`Great work! You completed all 5 blocks (30 minutes). Come back tomorrow!`);
+      showScreen('menuScreen'); 
+      populatePitchSelect(); 
+      drawChart();
+    }
   });
 
   // Initial screen
@@ -1879,7 +2890,13 @@ function startFlappyReward(){ if(sessionActive && !paused){ pauseStart('flappy')
 function closeFlappy(){
   running=false; cancelAnimationFrame(flappyRAF); byId('flappyModal').style.display='none'; detachFlappyControls();
   if(score > (state.flappyHighScore||0)){ state.flappyHighScore = score; save(); }
-  if(sessionActive){
+  
+  // Different behavior during breaks vs normal training
+  if(state.inBreak) {
+    // During break: just close and wait for break to end
+    text('promptPill', `Break continues... ${Math.max(0, BREAK_SEC - Math.floor((Date.now() - state.breakStart) / 1000))}s remaining`);
+  } else if(sessionActive){
+    // During normal training: standard behavior
     safe('btnPause', el=> el.textContent='▶ Resume');
     currentNote=null; clearTimeout(rtTimer); rtTimer=null; clearTimeout(autoTimer); autoTimer=null;
     text('promptPill','Flappy over — press Play to continue');
