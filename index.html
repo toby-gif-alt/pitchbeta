@@ -279,7 +279,7 @@
       <span class="pill" id="accInfo">Acc 0% (req 20%)</span>
       <span class="pill" id="autoInfo">Auto-next: Off</span>
       <span class="pill" id="delayInfo">RT limit: 1183ms • Delay: 1000ms</span>
-      <span class="pill" id="blockTimeInfo">Block time: 00:00 / 06:00</span>
+      <span class="pill" id="blockTimeInfo">1/5 0:00/6:00</span>
       <span class="pill" id="timerInfo">Time left: 30:00</span>
     </div>
     <div id="barControls">
@@ -575,10 +575,10 @@ try{
     blockStartTime: null,
     inBreak: false,
     breakStartTime: null,
-    totalBlocks: 5
+    totalBlocks: 25
   };
 } catch(e){
-  state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO, currentBlock: 1, blockStartTime: null, inBreak: false, breakStartTime: null, totalBlocks: 5 };
+  state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO, currentBlock: 1, blockStartTime: null, inBreak: false, breakStartTime: null, totalBlocks: 25 };
 }
 // Migration for audioType
 if (!state.audioType) {
@@ -591,7 +591,7 @@ if (typeof state.currentBlock === 'undefined') {
   state.blockStartTime = null;
   state.inBreak = false;
   state.breakStartTime = null;
-  state.totalBlocks = 5;
+  state.totalBlocks = 25;
   save();
 }
 // Migration for assessmentScores
@@ -921,6 +921,18 @@ function updateLevelUI(){
     text('accInfo', `Acc ${acc}% (req ${req}%)`);
   }
   text('delayInfo', `RT limit: ${rtWindowForSet(set)}ms • Delay: ${delayMs}ms`);
+  
+  // Update block time display with current/total format
+  updateBlockTimeDisplay();
+}
+
+function updateBlockTimeDisplay() {
+  // Calculate blocks per set (24 blocks total, 5 blocks per set for timing purposes)
+  const BLOCKS_PER_SET = 5;
+  const currentTrainingBlock = ((state.currentBlock - 1) % BLOCKS_PER_SET) + 1;
+  const blockTime = getBlockActiveTime();
+  const blockTimeStr = fmtMMSS(blockTime);
+  text('blockTimeInfo', `${currentTrainingBlock}/${BLOCKS_PER_SET} ${blockTimeStr}/6:00`);
 }
 
 /* Build note pad and attach handlers */
@@ -1567,9 +1579,7 @@ function startSession(){
     if(sessionActive && !paused && !shepRunning){ state.thisWeekMs = (state.thisWeekMs||0) + 1000; save(); }
     if(sessionActive && !paused){
       // Update block timing display
-      const blockTime = getBlockActiveTime();
-      const blockTimeLeft = Math.max(0, BLOCK_DURATION_MS - blockTime);
-      text('blockTimeInfo', `Block time: ${fmtMMSS(blockTime)} / 06:00`);
+      updateBlockTimeDisplay();
       
       // Check for block completion
       checkBlockCompletion();
@@ -1589,14 +1599,18 @@ function startSession(){
       const breakLeft = Math.max(0, BREAK_DURATION_MS - breakElapsed);
       
       if (breakLeft <= 0) {
-        // Break time is over, but check if we're in a game
+        // Break time is up
         if (running) {
-          // Let the game finish - we'll check again next tick
-          updateBreakUI(`Break time up - finish your game!`);
+          // Flappy is running - let the user continue but show message
+          updateBreakUI(`Break time up - you can continue playing or close to resume training`);
         } else {
-          // No game running, end the break
+          // No game running, end the break automatically
           finishBreak();
-          closeFlappy();
+          // Don't auto-close flappy if user closed it manually during break
+          const flappyModal = byId('flappyModal');
+          if (flappyModal && flappyModal.style.display === 'flex') {
+            closeFlappy();
+          }
         }
       } else {
         updateBreakUI(`Break: ${fmtMMSS(breakLeft)} remaining`);
@@ -1672,17 +1686,26 @@ function checkBlockCompletion() {
   
   const blockTime = getBlockActiveTime();
   if (blockTime >= BLOCK_DURATION_MS) {
-    // Block completed, start break
-    state.inBreak = true;
-    state.breakStartTime = Date.now();
-    save();
+    const BLOCKS_PER_SET = 5;
+    const currentBlockInSet = ((state.currentBlock - 1) % BLOCKS_PER_SET) + 1;
     
-    if (state.currentBlock >= state.totalBlocks) {
-      // All blocks completed
-      completeAllBlocks();
-    } else {
-      // Start mandatory break
+    if (currentBlockInSet < BLOCKS_PER_SET) {
+      // Still blocks left in this set - start mandatory break
+      state.inBreak = true;
+      state.breakStartTime = Date.now();
+      save();
       startMandatoryBreak();
+    } else {
+      // Last block of the set completed - move to next set without break
+      state.currentBlock++;
+      if (state.currentBlock > state.totalBlocks) {
+        // All blocks completed
+        completeAllBlocks();
+      } else {
+        // Start new set immediately (no break between sets)
+        startNewBlock();
+        text('promptPill', `New set started — press Play to continue`);
+      }
     }
   }
 }
@@ -1716,13 +1739,22 @@ function completeAllBlocks() {
 function finishBreak() {
   if (!state.inBreak) return;
   
+  const BLOCKS_PER_SET = 5;
+  const currentBlockInSet = ((state.currentBlock - 1) % BLOCKS_PER_SET) + 1;
+  
+  // Move to next block
   state.currentBlock++;
   state.inBreak = false;
   state.breakStartTime = null;
   
   if (state.currentBlock <= state.totalBlocks) {
     startNewBlock();
-    text('promptPill', `Block ${state.currentBlock} started — press Play to continue`);
+    const nextBlockInSet = ((state.currentBlock - 1) % BLOCKS_PER_SET) + 1;
+    text('promptPill', `Block ${nextBlockInSet}/${BLOCKS_PER_SET} started — press Play to continue`);
+  } else {
+    // All blocks completed
+    completeAllBlocks();
+    return;
   }
   
   save();
@@ -2014,7 +2046,16 @@ let fCtx, flappyRAF=null, running=false, score=0, pipes=[], bird, pipeTimer=0, l
    Speed still scales with score. */
 const FLAPPY = { gravity:900, flap:-380, baseSpeed:140, maxSpeed:260, speed:140, baseGap:140, gap:140, introPipes:5, introExtra:60, spawnEvery:1.20, width:52 };
 
-function openFlappyFromMenu(){ if(isLocked()) openFlappyModal(); else alert('Flappy is intended for lockout/rewards.'); }
+function openFlappyFromMenu(){ 
+  if(isLocked()) {
+    openFlappyModal(); 
+  } else if (state.inBreak && sessionActive) {
+    // Allow reopening flappy during breaks
+    openFlappyModal();
+  } else {
+    alert('Flappy is intended for lockout/rewards.'); 
+  }
+}
 function openFlappyModal(){ 
   byId('flappyModal').style.display='flex'; 
   const c=byId('flappyCanvas'); 
@@ -2023,10 +2064,10 @@ function openFlappyModal(){
   resetFlappy(); 
   attachFlappyControls();
   
-  // Show sound toggle button and update description when in lockout
+  // Show sound toggle button and update description during breaks or lockout
   const soundToggle = byId('flappySoundToggle');
   const description = byId('flappyModal').querySelector('p:last-child');
-  if (isLocked()) {
+  if (state.inBreak || isLocked()) {
     if (soundToggle) {
       soundToggle.style.display = 'inline-block';
       soundToggle.textContent = state.flappySoundEnabled ? '🔊 Sound On' : '🔇 Sound Off';
@@ -2050,7 +2091,12 @@ function closeFlappy(){
   const breakMessage = byId('breakMessage');
   if (breakMessage) breakMessage.remove();
   
-  if(sessionActive){
+  // If we're in a break and closing flappy manually, we should still wait for break time to finish
+  if (state.inBreak && sessionActive) {
+    // Don't resume training yet - keep paused until break time is up
+    safe('btnPause', el=> el.textContent='⏸ Pause');
+    text('promptPill','Break time remaining - press "Play Flappy" from menu to reopen or wait for break to end');
+  } else if(sessionActive){
     safe('btnPause', el=> el.textContent='▶ Resume');
     currentNote=null; clearTimeout(rtTimer); rtTimer=null; clearTimeout(autoTimer); autoTimer=null;
     text('promptPill','Flappy over — press Play to continue');
@@ -2060,14 +2106,18 @@ function resetFlappy(){ const cnv=byId('flappyCanvas'); if(!cnv) return; bird={x
 function flap(){ 
   bird.vy = FLAPPY.flap; 
   
-  // Only play sound if enabled and use flappy sound for lockout
-  if (state.flappySoundEnabled && isLocked()) {
-    playFlappySound();
-  } else if (state.flappySoundEnabled && !isLocked()) {
-    // Regular flappy bird with musical pitches
-    const pc = rand(PC); 
-    const note = `${pc}${rand(currentOctaves())}`; 
-    playSample(note);
+  // Only play sound if enabled
+  if (state.flappySoundEnabled) {
+    // During breaks or lockout, always play flappy sound
+    // During regular play (rewards), play random pitches
+    if (state.inBreak || isLocked()) {
+      playFlappySound();
+    } else {
+      // Regular flappy bird with musical pitches (only during rewards)
+      const pc = rand(PC); 
+      const note = `${pc}${rand(currentOctaves())}`; 
+      playSample(note);
+    }
   }
 }
 function progressiveDifficulty(){ // only speed scales; gap remains constant after intro
