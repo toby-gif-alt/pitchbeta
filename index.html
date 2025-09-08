@@ -2064,6 +2064,146 @@ function doFactoryReset(){
   })();
 }
 
+/* ------------------ QA HELPERS ------------------ */
+// QA helper functions for testing and debugging
+
+// 1) window.qaSnapshot(tag?:string): returns an object with debugging info
+window.qaSnapshot = function(tag) {
+  try {
+    // Calculate counts from state.trials
+    const trials = state.trials || [];
+    const totalTrials = trials.length;
+    const totalCorrect = trials.filter(t => t.correct).length;
+    const totalOOB = trials.filter(t => t.oob).length;
+    const totalTimeout = trials.filter(t => t.timeout).length;
+    
+    // Get last 200 trials (shallow copy)
+    const trialsTail = trials.slice(-200);
+    
+    const snapshot = {
+      ts: new Date().toISOString(),
+      tag: tag || null,
+      set: setFromIndex(state.levelIndex),
+      block: blockFromIndex(state.levelIndex),
+      dailyMs: SESS_DAILY_MS,
+      lockoutMs: LOCKOUT_MS,
+      audioType: state.audioType,
+      octaves: currentOctaves(),
+      trialsTail: trialsTail,
+      counts: {
+        totalTrials: totalTrials,
+        totalCorrect: totalCorrect,
+        totalOOB: totalOOB,
+        totalTimeout: totalTimeout
+      }
+    };
+    
+    // Include oobConstRate if OOB_RATE exists
+    if (typeof OOB_RATE !== 'undefined') {
+      snapshot.oobConstRate = OOB_RATE;
+    }
+    
+    return snapshot;
+  } catch (e) {
+    console.error('qaSnapshot error:', e);
+    return { error: e.message };
+  }
+};
+
+// 2) window.qaDownload(obj, name): downloads JSON pretty-printed to "<name>.json"
+window.qaDownload = function(obj, name) {
+  try {
+    const jsonString = JSON.stringify(obj, null, 2);
+    const blob = new Blob([jsonString], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${name || 'qa-data'}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    
+    // Clean up the URL object
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    console.error('qaDownload error:', e);
+  }
+};
+
+// 3) window.qaSimBlock(n=20, seed=123): synthetic trial simulation
+window.qaSimBlock = function(n = 20, seed = 123) {
+  try {
+    // Simple seeded random number generator for reproducible results
+    let seedValue = seed;
+    const seededRandom = () => {
+      seedValue = (seedValue * 9301 + 49297) % 233280;
+      return seedValue / 233280;
+    };
+    
+    const currentSet = setFromIndex(state.levelIndex);
+    const currentBlock = blockFromIndex(state.levelIndex);
+    const trainedPCs = trainedSet(currentSet);
+    const oobPCs = currentOOBs(currentSet);
+    const octaves = currentOctaves();
+    const oobRate = (typeof OOB_RATE !== 'undefined') ? OOB_RATE : 0.25;
+    
+    for (let i = 0; i < n; i++) {
+      // Determine if this trial is OOB
+      const isOOB = seededRandom() < oobRate;
+      
+      // Choose pitch class
+      let pc;
+      if (isOOB && oobPCs.length > 0) {
+        pc = oobPCs[Math.floor(seededRandom() * oobPCs.length)];
+      } else {
+        pc = trainedPCs[Math.floor(seededRandom() * trainedPCs.length)];
+      }
+      
+      // Choose octave
+      const octave = octaves[Math.floor(seededRandom() * octaves.length)];
+      const note = `${pc}${octave}`;
+      
+      // Synthesize correctness: 80% for in-bounds, 40% for OOB
+      const correctnessRate = isOOB ? 0.4 : 0.8;
+      const correct = seededRandom() < correctnessRate;
+      
+      // Generate fake guess (for realism, but not used in correctness calculation)
+      let guess;
+      if (isOOB) {
+        guess = seededRandom() < 0.5 ? 'OOB' : trainedPCs[Math.floor(seededRandom() * trainedPCs.length)];
+      } else {
+        guess = correct ? pc : trainedPCs[Math.floor(seededRandom() * trainedPCs.length)];
+      }
+      
+      // Create trial object matching the structure used by recordTrial
+      const trial = {
+        note: note,
+        pc: pc,
+        guess: guess,
+        correct: correct,
+        timeout: false,
+        oob: isOOB,
+        set: currentSet,
+        block: currentBlock,
+        time: Date.now()
+      };
+      
+      // Push directly to state.trials without calling recordTrial
+      state.trials.push(trial);
+    }
+    
+    // Save at the end
+    save();
+    
+    // Return number of trials added
+    return n;
+  } catch (e) {
+    console.error('qaSimBlock error:', e);
+    return 0;
+  }
+};
+
 /* ------------------ INIT ------------------ */
 window.addEventListener('load', wireOnce);
 window.addEventListener('resize', ()=>{ try{ drawChart(); }catch(_){ }});
