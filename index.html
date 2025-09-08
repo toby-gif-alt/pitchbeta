@@ -1722,6 +1722,7 @@ function finishBreak() {
   
   if (state.currentBlock <= state.totalBlocks) {
     startNewBlock();
+    text('promptPill', `Block ${state.currentBlock} started — press Play to continue`);
   }
   
   save();
@@ -2050,16 +2051,6 @@ function closeFlappy(){
   if (breakMessage) breakMessage.remove();
   
   if(sessionActive){
-    // Check if we were in a break and should end it
-    if (state.inBreak && state.breakStartTime) {
-      const breakElapsed = Date.now() - state.breakStartTime;
-      if (breakElapsed >= BREAK_DURATION_MS) {
-        finishBreak();
-        text('promptPill', `Block ${state.currentBlock} started — press Play to continue`);
-        return;
-      }
-    }
-    
     safe('btnPause', el=> el.textContent='▶ Resume');
     currentNote=null; clearTimeout(rtTimer); rtTimer=null; clearTimeout(autoTimer); autoTimer=null;
     text('promptPill','Flappy over — press Play to continue');
