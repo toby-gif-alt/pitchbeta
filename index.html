@@ -2690,6 +2690,9 @@ function chooseDetuneMode(pc) {
   return 'jitter';
 }
 
+// Export chooseDetuneMode to window for debugging and validation
+window.chooseDetuneMode = chooseDetuneMode;
+
 // Select detune mode and value for a trial
 function selectDetune(pc, isOOB) {
   // OOB trials always get no detune
@@ -3580,6 +3583,86 @@ window.qaSimBlock = function(n = 20, seed = 123) {
   } catch (e) {
     console.error('qaSimBlock error:', e);
     return 0;
+  }
+};
+
+// 4) window.qaAnalyzeDetune(): analyzes detune mode distribution in recent trials
+window.qaAnalyzeDetune = function(last = 200) {
+  try {
+    const trials = state.trials || [];
+    const recentTrials = trials.slice(-last);
+    
+    const inBounds = recentTrials.filter(t => !t.oob);
+    const oobTrials = recentTrials.filter(t => t.oob);
+    
+    // Count modes for in-bounds trials
+    const modeCounts = {
+      anchor: 0,
+      probe: 0,
+      jitter: 0,
+      other: 0
+    };
+    
+    inBounds.forEach(t => {
+      const mode = t.detuneMode;
+      if (mode in modeCounts) {
+        modeCounts[mode]++;
+      } else {
+        modeCounts.other++;
+      }
+    });
+    
+    // Calculate percentages
+    const totalInBounds = inBounds.length;
+    const modePercentages = {};
+    Object.keys(modeCounts).forEach(mode => {
+      modePercentages[mode] = totalInBounds > 0 ? (modeCounts[mode] / totalInBounds * 100).toFixed(1) : 0;
+    });
+    
+    // Analyze detune cents distribution
+    const centsDistribution = {
+      zero: 0,
+      positive: 0,
+      negative: 0
+    };
+    
+    inBounds.forEach(t => {
+      const cents = t.detuneCents || 0;
+      if (cents === 0) {
+        centsDistribution.zero++;
+      } else if (cents > 0) {
+        centsDistribution.positive++;
+      } else {
+        centsDistribution.negative++;
+      }
+    });
+    
+    const analysis = {
+      totalTrials: recentTrials.length,
+      inBoundsTrials: totalInBounds,
+      oobTrials: oobTrials.length,
+      modeCounts: modeCounts,
+      modePercentages: modePercentages,
+      centsDistribution: centsDistribution,
+      sampleTrials: {
+        inBounds: inBounds.slice(-10),  // Last 10 in-bounds
+        oob: oobTrials.slice(-5)        // Last 5 OOB
+      }
+    };
+    
+    // Validate OOB trials have correct detune settings
+    const oobIssues = oobTrials.filter(t => 
+      t.detuneCents !== 0 || t.detuneMode !== 'oob'
+    );
+    
+    if (oobIssues.length > 0) {
+      analysis.oobIssues = oobIssues;
+    }
+    
+    return analysis;
+  } catch (e) {
+    console.error('qaAnalyzeDetune error:', e);
+    return { error: e.message };
   }
 };
 
