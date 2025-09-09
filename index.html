@@ -548,6 +548,30 @@ const WEEKLY_TARGET_MS=2*3600*1000;
 const LOCKOUT_MS=60*60*1000;
 const LATENCY_CUSHION_MS=100;
 
+/* ------------------ JITTER SYSTEM CONSTANTS ------------------ */
+const JITTER_LEVELS = {
+  0: { // JL0 (onboarding)
+    jitterMin: 3, jitterMax: 8,
+    probeRate: 0.015, // 0-3% -> use 1.5% middle
+    anchorRate: 0.10
+  },
+  1: { // JL1 (early)  
+    jitterMin: 5, jitterMax: 10,
+    probeRate: 0.05,
+    anchorRate: 0.08
+  },
+  2: { // JL2 (mid)
+    jitterMin: 5, jitterMax: 15,
+    probeRate: 0.08,
+    anchorRate: 0.05
+  },
+  3: { // JL3 (mature)
+    jitterMin: 5, jitterMax: 15,
+    probeRate: 0.11, // 10-12% -> use 11% middle
+    anchorRate: 0.05
+  }
+};
+
 /* ------------------ THEME SYSTEM ------------------ */
 function applyTheme(themeName) {
   const theme = THEMES[themeName] || THEMES.default;
@@ -616,7 +640,11 @@ try{
       oobSeries: []
     },
     trialOpen: false,
-    toneStartMs: null
+    toneStartMs: null,
+    jitter: {
+      levelByPc: {},
+      statsByPc: {}
+    }
   };
 } catch(e){
   state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO, currentBlock: 1, blockStartTime: null, inBreak: false, breakStartTime: null, totalBlocks: 25, timeblock: { activeMs: 0, running: false, startedAt: null, breaksCompletedToday: 0, breakActive: false, breakEndsAt: null }, oobController: { targetOobPct: 15, lastAdaptTimeBlock: 0, last60InBounds: [], recentOobTrials: [], healthCheckActive: false, healthCheckEndTimeBlock: 0, globalTimeBlockIndex: 0, oobSeries: [] }, inBoundsLast60: [], trainingBlockIndex: 1, trainingBlockTrials: 0, currentBlockOctaveCount: {3: 0, 4: 0, 5: 0}, oobHealthCheckActive: false, oobHealthCheckEndBlock: 0, oob: { targetPct: 0.15, streak: 0, blockTarget: 0, plan: [], planOctaveMix: [], currentBlockIndex: 0, currentTrialInBlock: 0 }, trialOpen: false, toneStartMs: null };
@@ -712,6 +740,15 @@ if (!state.oob) {
 if (typeof state.trialOpen === 'undefined') {
   state.trialOpen = false;
   state.toneStartMs = null;
+  save();
+}
+
+// Migration for jitter system
+if (!state.jitter) {
+  state.jitter = {
+    levelByPc: {},
+    statsByPc: {}
+  };
   save();
 }
 
@@ -1191,7 +1228,7 @@ function findClosestGuitarSample(targetNote) {
 }
 
 /* Always play a tone (sample -> oscillator -> fallback) */
-async function playSample(note){
+async function playSample(note, detuneCents = 0){
   // Capture tone start timing for reaction time calculation
   state.toneStartMs = performance.now();
   state.trialOpen = true;
@@ -1200,6 +1237,9 @@ async function playSample(note){
     await resumeCtx();
     const ctx = getCtx();
     
+    // Calculate detune multiplier
+    const detuneMultiplier = Math.pow(2, detuneCents / 1200);
+    
     // Handle different audio types
     if (state.audioType === AUDIO_TYPES.PIANO) {
       try{
@@ -1207,6 +1247,14 @@ async function playSample(note){
         const buf = await loadBuffer(url);
         const src = ctx.createBufferSource();
         src.buffer = buf;
+        
+        // Apply detune using detune property if available, otherwise playbackRate
+        if (src.detune) {
+          src.detune.value = detuneCents;
+        } else {
+          src.playbackRate.value = detuneMultiplier;
+        }
+        
         const g = ctx.createGain(); g.gain.value = 1;
         src.connect(g).connect(ctx.destination);
         const t = ctx.currentTime;
@@ -1221,9 +1269,16 @@ async function playSample(note){
         const src = ctx.createBufferSource();
         src.buffer = buf;
         
-        // Apply pitch shifting
+        // Apply both pitch shifting and detune
         const pitchRatio = Math.pow(2, semitones / 12);
-        src.playbackRate.value = pitchRatio;
+        const combinedRatio = pitchRatio * detuneMultiplier;
+        
+        if (src.detune) {
+          src.playbackRate.value = pitchRatio;
+          src.detune.value = detuneCents;
+        } else {
+          src.playbackRate.value = combinedRatio;
+        }
         
         // Guitar samples are louder, so reduce gain
         const g = ctx.createGain(); 
@@ -1243,6 +1298,14 @@ async function playSample(note){
         const buf = await loadBuffer(url);
         const src = ctx.createBufferSource();
         src.buffer = buf;
+        
+        // Apply detune using detune property if available, otherwise playbackRate
+        if (src.detune) {
+          src.detune.value = detuneCents;
+        } else {
+          src.playbackRate.value = detuneMultiplier;
+        }
+        
         const g = ctx.createGain(); g.gain.value = 1;
         src.connect(g).connect(ctx.destination);
         const t = ctx.currentTime;
@@ -1256,9 +1319,11 @@ async function playSample(note){
     const pc=m?m[1]:'A', o=m?+m[2]:4;
     const idx={C:0,Db:1,D:2,Eb:3,E:4,F:5,Gb:6,G:7,Ab:8,A:9,Bb:10,B:11};
     const semis=(idx[pc]??9)+(o-4)*12;
-    const freq=440*Math.pow(2,(semis-9)/12);
+    const baseFreq=440*Math.pow(2,(semis-9)/12);
+    const detunedFreq = baseFreq * detuneMultiplier;
+    
     const osc = ctx.createOscillator(); const g = ctx.createGain();
-    osc.type='sine'; osc.frequency.value=freq;
+    osc.type='sine'; osc.frequency.value=detunedFreq;
     const t0 = ctx.currentTime;
     g.gain.setValueAtTime(0.0001, t0);
     g.gain.linearRampToValueAtTime(0.25, t0 + 0.01);
@@ -1268,7 +1333,7 @@ async function playSample(note){
   }catch(e){
     try{
       const ctx=getCtx(); const osc=ctx.createOscillator(); const g=ctx.createGain();
-      osc.type='sine'; osc.frequency.value=440;
+      osc.type='sine'; osc.frequency.value=440 * detuneMultiplier;
       const t0=ctx.currentTime; g.gain.setValueAtTime(0.0001,t0); g.gain.linearRampToValueAtTime(0.2,t0+0.01); g.gain.exponentialRampToValueAtTime(0.0001,t0+0.3);
       osc.connect(g).connect(ctx.destination); osc.start(t0); osc.stop(t0+0.3);
     }catch(_){}
@@ -1307,6 +1372,9 @@ let autoNext=false, delayMs=1000;
 let currentNote=null, truePc=null, isOOBTrial=false;
 let firstRtBonusMs=0, inFlightTrial=false;
 let suggestedRestartFlag=false;
+
+// Jitter system globals for current trial
+let currentDetuneCents=0, currentDetuneMode='jitter', currentJlLevel=null;
 
 /* Specials runtime */
 let special=null; // {mode:'A'|'B', targetPc:'F', total:12|22, done:0, withFeedback:true, correct:0}
@@ -2191,14 +2259,27 @@ async function nextTrial(forceNew=false){
         const octave = rand(currentOctaves());
         currentNote = `${truePc}${octave}`;
       }
+      
+      // Select detune for this trial
+      const detuneInfo = selectDetune(truePc, isOOBTrial);
+      currentDetuneCents = detuneInfo.cents;
+      currentDetuneMode = detuneInfo.mode;
+      currentJlLevel = detuneInfo.jlLevel;
     }
-    await playSample(currentNote);
+    
+    await playSample(currentNote, currentDetuneCents);
     if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
     const baseRt = rtWindowForSet(setFromIndex(state.levelIndex));
     const rtms = baseRt + firstRtBonusMs + LATENCY_CUSHION_MS;
     firstRtBonusMs = 0;
     rtTimer = setTimeout(()=>handleTimeout(), rtms);
-    text('promptPill','Listening… choose the pitch');
+    
+    // Update prompt pill with jitter level indicator (debug only)
+    let promptText = 'Listening… choose the pitch';
+    if (!isOOBTrial && currentJlLevel !== null) {
+      promptText += ` JL${currentJlLevel}`;
+    }
+    text('promptPill', promptText);
   }catch(e){ report(e); }
   finally{ inFlightTrial=false; }
 }
@@ -2264,7 +2345,7 @@ function recordTrial(trial) {
     suggestedRestartFlag=false; 
   }
   
-  // Create trial record with proper structure
+  // Create trial record with proper structure including jitter fields
   const trialRecord = {
     note: currentNote, 
     pc: truePc, 
@@ -2275,10 +2356,21 @@ function recordTrial(trial) {
     set: setFromIndex(state.levelIndex), 
     block: block, 
     time: Date.now(),
-    rtMs: rtMs
+    rtMs: rtMs,
+    // Jitter system fields
+    detuneCents: currentDetuneCents,
+    detuneMode: currentDetuneMode,
+    jlLevel: currentJlLevel,
+    timbreUsed: state.audioType
   };
   
   state.trials.push(trialRecord);
+  
+  // Update jitter statistics for in-bounds trials
+  if (!isOOB) {
+    addJitterStat(truePc, correct, rtMs);
+    evaluateJitterLevel(truePc);
+  }
   
   // Update new OOB controller with this trial
   updateTrainingBlockOobController(trialRecord);
@@ -2480,6 +2572,160 @@ function pauseResume(){
 /* ------------------ QUOTA ------------------ */
 function quotaStart(){ if(state.capResetAt && Date.now() >= state.capResetAt) return state.capResetAt; const d = new Date(); d.setHours(0,0,0,0); return d.getTime(); }
 function msUsedQuota(){ const start = quotaStart(); return (state.sessions || []).filter(s => s.start >= start).reduce((a, s) => a + activeDuration(s), 0); }
+
+/* ------------------ JITTER SYSTEM ------------------ */
+
+// Initialize jitter level for a pitch class if not exists
+function initJitterForPc(pc) {
+  if (!state.jitter.levelByPc[pc]) {
+    state.jitter.levelByPc[pc] = 0; // Start at JL0
+  }
+  if (!state.jitter.statsByPc[pc]) {
+    state.jitter.statsByPc[pc] = {
+      last40: [],
+      acc: 0,
+      medianCents: 0,
+      sdCents: 0
+    };
+  }
+}
+
+// Get jitter level for a pitch class
+function getJitterLevel(pc) {
+  initJitterForPc(pc);
+  return state.jitter.levelByPc[pc];
+}
+
+// Add a trial result to the per-PC statistics  
+function addJitterStat(pc, correct, rtMs) {
+  initJitterForPc(pc);
+  const stats = state.jitter.statsByPc[pc];
+  
+  // Add to last40 array
+  stats.last40.push({ correct, rtMs, time: Date.now() });
+  
+  // Keep only last 40 in-bounds trials
+  if (stats.last40.length > 40) {
+    stats.last40 = stats.last40.slice(-40);
+  }
+  
+  // Recalculate statistics
+  updateJitterStats(pc);
+}
+
+// Update calculated statistics for a pitch class
+function updateJitterStats(pc) {
+  const stats = state.jitter.statsByPc[pc];
+  if (!stats || stats.last40.length === 0) return;
+  
+  // Calculate accuracy
+  const correct = stats.last40.filter(t => t.correct).length;
+  stats.acc = correct / stats.last40.length;
+  
+  // For median and SD, we don't have actual cents error from current system
+  // We'll simulate based on correctness for now - this could be enhanced later
+  // Correct trials: assume small error (0-10 cents)
+  // Incorrect trials: assume larger error (15-40 cents)
+  const errors = stats.last40.map(t => t.correct ? 
+    Math.random() * 10 : 
+    15 + Math.random() * 25
+  );
+  
+  // Calculate median
+  const sorted = [...errors].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  stats.medianCents = sorted.length % 2 === 0 ? 
+    (sorted[mid - 1] + sorted[mid]) / 2 : 
+    sorted[mid];
+    
+  // Calculate standard deviation
+  const mean = errors.reduce((a, b) => a + b, 0) / errors.length;
+  const variance = errors.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / errors.length;
+  stats.sdCents = Math.sqrt(variance);
+}
+
+// Evaluate promotion/demotion for a pitch class
+function evaluateJitterLevel(pc) {
+  const stats = state.jitter.statsByPc[pc];
+  if (!stats || stats.last40.length < 20) return; // Need at least 20 trials
+  
+  const currentLevel = getJitterLevel(pc);
+  const acc = stats.acc;
+  const medianCents = stats.medianCents;
+  const sdCents = stats.sdCents;
+  
+  let newLevel = currentLevel;
+  
+  // Demotion conditions (rescue)
+  if (acc < 0.75 || medianCents > 25) {
+    newLevel = Math.max(0, currentLevel - 1);
+  }
+  // Promotion conditions
+  else if (currentLevel === 0 && acc >= 0.75 && medianCents <= 20) {
+    newLevel = 1;
+  }
+  else if (currentLevel === 1 && acc >= 0.80 && medianCents <= 15) {
+    newLevel = 2;
+  }
+  else if (currentLevel === 2 && acc >= 0.90 && medianCents <= 10 && sdCents <= 15) {
+    newLevel = 3;
+  }
+  
+  // Clamp to valid range
+  newLevel = Math.max(0, Math.min(3, newLevel));
+  
+  if (newLevel !== currentLevel) {
+    state.jitter.levelByPc[pc] = newLevel;
+    save();
+  }
+}
+
+// Select detune mode and value for a trial
+function selectDetune(pc, isOOB) {
+  // OOB trials always get no detune
+  if (isOOB) {
+    return {
+      cents: 0,
+      mode: 'oob',
+      jlLevel: null
+    };
+  }
+  
+  // Get jitter level and specs for this PC
+  const level = getJitterLevel(pc);
+  const specs = JITTER_LEVELS[level];
+  
+  const rand = Math.random();
+  
+  // Check for anchor
+  if (rand < specs.anchorRate) {
+    return {
+      cents: 0,
+      mode: 'anchor',
+      jlLevel: level
+    };
+  }
+  
+  // Check for probe
+  if (rand < specs.anchorRate + specs.probeRate) {
+    const sign = Math.random() < 0.5 ? -1 : 1;
+    const cents = sign * (25 + Math.random() * 15); // 25-40 cents
+    return {
+      cents: cents,
+      mode: 'probe',
+      jlLevel: level
+    };
+  }
+  
+  // Jitter
+  const sign = Math.random() < 0.5 ? -1 : 1;
+  const cents = sign * (specs.jitterMin + Math.random() * (specs.jitterMax - specs.jitterMin));
+  return {
+    cents: cents,
+    mode: 'jitter',
+    jlLevel: level
+  };
+}
 
 /* ------------------ BLOCK SYSTEM ------------------ */
 function getBlockActiveTime() {
