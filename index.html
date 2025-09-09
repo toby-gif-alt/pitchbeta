@@ -1602,19 +1602,42 @@ function initializeConfusionTracking() {
 
 // Update confusion matrix on in-bounds error
 function updateConfusionMatrix(truePc, guessPc) {
-  if (!state.confusionMatrix || !state.confusionMatrix[truePc] || state.confusionMatrix[truePc][guessPc] === undefined) {
-    initializeConfusionTracking();
+  // Ensure confusion matrix structure exists
+  if (!state.confusionMatrix) {
+    state.confusionMatrix = {};
   }
+  if (!state.confusionMatrix[truePc]) {
+    state.confusionMatrix[truePc] = {};
+  }
+  if (state.confusionMatrix[truePc][guessPc] === undefined) {
+    state.confusionMatrix[truePc][guessPc] = 0;
+  }
+  
+  // Now safely increment
   state.confusionMatrix[truePc][guessPc]++;
 }
 
 // Update per-note performance stats
 function updatePerfStats(pc, correct, rtMs) {
-  if (!state.perfStats[pc] || !state.perfStats[pc].last40InBounds) {
-    initializeConfusionTracking();
+  // Ensure perfStats structure exists
+  if (!state.perfStats) {
+    state.perfStats = {};
+  }
+  if (!state.perfStats[pc]) {
+    state.perfStats[pc] = {
+      last40InBounds: [],
+      last40Acc: 0,
+      meanRT: 0,
+      totalSeen: 0
+    };
   }
   
   const stats = state.perfStats[pc];
+  
+  // Ensure last40InBounds exists
+  if (!stats.last40InBounds) {
+    stats.last40InBounds = [];
+  }
   
   // Add to last40InBounds
   stats.last40InBounds.push({correct, rtMs});
@@ -2630,7 +2653,7 @@ function recordTrial(trial) {
   state.trials.push(trialRecord);
   
   // Update confusion tracking for in-bounds trials
-  if (!isOOB && !trial.timeout && clicked !== null) {
+  if (!isOOB && !trial.timeout && clicked !== null && truePc) {
     // Update confusion matrix on errors
     if (!correct) {
       updateConfusionMatrix(truePc, clicked);
