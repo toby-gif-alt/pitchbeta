@@ -366,7 +366,7 @@
       <h3>🐤 Flappy Break</h3>
       <canvas id="flappyCanvas" width="320" height="480"></canvas>
       <div style="margin-top:8px">
-        <button id="flappySoundToggle" style="display:none;margin-right:8px">🔊 Sound On</button>
+        <button id="flappySoundToggle" style="margin-right:8px">🔊 Sound On</button>
         <button id="flappyClose">Close</button>
       </div>
       <p id="flappyScore">Score: 0 • Best: 0</p>
@@ -655,6 +655,8 @@ if (!state.timeblock) {
   };
   save();
 }
+// Normalize timeblock state on load
+normalizeTimeBlockState();
 // Migration for oobController
 if (!state.oobController) {
   state.oobController = {
@@ -745,36 +747,59 @@ function stopAllTimers(){ if(tickId){ clearInterval(tickId); tickId=null; } if(r
 let suppressStrictOnce=false;
 
 /* ------------------ TIMEBLOCK SYSTEM ------------------ */
+// A) TimeBlock state & ticking (count only during active training)
+// Add/normalize state.timeblock structure
+function normalizeTimeBlockState() {
+  state.timeblock = {
+    activeMs: state.timeblock?.activeMs || 0,  // counts ONLY when training is active AND NOT on break
+    running: !!state.timeblock?.running,
+    startedAt: state.timeblock?.startedAt || null,  // performance.now() of last resume
+    breaksCompletedToday: state.timeblock?.breaksCompletedToday || 0, // 0..4
+    breakActive: !!state.timeblock?.breakActive,
+    breakEndsAt: state.timeblock?.breakEndsAt || null
+  };
+}
+
+// Tick function (requestAnimationFrame):
+function tickTimeBlock(now = performance.now()) {
+  if (!state.timeblock) return;
+  const tb = state.timeblock;
+  if (tb.running && !tb.breakActive) {
+    if (tb.startedAt == null) tb.startedAt = now;
+    const dt = Math.max(0, now - tb.startedAt);
+    tb.activeMs += dt;
+    tb.startedAt = now;
+    if (tb.activeMs >= 6*60*1000) beginTimeBlockBreak();
+  }
+  renderTrainerHeaderTimeBlock(); // uses tb.activeMs
+  requestAnimationFrame(tickTimeBlock);
+}
+
 function startTimeBlockTimer() {
   if (!state.timeblock.running) {
     state.timeblock.running = true;
     state.timeblock.startedAt = performance.now();
     save();
   }
-  if (!timeblockTickId) {
-    timeblockTick();
-  }
+  // Start the loop once on trainer mount:
+  requestAnimationFrame(tickTimeBlock);
 }
 
 function pauseTimeBlockTimer() {
   if (state.timeblock.running) {
-    updateTimeBlockMs();
+    // Update one final time before pausing
+    if (state.timeblock.startedAt) {
+      const now = performance.now();
+      state.timeblock.activeMs += now - state.timeblock.startedAt;
+    }
     state.timeblock.running = false;
     save();
   }
 }
 
+// Keep legacy functions for compatibility
 function timeblockTick() {
-  if (state.timeblock.running && !state.timeblock.breakActive) {
-    updateTimeBlockMs();
-    
-    // Check if TimeBlock is complete (6 minutes)
-    if (state.timeblock.activeMs >= 6 * 60 * 1000 && !state.timeblock.breakActive) {
-      beginTimeBlockBreak();
-    }
-  }
-  
-  timeblockTickId = requestAnimationFrame(timeblockTick);
+  return tickTimeBlock();
 }
 
 function updateTimeBlockMs() {
@@ -785,19 +810,23 @@ function updateTimeBlockMs() {
   }
 }
 
+// B) Begin/End break logic (modal stays up for full 60s)
 function beginTimeBlockBreak() {
+  const tb = state.timeblock;
+  tb.running = false;
+  tb.breakActive = true;
+  tb.breakEndsAt = Date.now() + 60_000;
+  showFlappyModal({ countdown: tb.breakEndsAt }); // open modal; show 60s countdown; inputs in trainer disabled
+  
   // Log TimeBlock completion
   logTimeBlockOobData({ 
     event: 'timeblock_completed',
     timeBlockIndex: state.timeblock.breaksCompletedToday + 1
   });
   
-  state.timeblock.breakActive = true;
-  state.timeblock.running = false;
-  state.timeblock.breakEndsAt = Date.now() + 60000; // 60 seconds
   save();
   
-  // Pause training and show Flappy modal
+  // Pause training
   if (sessionActive && !paused) {
     pauseStart('timeblock-break');
   }
@@ -805,17 +834,24 @@ function beginTimeBlockBreak() {
   openFlappyModalForTimeBlockBreak();
 }
 
+function showFlappyModal(options = {}) {
+  openFlappyModal();
+  if (options.countdown) {
+    updateTimeBlockBreakUI();
+  }
+}
+
 function endTimeBlockBreak() {
   state.timeblock.activeMs = 0;
-  state.timeblock.breaksCompletedToday++;
   state.timeblock.breakActive = false;
   state.timeblock.breakEndsAt = null;
+  state.timeblock.breaksCompletedToday++;
   
   if (state.timeblock.breaksCompletedToday >= 5) {
     endDayAndLockout();
   } else {
-    // Resume training
-    state.timeblock.running = true;
+    // Resume training:
+    state.timeblock.running = true; 
     state.timeblock.startedAt = performance.now();
   }
   
@@ -852,62 +888,86 @@ function updateTimeBlockBreakUI() {
   const now = Date.now();
   const remaining = Math.max(0, state.timeblock.breakEndsAt - now);
   
+  // At exactly breakEndsAt, close the modal immediately (do NOT wait for the current flappy round to end).
   if (remaining <= 0) {
-    // Break time is up, but let current Flappy round finish
+    // Break time is up - close modal and end break
     const flappyModal = byId('flappyModal');
     if (flappyModal && flappyModal.style.display === 'flex') {
-      // Show message that break is over but let them finish
-      let breakMessage = flappyModal.querySelector('#timeBlockBreakMessage');
-      if (!breakMessage) {
-        breakMessage = document.createElement('p');
-        breakMessage.id = 'timeBlockBreakMessage';
-        breakMessage.style.cssText = 'margin: 8px 0; font-weight: 600; color: var(--accent);';
-        const flappyCard = flappyModal.querySelector('.card');
-        if (flappyCard) {
-          flappyCard.insertBefore(breakMessage, flappyCard.querySelector('canvas'));
-        }
-      }
-      breakMessage.textContent = 'Break time finished - close when ready to continue training';
+      closeFlappy();
     }
-  } else {
-    // Update countdown
-    const flappyModal = byId('flappyModal');
-    if (flappyModal && flappyModal.style.display === 'flex') {
-      let breakMessage = flappyModal.querySelector('#timeBlockBreakMessage');
-      if (!breakMessage) {
-        breakMessage = document.createElement('p');
-        breakMessage.id = 'timeBlockBreakMessage';
-        breakMessage.style.cssText = 'margin: 8px 0; font-weight: 600; color: var(--accent);';
-        const flappyCard = flappyModal.querySelector('.card');
-        if (flappyCard) {
-          flappyCard.insertBefore(breakMessage, flappyCard.querySelector('canvas'));
-        }
+    endTimeBlockBreakAndCloseModal();
+    return;
+  }
+  
+  // Always keep modal open until Date.now() >= breakEndsAt.
+  // If the player loses early, the modal STAYS open with the countdown still visible
+  const flappyModal = byId('flappyModal');
+  if (flappyModal && flappyModal.style.display === 'flex') {
+    let breakMessage = flappyModal.querySelector('#timeBlockBreakMessage');
+    if (!breakMessage) {
+      breakMessage = document.createElement('p');
+      breakMessage.id = 'timeBlockBreakMessage';
+      breakMessage.style.cssText = 'margin: 8px 0; font-weight: 600; color: var(--accent);';
+      const flappyCard = flappyModal.querySelector('.card');
+      if (flappyCard) {
+        flappyCard.insertBefore(breakMessage, flappyCard.querySelector('canvas'));
       }
-      breakMessage.textContent = `TimeBlock break: ${fmtMMSS(remaining)} remaining`;
+    }
+    breakMessage.textContent = `TimeBlock break: ${fmtMMSS(remaining)} remaining`;
+    
+    // Show "Play again" option if game is not running
+    if (!running) {
+      let playAgainBtn = flappyModal.querySelector('#playAgainBtn');
+      if (!playAgainBtn) {
+        playAgainBtn = document.createElement('button');
+        playAgainBtn.id = 'playAgainBtn';
+        playAgainBtn.textContent = 'Play again';
+        playAgainBtn.style.cssText = 'margin-right: 8px;';
+        const closeBtn = flappyModal.querySelector('#flappyClose');
+        if (closeBtn) {
+          closeBtn.parentNode.insertBefore(playAgainBtn, closeBtn);
+        }
+        playAgainBtn.onclick = () => {
+          running = true;
+          resetFlappy();
+          flappyRAF = requestAnimationFrame(step);
+        };
+      }
     }
   }
 }
 
+// C) Header display (do not reset on menu)
+function renderTrainerHeaderTimeBlock() {
+  // Calculate i = Math.min(5, (state.timeblock?.breaksCompletedToday || 0) + (state.timeblock?.breakActive ? 1 : 1));
+  // i is 1..5 for the current/next TimeBlock being worked on
+  const breaksCompleted = state.timeblock?.breaksCompletedToday || 0;
+  const i = Math.min(5, breaksCompleted + 1);
+  
+  // Show "TimeBlock i/5  mm:ss / 06:00"
+  // Compute mm:ss from state.timeblock.activeMs (clamp to 0..360000).
+  const activeMs = Math.max(0, Math.min(360000, state.timeblock?.activeMs || 0));
+  const mmss = fmtMMSS(activeMs);
+  
+  text('blockTimeInfo', `TimeBlock ${i}/5  ${mmss} / 06:00`);
+}
+
+// F) Fix missing logger reference
 function logTimeBlockOobData(payload = {}) {
-  // For TimeBlocks we log minimal info for now:
-  window.qa = window.qa || {};
+  window.qa = window.qa || {}; 
   qa.timeBlocks = qa.timeBlocks || [];
   qa.timeBlocks.push({
     date: new Date().toISOString(),
     breaksCompletedToday: state.timeblock?.breaksCompletedToday ?? null,
     activeMs: state.timeblock?.activeMs ?? null,
-    // Attach OOB snapshot if available
     oobTarget: state.oob?.blockTarget ?? state.oob?.targetPct ?? null,
+    event: 'timeblock_completed',
+    timeBlockIndex: (state.timeblock?.breaksCompletedToday || 0) + 1,
     ...payload
   });
 }
 
-function updateTimeBlockDisplay() {
-  const timeBlockIndex = state.timeblock.breaksCompletedToday + 1;
-  const activeMs = state.timeblock.activeMs || 0;
-  const activeStr = fmtMMSS(activeMs);
-  text('blockTimeInfo', `TimeBlock ${timeBlockIndex}/5 ${activeStr}/06:00`);
-}
+/* Removed updateTimeBlockDisplay - now using renderTrainerHeaderTimeBlock */
 
 function endTimeBlockBreakAndCloseModal() {
   endTimeBlockBreak();
@@ -947,7 +1007,7 @@ function showScreen(id){
   document.querySelectorAll('.screen').forEach(el=> el.style.display='none');
   if(id === 'menuScreen'){
     sessionActive=false; paused=false;
-    // On leaving Trainer (menu etc): pause the tick (set running=false) but DO NOT reset activeMs.
+    // C) On leaving Trainer (menu etc): pause the tick (set running=false) but DO NOT reset activeMs.
     pauseTimeBlockTimer();
     stopAllTimers(); sealDanglingSession(); updateCapsUI();
     try{ populatePitchSelect(); drawChart(); }catch(_){}
@@ -991,10 +1051,41 @@ function trainedSet(k){ return UNLOCK_ORDER.slice(0,k); }
 
 /* ------------------ AUDIO ------------------ */
 let ACTX=null; const BUF_CACHE=new Map();
+let FLAPPY_AUDIO_BUFFER = null; // E) Preload flappy audio buffer
+
 function getCtx(){ if(!ACTX){ ACTX=new (window.AudioContext||window.webkitAudioContext)(); } return ACTX; }
 async function resumeCtx(){ try{ const ctx=getCtx(); if(ctx.state==='suspended') await ctx.resume(); }catch(e){ report(e); } }
 async function loadBuffer(url){ if(BUF_CACHE.has(url)) return BUF_CACHE.get(url); const res=await fetch(url); if(!res.ok) throw new Error('Missing audio '+url); const arr=await res.arrayBuffer(); const buf=await getCtx().decodeAudioData(arr); BUF_CACHE.set(url,buf); return buf; }
-async function closeAudio(){ try{ if(ACTX){ await ACTX.close(); } }catch(_){} finally{ ACTX=null; BUF_CACHE.clear(); } }
+async function closeAudio(){ try{ if(ACTX){ await ACTX.close(); } }catch(_){} finally{ ACTX=null; BUF_CACHE.clear(); FLAPPY_AUDIO_BUFFER=null; } }
+
+// E) Preload flappy audio once on app init
+async function preloadFlappyAudio() {
+  try {
+    await resumeCtx();
+    FLAPPY_AUDIO_BUFFER = await loadBuffer('./audio/flappy.mp3');
+  } catch (e) {
+    console.warn('Could not preload flappy audio:', e);
+  }
+}
+
+// E) Flappy sound function
+function playFlappySound() {
+  if (state.flappyMuted) return;
+  
+  try {
+    const ctx = getCtx();
+    if (FLAPPY_AUDIO_BUFFER) {
+      const src = ctx.createBufferSource();
+      src.buffer = FLAPPY_AUDIO_BUFFER;
+      const g = ctx.createGain(); 
+      g.gain.value = 0.5; // Reasonable volume
+      src.connect(g).connect(ctx.destination);
+      src.start();
+    }
+  } catch (e) {
+    console.warn('Could not play flappy sound:', e);
+  }
+}
 
 /* Guitar sample mapping - available samples and their pitches */
 const GUITAR_SAMPLES = {
@@ -1112,23 +1203,7 @@ async function playSample(note){
 }
 
 /* Flappy sound for Flappy Bird lockout */
-async function playFlappySound(){
-  if (state.flappyMuted) return;
-  
-  try{
-    await resumeCtx();
-    const ctx = getCtx();
-    const url = `audio/flappy.mp3`;
-    const buf = await loadBuffer(url);
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    const g = ctx.createGain(); 
-    g.gain.value = 0.8; // Set volume level
-    src.connect(g).connect(ctx.destination);
-    const t = ctx.currentTime;
-    src.start(t);
-  }catch(_e){}
-}
+/* Removed - now using playFlappySound() defined in AUDIO section */
 
 /* ------------------ Shepard (pauses) ------------------ */
 let shepRunning=false;
@@ -2241,7 +2316,7 @@ function startSession(){
   sessionActive=true; paused=false;
   (state.sessions||[]).push({start:Date.now(),end:null,pauses:[],completed:false}); 
   
-  // On entering Trainer screen: do NOT reset activeMs; if running, resume from startedAt; otherwise show the current elapsed.
+  // C) On entering Trainer screen: do NOT reset activeMs; if running, resume from startedAt; otherwise show the current elapsed.
   if (!state.timeblock.breakActive) {
     if (state.timeblock.running) {
       // Resume from where we left off
@@ -2263,9 +2338,6 @@ function startSession(){
     }
     
     if(sessionActive && !paused){
-      // Update TimeBlock display
-      updateTimeBlockDisplay();
-      
       // Update total time display  
       const left = Math.max(0, SESS_DAILY_MS - msUsedQuota());
       text('timerInfo', `Left: ${fmtMMSS(left)}`);
@@ -2364,113 +2436,14 @@ function startNewBlock() {
 }
 
 function checkBlockCompletion() {
-  if (state.inBreak || !sessionActive || paused || shepRunning) return;
-  
-  const blockTime = getBlockActiveTime();
-  if (blockTime >= BLOCK_DURATION_MS) {
-    // TimeBlock completed - update OOB controller
-    state.oobController.globalTimeBlockIndex++;
-    // Note: this appears to be legacy code that should use the new training block system
-    adaptOobTarget();
-    updateOobStatusPill();
-    
-    const BLOCKS_PER_SET = 5;
-    const currentBlockInSet = ((state.currentBlock - 1) % BLOCKS_PER_SET) + 1;
-    
-    if (currentBlockInSet < BLOCKS_PER_SET) {
-      // Still blocks left in this set - start mandatory break
-      state.inBreak = true;
-      state.breakStartTime = Date.now();
-      save();
-      startMandatoryBreak();
-    } else {
-      // Last block of the set completed - move to next set without break
-      state.currentBlock++;
-      if (state.currentBlock > state.totalBlocks) {
-        // All blocks completed
-        completeAllBlocks();
-      } else {
-        // Start new set immediately (no break between sets)
-        startNewBlock();
-        text('promptPill', `New set started — press Play to continue`);
-      }
-    }
-  }
+  // D) Disabled legacy block system - Flappy modal is opened ONLY from beginTimeBlockBreak()
+  // This legacy block system is replaced by the 6-minute TimeBlock system
+  return;
 }
 
-function startMandatoryBreak() {
-  pauseStart('block-break');
-  openFlappyModalForBreak();
-}
+/* D) Removed legacy block system functions - only TimeBlock system should trigger Flappy */
 
-function completeAllBlocks() {
-  const now = Date.now();
-  const rec = state.sessions[state.sessions.length - 1];
-  if (rec && !rec.completed) { 
-    rec.completed = true; 
-    rec.end = now; 
-  }
-  
-  state.lockoutUntil = now + LOCKOUT_MS;
-  state.capResetAt = state.lockoutUntil;
-  
-  // Reset block system for next session
-  state.currentBlock = 1;
-  state.blockStartTime = null;
-  state.inBreak = false;
-  state.breakStartTime = null;
-  
-  save(); 
-  endSession(true);
-}
-
-function finishBreak() {
-  if (!state.inBreak) return;
-  
-  const BLOCKS_PER_SET = 5;
-  const currentBlockInSet = ((state.currentBlock - 1) % BLOCKS_PER_SET) + 1;
-  
-  // Move to next block
-  state.currentBlock++;
-  state.inBreak = false;
-  state.breakStartTime = null;
-  
-  if (state.currentBlock <= state.totalBlocks) {
-    startNewBlock();
-    const nextBlockInSet = ((state.currentBlock - 1) % BLOCKS_PER_SET) + 1;
-    text('promptPill', `Block ${nextBlockInSet}/${BLOCKS_PER_SET} started — press Play to continue`);
-  } else {
-    // All blocks completed
-    completeAllBlocks();
-    return;
-  }
-  
-  save();
-  pauseEnd();
-  safe('btnPause', el => el.textContent = '⏸ Pause');
-}
-
-function openFlappyModalForBreak() {
-  openFlappyModal();
-  updateBreakUI(`Break: ${fmtMMSS(BREAK_DURATION_MS)} remaining`);
-}
-
-function updateBreakUI(message) {
-  const flappyModal = byId('flappyModal');
-  if (flappyModal && flappyModal.style.display === 'flex') {
-    let breakMessage = flappyModal.querySelector('#breakMessage');
-    if (!breakMessage) {
-      breakMessage = document.createElement('p');
-      breakMessage.id = 'breakMessage';
-      breakMessage.style.cssText = 'margin: 8px 0; font-weight: 600; color: var(--accent);';
-      const flappyCard = flappyModal.querySelector('.card');
-      if (flappyCard) {
-        flappyCard.insertBefore(breakMessage, flappyCard.querySelector('canvas'));
-      }
-    }
-    breakMessage.textContent = message;
-  }
-}
+/* D) Removed updateBreakUI - legacy function, now using updateTimeBlockBreakUI */
 
 /* ------------------ PROGRESS / CHARTS ------------------ */
 function eightWeekBins(pitch){
@@ -2589,6 +2562,10 @@ function prevTutorial(){ setTutorialPage(tIndex-1); }
 function wireOnce(){
   sealDanglingSession();
   try{ populatePitchSelect(); drawChart(); }catch(_){}
+  
+  // E) Preload flappy audio on app init
+  preloadFlappyAudio();
+  
   // Start
   safe('startBtn', el=> el.onclick=()=>{
     const name=(byId('userNameInput')?.value||'').trim()||'Player';
@@ -2730,7 +2707,7 @@ function wireOnce(){
   });
   safe('btnContinueTraining', el=> el.onclick=()=>{ 
     closeNewPitchModal(); 
-    startFlappyReward(); 
+    // D) Removed startFlappyReward() - Flappy only opens from TimeBlock breaks
   });
 
   // Initial screen
@@ -2766,22 +2743,23 @@ function openFlappyModal(){
   // Show sound toggle button and update description during breaks or lockout
   const soundToggle = byId('flappySoundToggle');
   const description = byId('flappyModal').querySelector('p:last-child');
-  if (state.inBreak || isLocked()) {
-    if (soundToggle) {
-      soundToggle.style.display = 'inline-block';
-      soundToggle.textContent = state.flappySoundEnabled ? '🔊 Sound On' : '🔇 Sound Off';
-    }
-    if (description) {
+  
+  // Always show sound toggle and update it based on current state
+  if (soundToggle) {
+    soundToggle.style.display = 'inline-block';
+    soundToggle.textContent = state.flappyMuted ? '🔇 Sound Off' : '🔊 Sound On';
+  }
+  
+  // Update description based on context
+  if (description) {
+    if (state.timeblock?.breakActive || isLocked()) {
       description.textContent = 'Tap/click (or Space) to flap. First tap starts — each flap makes a flappy sound.';
-    }
-  } else {
-    if (soundToggle) soundToggle.style.display = 'none';
-    if (description) {
+    } else {
       description.textContent = 'Tap/click (or Space) to flap. First tap starts — each flap plays a random pitch.';
     }
   }
 }
-function startFlappyReward(){ if(sessionActive && !paused){ pauseStart('flappy'); } clearTimeout(rtTimer); rtTimer=null; clearTimeout(autoTimer); autoTimer=null; openFlappyModal(); }
+/* D) Removed startFlappyReward() - Flappy only opens from TimeBlock breaks */
 function closeFlappy(){
   running=false; cancelAnimationFrame(flappyRAF); byId('flappyModal').style.display='none'; detachFlappyControls();
   if(score > (state.flappyHighScore||0)){ state.flappyHighScore = score; save(); }
@@ -2880,9 +2858,9 @@ function attachFlappyControls(){
   window.addEventListener('keydown', onKey);
   safe('flappyClose', el=> el.onclick=onClose);
   safe('flappySoundToggle', el=> el.onclick=()=> {
-    state.flappySoundEnabled = !state.flappySoundEnabled;
+    state.flappyMuted = !state.flappyMuted;
     save();
-    el.textContent = state.flappySoundEnabled ? '🔊 Sound On' : '🔇 Sound Off';
+    el.textContent = state.flappyMuted ? '🔇 Sound Off' : '🔊 Sound On';
   });
   _flHandlers={onCanvasClick,onTouchStart,onKey,onClose};
 }
