@@ -552,7 +552,7 @@ const LATENCY_CUSHION_MS=100;
 const JITTER_LEVELS = {
   0: { // JL0 (onboarding)
     jitterMin: 3, jitterMax: 8,
-    probeRate: 0.015, // 0-3% -> use 1.5% middle
+    probeRate: 0.02, 
     anchorRate: 0.10
   },
   1: { // JL1 (early)  
@@ -567,7 +567,7 @@ const JITTER_LEVELS = {
   },
   3: { // JL3 (mature)
     jitterMin: 5, jitterMax: 15,
-    probeRate: 0.11, // 10-12% -> use 11% middle
+    probeRate: 0.11,
     anchorRate: 0.05
   }
 };
@@ -2622,14 +2622,8 @@ function updateJitterStats(pc) {
   const correct = stats.last40.filter(t => t.correct).length;
   stats.acc = correct / stats.last40.length;
   
-  // For median and SD, we don't have actual cents error from current system
-  // We'll simulate based on correctness for now - this could be enhanced later
-  // Correct trials: assume small error (0-10 cents)
-  // Incorrect trials: assume larger error (15-40 cents)
-  const errors = stats.last40.map(t => t.correct ? 
-    Math.random() * 10 : 
-    15 + Math.random() * 25
-  );
+  // Use simple error proxy as specified: 0 for correct, 100 for incorrect
+  const errors = stats.last40.map(t => t.correct ? 0 : 100);
   
   // Calculate median
   const sorted = [...errors].sort((a, b) => a - b);
@@ -2651,33 +2645,49 @@ function evaluateJitterLevel(pc) {
   
   const currentLevel = getJitterLevel(pc);
   const acc = stats.acc;
-  const medianCents = stats.medianCents;
-  const sdCents = stats.sdCents;
   
   let newLevel = currentLevel;
   
-  // Demotion conditions (rescue)
-  if (acc < 0.75 || medianCents > 25) {
+  // Demote (rescue) if accuracy < 0.75
+  if (acc < 0.75) {
     newLevel = Math.max(0, currentLevel - 1);
   }
-  // Promotion conditions
-  else if (currentLevel === 0 && acc >= 0.75 && medianCents <= 20) {
+  // Promotion conditions (require at least 20 in last-40)
+  else if (currentLevel === 0 && acc >= 0.75) {
     newLevel = 1;
   }
-  else if (currentLevel === 1 && acc >= 0.80 && medianCents <= 15) {
+  else if (currentLevel === 1 && acc >= 0.80) {
     newLevel = 2;
   }
-  else if (currentLevel === 2 && acc >= 0.90 && medianCents <= 10 && sdCents <= 15) {
+  else if (currentLevel === 2 && acc >= 0.90) {
     newLevel = 3;
   }
   
-  // Clamp to valid range
+  // Clamp to valid range [0,3]
   newLevel = Math.max(0, Math.min(3, newLevel));
   
   if (newLevel !== currentLevel) {
     state.jitter.levelByPc[pc] = newLevel;
+    console.log(`Jitter level change for ${pcLabel(pc)}: JL${currentLevel} -> JL${newLevel} (acc=${(acc*100).toFixed(1)}%)`);
     save();
   }
+}
+
+// Create a function chooseDetuneMode(pc) that returns "anchor" | "probe" | "jitter"
+function chooseDetuneMode(pc) {
+  const L = state.jitter.levelByPc[pc] || 0;
+  const specs = JITTER_LEVELS[L];
+  
+  const rand = Math.random();
+  
+  // Use cumulative probability sampling
+  if (rand < specs.anchorRate) {
+    return 'anchor';
+  }
+  if (rand < specs.anchorRate + specs.probeRate) {
+    return 'probe';  
+  }
+  return 'jitter';
 }
 
 // Select detune mode and value for a trial
@@ -2691,14 +2701,12 @@ function selectDetune(pc, isOOB) {
     };
   }
   
-  // Get jitter level and specs for this PC
+  // Get jitter level and choose mode
   const level = getJitterLevel(pc);
+  const mode = chooseDetuneMode(pc);
   const specs = JITTER_LEVELS[level];
   
-  const rand = Math.random();
-  
-  // Check for anchor
-  if (rand < specs.anchorRate) {
+  if (mode === 'anchor') {
     return {
       cents: 0,
       mode: 'anchor',
@@ -2706,10 +2714,9 @@ function selectDetune(pc, isOOB) {
     };
   }
   
-  // Check for probe
-  if (rand < specs.anchorRate + specs.probeRate) {
+  if (mode === 'probe') {
     const sign = Math.random() < 0.5 ? -1 : 1;
-    const cents = sign * (25 + Math.random() * 15); // 25-40 cents
+    const cents = sign * (25 + Math.random() * 15); // ±25..±40¢
     return {
       cents: cents,
       mode: 'probe',
@@ -2717,7 +2724,7 @@ function selectDetune(pc, isOOB) {
     };
   }
   
-  // Jitter
+  // Jitter mode
   const sign = Math.random() < 0.5 ? -1 : 1;
   const cents = sign * (specs.jitterMin + Math.random() * (specs.jitterMax - specs.jitterMin));
   return {
