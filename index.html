@@ -752,6 +752,31 @@ if (!state.jitter) {
   save();
 }
 
+// Migration for confusion tracking
+if (!state.confusionMatrix || !state.perfStats || typeof state.lastInBoundsPc === 'undefined') {
+  // Initialize confusion tracking structures
+  state.confusionMatrix = {};
+  for (const truePc of PC) {
+    state.confusionMatrix[truePc] = {};
+    for (const guessPc of PC) {
+      state.confusionMatrix[truePc][guessPc] = 0;
+    }
+  }
+  
+  state.perfStats = {};
+  for (const pc of PC) {
+    state.perfStats[pc] = {
+      last40InBounds: [],
+      last40Acc: 0,
+      meanRT: 0,
+      totalSeen: 0
+    };
+  }
+  
+  state.lastInBoundsPc = null;
+  save();
+}
+
 // Apply theme on load
 applyTheme(state.theme);
 function save(){ try{ localStorage.setItem('apTrainer', JSON.stringify(state)); }catch(e){ report(e); } }
@@ -1504,6 +1529,244 @@ function updateOobHealthCheckTrainingBlock() {
   }
 }
 
+/* ------------------ CONFUSION-AWARE SCHEDULING ------------------ */
+
+// Initialize confusion tracking structures
+function initializeConfusionTracking() {
+  if (!state.confusionMatrix) {
+    // Initialize 12x12 confusion matrix
+    state.confusionMatrix = {};
+    for (const truePc of PC) {
+      state.confusionMatrix[truePc] = {};
+      for (const guessPc of PC) {
+        state.confusionMatrix[truePc][guessPc] = 0;
+      }
+    }
+  } else {
+    // Ensure all entries exist without overwriting existing values
+    for (const truePc of PC) {
+      if (!state.confusionMatrix[truePc]) {
+        state.confusionMatrix[truePc] = {};
+      }
+      for (const guessPc of PC) {
+        if (state.confusionMatrix[truePc][guessPc] === undefined) {
+          state.confusionMatrix[truePc][guessPc] = 0;
+        }
+      }
+    }
+  }
+  
+  if (!state.perfStats) {
+    // Initialize per-note performance stats
+    state.perfStats = {};
+    for (const pc of PC) {
+      state.perfStats[pc] = {
+        last40InBounds: [],
+        last40Acc: 0,
+        meanRT: 0,
+        totalSeen: 0
+      };
+    }
+  } else {
+    // Ensure all entries exist without overwriting existing values
+    for (const pc of PC) {
+      if (!state.perfStats[pc]) {
+        state.perfStats[pc] = {
+          last40InBounds: [],
+          last40Acc: 0,
+          meanRT: 0,
+          totalSeen: 0
+        };
+      } else {
+        // Ensure all required properties exist
+        if (!state.perfStats[pc].last40InBounds) {
+          state.perfStats[pc].last40InBounds = [];
+        }
+        if (state.perfStats[pc].last40Acc === undefined) {
+          state.perfStats[pc].last40Acc = 0;
+        }
+        if (state.perfStats[pc].meanRT === undefined) {
+          state.perfStats[pc].meanRT = 0;
+        }
+        if (state.perfStats[pc].totalSeen === undefined) {
+          state.perfStats[pc].totalSeen = 0;
+        }
+      }
+    }
+  }
+  
+  if (state.lastInBoundsPc === undefined) {
+    state.lastInBoundsPc = null;
+  }
+}
+
+// Update confusion matrix on in-bounds error
+function updateConfusionMatrix(truePc, guessPc) {
+  if (!state.confusionMatrix || !state.confusionMatrix[truePc] || state.confusionMatrix[truePc][guessPc] === undefined) {
+    initializeConfusionTracking();
+  }
+  state.confusionMatrix[truePc][guessPc]++;
+}
+
+// Update per-note performance stats
+function updatePerfStats(pc, correct, rtMs) {
+  if (!state.perfStats[pc] || !state.perfStats[pc].last40InBounds) {
+    initializeConfusionTracking();
+  }
+  
+  const stats = state.perfStats[pc];
+  
+  // Add to last40InBounds
+  stats.last40InBounds.push({correct, rtMs});
+  if (stats.last40InBounds.length > 40) {
+    stats.last40InBounds.shift();
+  }
+  
+  // Recalculate stats
+  const validTrials = stats.last40InBounds.filter(t => t.rtMs != null && !isNaN(t.rtMs));
+  stats.last40Acc = stats.last40InBounds.length > 0 ? 
+    stats.last40InBounds.filter(t => t.correct).length / stats.last40InBounds.length : 0;
+  stats.meanRT = validTrials.length > 0 ? 
+    validTrials.reduce((sum, t) => sum + t.rtMs, 0) / validTrials.length : 0;
+  stats.totalSeen++;
+}
+
+// Get top confusion pair from last ~200 in-bounds trials
+function getTopConfusionPair() {
+  const last200InBounds = (state.trials || [])
+    .filter(t => !t.oob && !t.timeout && t.guess !== null)
+    .slice(-200);
+  
+  // Build temp confusion matrix from last 200
+  const tempConf = {};
+  for (const truePc of PC) {
+    tempConf[truePc] = {};
+    for (const guessPc of PC) {
+      tempConf[truePc][guessPc] = 0;
+    }
+  }
+  
+  // Count errors only
+  for (const trial of last200InBounds) {
+    if (!trial.correct && trial.pc && trial.guess) {
+      if (tempConf[trial.pc] && tempConf[trial.pc][trial.guess] !== undefined) {
+        tempConf[trial.pc][trial.guess]++;
+      }
+    }
+  }
+  
+  // Find the highest confusion count
+  let topTrue = null;
+  let topWrong = null;
+  let maxCount = 0;
+  
+  for (const truePc of PC) {
+    for (const wrongPc of PC) {
+      if (truePc !== wrongPc && tempConf[truePc][wrongPc] > maxCount) {
+        maxCount = tempConf[truePc][wrongPc];
+        topTrue = truePc;
+        topWrong = wrongPc;
+      }
+    }
+  }
+  
+  return maxCount > 0 ? {true: topTrue, wrong: topWrong, count: maxCount} : null;
+}
+
+// Confusion-aware note selection for in-bounds trials
+function selectInBoundsNoteConfusionAware(usable) {
+  if (!usable || usable.length === 0) return null;
+  
+  initializeConfusionTracking();
+  
+  // Calculate weights for each trained PC
+  const weights = {};
+  const topConfusion = getTopConfusionPair();
+  
+  for (const pc of usable) {
+    // Base weight
+    weights[pc] = 1.0;
+    
+    // Weakness boost: if last40Acc < 0.80 → +0.5
+    const stats = state.perfStats[pc];
+    if (stats && stats.last40Acc < 0.80) {
+      weights[pc] += 0.5;
+    }
+    
+    // Top confusion boost: +0.5 to the TRUE pc of top confusion pair
+    if (topConfusion && topConfusion.true === pc) {
+      weights[pc] += 0.5;
+    }
+    
+    // Floor: keep at least 0.5 weight
+    weights[pc] = Math.max(0.5, weights[pc]);
+  }
+  
+  // Normalize to probabilities
+  const totalWeight = Object.values(weights).reduce((sum, w) => sum + w, 0);
+  const probabilities = {};
+  for (const pc of usable) {
+    probabilities[pc] = weights[pc] / totalWeight;
+  }
+  
+  // Sample from the distribution
+  function sampleFromProbs(probs) {
+    const rand = Math.random();
+    let cumulative = 0;
+    for (const pc of usable) {
+      cumulative += probs[pc];
+      if (rand <= cumulative) return pc;
+    }
+    return usable[usable.length - 1]; // Fallback
+  }
+  
+  let selectedPc = sampleFromProbs(probabilities);
+  
+  // Anti-streak: if same as previous, re-sample once
+  if (selectedPc === state.lastInBoundsPc && usable.length > 1) {
+    selectedPc = sampleFromProbs(probabilities);
+  }
+  
+  return selectedPc;
+}
+
+// Log confusion series data for completed training blocks
+function logConfusionSeriesData(blockIndex) {
+  // Only log once per 20-trial training block (every block completion)
+  
+  const set = setFromIndex(state.levelIndex);
+  const trainedPcs = trainedSet(set);
+  const topConfusion = getTopConfusionPair();
+  
+  // Calculate current weights for all trained PCs
+  const weights = {};
+  for (const pc of trainedPcs) {
+    weights[pc] = 1.0; // Base weight
+    
+    const stats = state.perfStats[pc];
+    if (stats && stats.last40Acc < 0.80) {
+      weights[pc] += 0.5; // Weakness boost
+    }
+    
+    if (topConfusion && topConfusion.true === pc) {
+      weights[pc] += 0.5; // Top confusion boost
+    }
+    
+    weights[pc] = Math.max(0.5, weights[pc]); // Floor
+  }
+  
+  // Create qa object if needed
+  if (!window.qa) window.qa = {};
+  if (!window.qa.confSeries) window.qa.confSeries = [];
+  
+  // Log the confusion series entry
+  window.qa.confSeries.push({
+    blockIndex: blockIndex,
+    weights: weights,
+    topConfusion: topConfusion
+  });
+}
+
 /* ------------------ NEW OOB PRE-PLANNING SYSTEM ------------------ */
 
 function initializeOobBlockPlan() {
@@ -2254,8 +2517,8 @@ async function nextTrial(forceNew=false){
         truePc = oobResult.pc;
         currentNote = `${oobResult.pc}${oobResult.octave}`;
       } else {
-        // In-bounds trial
-        truePc = rand(usable);
+        // In-bounds trial - use confusion-aware selection
+        truePc = selectInBoundsNoteConfusionAware(usable) || rand(usable); // Fallback to random if confusion fails
         const octave = rand(currentOctaves());
         currentNote = `${truePc}${octave}`;
       }
@@ -2366,6 +2629,26 @@ function recordTrial(trial) {
   
   state.trials.push(trialRecord);
   
+  // Update confusion tracking for in-bounds trials
+  if (!isOOB && !trial.timeout && clicked !== null) {
+    // Update confusion matrix on errors
+    if (!correct) {
+      updateConfusionMatrix(truePc, clicked);
+    }
+    
+    // Update per-note performance stats
+    updatePerfStats(truePc, correct, rtMs);
+    
+    // Update last in-bounds PC for anti-streak
+    state.lastInBoundsPc = truePc;
+    
+    // Add top confusion pair to trial record for logging
+    const topConfusion = getTopConfusionPair();
+    if (topConfusion) {
+      trialRecord.confTopPairAtTime = topConfusion;
+    }
+  }
+  
   // Update jitter statistics for in-bounds trials
   if (!isOOB) {
     addJitterStat(truePc, correct, rtMs);
@@ -2403,6 +2686,9 @@ function advanceCheck(){
   logTrainingBlockOobData(block, adaptBoundary);
   updateOobHealthCheckTrainingBlock();
   updateOobStatusPillNew();
+  
+  // Log confusion series data
+  logConfusionSeriesData(block);
   
   // Reset training block counters
   state.trainingBlockTrials = 0;
