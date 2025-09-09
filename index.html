@@ -586,10 +586,12 @@ try{
       healthCheckEndTimeBlock: 0,
       globalTimeBlockIndex: 0,
       oobSeries: []
-    }
+    },
+    trialOpen: false,
+    toneStartMs: null
   };
 } catch(e){
-  state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO, currentBlock: 1, blockStartTime: null, inBreak: false, breakStartTime: null, totalBlocks: 25, oobController: { targetOobPct: 15, lastAdaptTimeBlock: 0, last60InBounds: [], recentOobTrials: [], healthCheckActive: false, healthCheckEndTimeBlock: 0, globalTimeBlockIndex: 0, oobSeries: [] }, inBoundsLast60: [], trainingBlockIndex: 1, trainingBlockTrials: 0, currentBlockOctaveCount: {3: 0, 4: 0, 5: 0}, oobHealthCheckActive: false, oobHealthCheckEndBlock: 0, oob: { targetPct: 0.15, streak: 0, blockTarget: 0, plan: [], planOctaveMix: [], currentBlockIndex: 0, currentTrialInBlock: 0 } };
+  state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO, currentBlock: 1, blockStartTime: null, inBreak: false, breakStartTime: null, totalBlocks: 25, oobController: { targetOobPct: 15, lastAdaptTimeBlock: 0, last60InBounds: [], recentOobTrials: [], healthCheckActive: false, healthCheckEndTimeBlock: 0, globalTimeBlockIndex: 0, oobSeries: [] }, inBoundsLast60: [], trainingBlockIndex: 1, trainingBlockTrials: 0, currentBlockOctaveCount: {3: 0, 4: 0, 5: 0}, oobHealthCheckActive: false, oobHealthCheckEndBlock: 0, oob: { targetPct: 0.15, streak: 0, blockTarget: 0, plan: [], planOctaveMix: [], currentBlockIndex: 0, currentTrialInBlock: 0 }, trialOpen: false, toneStartMs: null };
 }
 // Migration for audioType
 if (!state.audioType) {
@@ -661,6 +663,13 @@ if (!state.oob) {
   // Clean up old state variables
   delete state.oobTargetPct;
   delete state.oobStreak;
+  save();
+}
+
+// Migration for trial input locking properties
+if (typeof state.trialOpen === 'undefined') {
+  state.trialOpen = false;
+  state.toneStartMs = null;
   save();
 }
 
@@ -799,6 +808,10 @@ function findClosestGuitarSample(targetNote) {
 
 /* Always play a tone (sample -> oscillator -> fallback) */
 async function playSample(note){
+  // Capture tone start timing for reaction time calculation
+  state.toneStartMs = performance.now();
+  state.trialOpen = true;
+  
   try{
     await resumeCtx();
     const ctx = getCtx();
@@ -1748,10 +1761,13 @@ function drawTrackerChart() {
 function guess(pc){
   if(!sessionActive || paused || shepRunning || special) return;
   if(!currentNote){ return; }
+  if(!state.trialOpen) return; // Input locking - ignore late clicks
   if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
-  const ok = (!isOOBTrial && pc === truePc);
-  recordTrial(pc, ok, false, isOOBTrial);
-  feedback(ok, ok ? undefined : (isOOBTrial ? 'Incorrect — Out of Bounds' : `Incorrect — ${pcLabel(truePc)}`));
+  const isOOB = !!isOOBTrial;
+  const clicked = pc;
+  const correct = isOOB ? (clicked === 'OOB') : (clicked === truePc);
+  recordTrial({ guess: clicked, correct: correct, timeout: false });
+  feedback(correct, correct ? undefined : (isOOB ? 'Incorrect — Out of Bounds' : `Incorrect — ${pcLabel(truePc)}`));
   currentNote = null; // Clear currentNote to prevent repeated guesses
   advanceCheck();
   scheduleAuto();
@@ -1759,11 +1775,14 @@ function guess(pc){
 function chooseOOB(){
   if(!sessionActive || paused || shepRunning || special) return;
   if(!currentNote) return;
+  if(!state.trialOpen) return; // Input locking - ignore late clicks
   if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
-  const ok = isOOBTrial;
-  recordTrial('OOB', ok, false, true);
-  const msg = ok ? undefined : `Incorrect — ${pcLabel(truePc)}`;
-  feedback(ok, msg);
+  const isOOB = !!isOOBTrial;
+  const clicked = 'OOB';
+  const correct = isOOB ? (clicked === 'OOB') : (clicked === truePc);
+  recordTrial({ guess: clicked, correct: correct, timeout: false });
+  const msg = correct ? undefined : `Incorrect — ${pcLabel(truePc)}`;
+  feedback(correct, msg);
   currentNote = null; // Clear currentNote to prevent repeated guesses
   advanceCheck();
   scheduleAuto();
@@ -1817,7 +1836,7 @@ async function nextTrial(forceNew=false){
 function handleTimeout(){
   if(!sessionActive || paused || special) return;
   if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
-  recordTrial(null,false,true, isOOBTrial);
+  recordTrial({ guess: null, correct: false, timeout: true });
   feedback(false, isOOBTrial ? 'Incorrect — Out of Bounds' : `Incorrect — ${pcLabel(truePc)}`);
   advanceCheck(); scheduleAuto();
 }
@@ -1841,21 +1860,62 @@ function maybeSuggestRestart(){
   if(state.testFailStreak >= 10 && !suggestedRestartFlag){ suggestedRestartFlag = true; showSuggestBanner(); }
 }
 
-function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
-  state.levelTrials++; if(ok) state.levelCorrect++;
-  state.trainingBlockTrials++; // Track training block trials
-  const block = blockFromIndex(state.levelIndex);
-  if(block >= 21){ if(ok){ state.testFailStreak=0; hideSuggestBanner(); suggestedRestartFlag=false; } else { state.testFailStreak=(state.testFailStreak||0)+1; } }
-  else { state.testFailStreak=0; hideSuggestBanner(); suggestedRestartFlag=false; }
+function recordTrial(trial) {
+  // Close the trial immediately to prevent late clicks
+  state.trialOpen = false;
   
-  const trial = {note:currentNote, pc:truePc, guess:guessLabel, correct:ok, timeout, oob:oobChosen, set:setFromIndex(state.levelIndex), block:block, time:Date.now()};
-  state.trials.push(trial);
+  // Calculate reaction time
+  let rtMs = trial.rtMs;
+  if (rtMs == null) {
+    rtMs = performance.now() - (state.toneStartMs || performance.now());
+  }
+  
+  // Centralized OOB grading logic
+  const isOOB = !!isOOBTrial;
+  const clicked = trial.guess;
+  const correct = isOOB ? (clicked === 'OOB') : (clicked === truePc);
+  
+  // Update counters
+  state.levelTrials++;
+  if(correct) state.levelCorrect++;
+  state.trainingBlockTrials++;
+  
+  const block = blockFromIndex(state.levelIndex);
+  if(block >= 21){ 
+    if(correct){ 
+      state.testFailStreak=0; 
+      hideSuggestBanner(); 
+      suggestedRestartFlag=false; 
+    } else { 
+      state.testFailStreak=(state.testFailStreak||0)+1; 
+    } 
+  } else { 
+    state.testFailStreak=0; 
+    hideSuggestBanner(); 
+    suggestedRestartFlag=false; 
+  }
+  
+  // Create trial record with proper structure
+  const trialRecord = {
+    note: currentNote, 
+    pc: truePc, 
+    guess: clicked, 
+    correct: correct, 
+    timeout: trial.timeout || false, 
+    oob: isOOB, 
+    set: setFromIndex(state.levelIndex), 
+    block: block, 
+    time: Date.now(),
+    rtMs: rtMs
+  };
+  
+  state.trials.push(trialRecord);
   
   // Update new OOB controller with this trial
-  updateTrainingBlockOobController(trial);
+  updateTrainingBlockOobController(trialRecord);
   
   save(); updateLevelUI(); try{ drawChart(); }catch(_){}; 
-  if(block >= 21 && !ok) maybeSuggestRestart();
+  if(block >= 21 && !correct) maybeSuggestRestart();
 }
 
 function feedback(ok, wrongMsgOverride){
@@ -2084,7 +2144,7 @@ function checkBlockCompletion() {
   if (blockTime >= BLOCK_DURATION_MS) {
     // TimeBlock completed - update OOB controller
     state.oobController.globalTimeBlockIndex++;
-    logTimeBlockOobData();
+    // Note: this appears to be legacy code that should use the new training block system
     adaptOobTarget();
     updateOobStatusPill();
     
