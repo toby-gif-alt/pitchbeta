@@ -1689,9 +1689,10 @@ function computeBlockWeightsAtStart() {
   for (const pc of trainedPcs) {
     let w = 1.0; // Base weight
     
-    // Weakness boost: if last40Acc < 0.80 → +0.5 (THIS WAS MISSING)
+    // Weakness boost: if last40Acc < 0.80 → +0.5
     const stats = state.perfStats[pc];
-    if (stats && stats.last40Acc < 0.80) {
+    const last40Acc = (stats && typeof stats.last40Acc === 'number') ? stats.last40Acc : 1; // Default to 1.0 if no data (no weakness boost for unknowns)
+    if (last40Acc < 0.80) {
       w += 0.5;
     }
     
@@ -1710,6 +1711,12 @@ function computeBlockWeightsAtStart() {
   if (totalWeight > 0) {
     for (const pc of trainedPcs) {
       weights[pc] = weights[pc] / totalWeight;
+    }
+  } else {
+    // Fallback: uniform distribution if all weights are 0 (should not happen due to floor)
+    const uniformWeight = 1.0 / trainedPcs.length;
+    for (const pc of trainedPcs) {
+      weights[pc] = uniformWeight;
     }
   }
   
@@ -1841,7 +1848,11 @@ function selectInBoundsNoteConfusionAware(usable) {
   initializeConfusionTracking();
   
   // Check if we need to compute weights at the start of a new 20-trial TrainingBlock
-  if (state.trainingBlockTrials === 0 || !state.conf.blockWeights || Object.keys(state.conf.blockWeights).length === 0) {
+  // Fixed condition: check for start of block (every 20 trials) OR missing weights
+  const isBlockStart = (state.trainingBlockTrials % 20) === 0;
+  const hasNoWeights = !state.conf.blockWeights || Object.keys(state.conf.blockWeights).length === 0;
+  
+  if (isBlockStart || hasNoWeights) {
     computeBlockWeightsAtStart();
   }
   
