@@ -363,7 +363,14 @@
   <!-- Flappy -->
   <div id="flappyModal">
     <div class="card" style="text-align:center">
-      <h3>🐤 Flappy Break</h3>
+      <div style="position: relative;">
+        <h3>🐤 Flappy Break</h3>
+        <!-- E) Sound toggle checkbox at top-right -->
+        <label id="flappySoundToggleLabel" style="position: absolute; top: 0; right: 0; display: flex; align-items: center; font-size: 13px; opacity: 0.9; cursor: pointer;">
+          <input type="checkbox" id="flappySoundCheckbox" style="margin-right: 6px;">
+          Mute Flappy sound
+        </label>
+      </div>
       <canvas id="flappyCanvas" width="320" height="480"></canvas>
       <div style="margin-top:8px">
         <button id="flappySoundToggle" style="margin-right:8px">🔊 Sound On</button>
@@ -739,8 +746,8 @@ function activeDuration(session){
 
 /* ------------------ FLAGS/TIMERS ------------------ */
 let sessionActive=false, paused=false;
-let rtTimer=null, autoTimer=null, tickId=null, timeblockTickId=null;
-function stopAllTimers(){ if(tickId){ clearInterval(tickId); tickId=null; } if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; } if(autoTimer){ clearTimeout(autoTimer); autoTimer=null; } if(timeblockTickId){ cancelAnimationFrame(timeblockTickId); timeblockTickId=null; }
+let rtTimer=null, autoTimer=null, tickId=null, timeblockTickId=null, breakModalTimer=null;
+function stopAllTimers(){ if(tickId){ clearInterval(tickId); tickId=null; } if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; } if(autoTimer){ clearTimeout(autoTimer); autoTimer=null; } if(timeblockTickId){ cancelAnimationFrame(timeblockTickId); timeblockTickId=null; } if(breakModalTimer){ clearInterval(breakModalTimer); breakModalTimer=null; }
 
 /* one-shot suppression so strict modal doesn't appear right after specials */
 }
@@ -817,6 +824,12 @@ function beginTimeBlockBreak() {
   tb.breakActive = true;
   tb.breakEndsAt = Date.now() + 60_000;
   showFlappyModal({ countdown: tb.breakEndsAt }); // open modal; show 60s countdown; inputs in trainer disabled
+  
+  // Start break modal timer that checks every 250ms
+  if (breakModalTimer) clearInterval(breakModalTimer);
+  breakModalTimer = setInterval(() => {
+    maybeCloseBreakModal();
+  }, 250);
   
   // Log TimeBlock completion
   logTimeBlockOobData({ 
@@ -915,8 +928,9 @@ function updateTimeBlockBreakUI() {
     }
     breakMessage.textContent = `TimeBlock break: ${fmtMMSS(remaining)} remaining`;
     
-    // Show "Play again" option if game is not running
-    if (!running) {
+    // Show "Play again" option if game is not running and no crash overlay is shown
+    const crashOverlay = flappyModal.querySelector('#flappyCrashOverlay');
+    if (!running && !crashOverlay) {
       let playAgainBtn = flappyModal.querySelector('#playAgainBtn');
       if (!playAgainBtn) {
         playAgainBtn = document.createElement('button');
@@ -924,7 +938,7 @@ function updateTimeBlockBreakUI() {
         playAgainBtn.textContent = 'Play again';
         playAgainBtn.style.cssText = 'margin-right: 8px;';
         const closeBtn = flappyModal.querySelector('#flappyClose');
-        if (closeBtn) {
+        if (closeBtn && closeBtn.parentNode) {
           closeBtn.parentNode.insertBefore(playAgainBtn, closeBtn);
         }
         playAgainBtn.onclick = () => {
@@ -933,6 +947,10 @@ function updateTimeBlockBreakUI() {
           flappyRAF = requestAnimationFrame(step);
         };
       }
+    } else if (running) {
+      // Remove play again button if game is running
+      const playAgainBtn = flappyModal.querySelector('#playAgainBtn');
+      if (playAgainBtn) playAgainBtn.remove();
     }
   }
 }
@@ -984,6 +1002,61 @@ function endTimeBlockBreakAndCloseModal() {
     safe('btnPause', el=> el.textContent='⏸ Pause');
     text('promptPill','TimeBlock break over — press Play to continue');
   }
+}
+
+// B) Countdown governs closure, not game state
+function maybeCloseBreakModal() {
+  if (!state.timeblock.breakActive || !state.timeblock.breakEndsAt) return;
+  
+  if (Date.now() >= state.timeblock.breakEndsAt) {
+    // Stop the break modal timer
+    if (breakModalTimer) {
+      clearInterval(breakModalTimer);
+      breakModalTimer = null;
+    }
+    
+    // Hard close regardless of current game state
+    closeFlappyModal();
+    // end break
+    state.timeblock.breakActive = false;
+    state.timeblock.activeMs = 0;
+    state.timeblock.breaksCompletedToday++;
+    // resume training if <5 TimeBlocks; otherwise end day/lockout
+    if (state.timeblock.breaksCompletedToday < 5) {
+      state.timeblock.running = true;
+      state.timeblock.startedAt = performance.now();
+    } else {
+      endDayAndLockout();
+    }
+    save();
+    
+    // Resume training if session is active
+    if (sessionActive && paused) {
+      pauseEnd();
+      safe('btnPause', el=> el.textContent='⏸ Pause');
+      text('promptPill','TimeBlock break over — press Play to continue');
+    }
+  }
+}
+
+function closeFlappyModal() {
+  running = false; 
+  cancelAnimationFrame(flappyRAF); 
+  byId('flappyModal').style.display = 'none'; 
+  detachFlappyControls();
+  
+  if (score > (state.flappyHighScore || 0)) { 
+    state.flappyHighScore = score; 
+    save(); 
+  }
+  
+  // Remove break message if it exists
+  const breakMessage = byId('timeBlockBreakMessage');
+  if (breakMessage) breakMessage.remove();
+  
+  // Remove crash overlay if it exists
+  const crashOverlay = byId('flappyCrashOverlay');
+  if (crashOverlay) crashOverlay.remove();
 }
 
 /* ------------------ SANITY ------------------ */
@@ -2750,6 +2823,33 @@ function openFlappyModal(){
     soundToggle.textContent = state.flappyMuted ? '🔇 Sound Off' : '🔊 Sound On';
   }
   
+  // E) Setup sound toggle checkbox
+  const soundCheckbox = byId('flappySoundCheckbox');
+  if (soundCheckbox) {
+    soundCheckbox.checked = state.flappyMuted;
+    soundCheckbox.onchange = () => {
+      state.flappyMuted = soundCheckbox.checked;
+      save();
+      // Update button text too
+      if (soundToggle) {
+        soundToggle.textContent = state.flappyMuted ? '🔇 Sound Off' : '🔊 Sound On';
+      }
+    };
+  }
+  
+  // C) Hide close button and prevent ESC/backdrop clicks during countdown
+  const closeBtn = byId('flappyClose');
+  if (state.timeblock?.breakActive && state.timeblock?.breakEndsAt) {
+    // During break countdown - hide close button and disable modal close
+    if (closeBtn) closeBtn.style.display = 'none';
+    byId('flappyModal').style.pointerEvents = 'none'; // Disable backdrop clicks
+    byId('flappyModal').querySelector('.card').style.pointerEvents = 'auto'; // Re-enable card clicks
+  } else {
+    // Normal flappy (lockout) - show close button
+    if (closeBtn) closeBtn.style.display = 'inline-block';
+    byId('flappyModal').style.pointerEvents = 'auto';
+  }
+  
   // Update description based on context
   if (description) {
     if (state.timeblock?.breakActive || isLocked()) {
@@ -2760,6 +2860,118 @@ function openFlappyModal(){
   }
 }
 /* D) Removed startFlappyReward() - Flappy only opens from TimeBlock breaks */
+
+// A) Decouple game end from modal close - show overlay during TimeBlock breaks
+function onFlappyLose() {
+  running = false; // Stop the game
+  
+  // Call maybeCloseBreakModal when a flappy round ends
+  maybeCloseBreakModal();
+  
+  // If we're in a TimeBlock break, show crash overlay instead of closing modal
+  if (state.timeblock.breakActive && state.timeblock.breakEndsAt) {
+    const now = Date.now();
+    const remaining = Math.max(0, state.timeblock.breakEndsAt - now);
+    
+    if (remaining > 0) {
+      // Show crash overlay with remaining time
+      showFlappyCrashOverlay(remaining);
+      return; // Don't close the modal
+    }
+  }
+  
+  // Not in a break or break time is up - close normally
+  closeFlappy(true);
+}
+
+function showFlappyCrashOverlay(remaining) {
+  const flappyModal = byId('flappyModal');
+  if (!flappyModal || flappyModal.style.display !== 'flex') return;
+  
+  // Remove existing crash overlay if any
+  const existingOverlay = flappyModal.querySelector('#flappyCrashOverlay');
+  if (existingOverlay) existingOverlay.remove();
+  
+  // Create crash overlay
+  const overlay = document.createElement('div');
+  overlay.id = 'flappyCrashOverlay';
+  overlay.style.cssText = `
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(0,0,0,0.9);
+    color: var(--text);
+    padding: 20px;
+    border-radius: 12px;
+    text-align: center;
+    z-index: 100;
+  `;
+  
+  const timeText = document.createElement('p');
+  timeText.id = 'crashOverlayTime';
+  timeText.style.cssText = 'margin: 0 0 16px 0; font-weight: 600; color: var(--accent);';
+  
+  const buttonsDiv = document.createElement('div');
+  buttonsDiv.style.cssText = 'display: flex; gap: 12px; justify-content: center;';
+  
+  const playAgainBtn = document.createElement('button');
+  playAgainBtn.textContent = 'Play again';
+  playAgainBtn.style.cssText = 'padding: 8px 16px; border-radius: 8px; border: none; background: var(--good); color: var(--text); cursor: pointer;';
+  playAgainBtn.onclick = () => {
+    overlay.remove();
+    running = true;
+    resetFlappy();
+    flappyRAF = requestAnimationFrame(step);
+  };
+  
+  const justRestBtn = document.createElement('button');
+  justRestBtn.textContent = 'Just rest';
+  justRestBtn.style.cssText = 'padding: 8px 16px; border-radius: 8px; border: none; background: var(--muted); color: var(--text); cursor: pointer;';
+  justRestBtn.onclick = () => {
+    overlay.remove();
+  };
+  
+  // Function to update the time text
+  const updateTimeText = () => {
+    if (!state.timeblock.breakActive || !state.timeblock.breakEndsAt) {
+      overlay.remove();
+      return;
+    }
+    const now = Date.now();
+    const remaining = Math.max(0, state.timeblock.breakEndsAt - now);
+    if (remaining <= 0) {
+      overlay.remove();
+      return;
+    }
+    timeText.textContent = `You crashed! ⏳ ${fmtMMSS(remaining)} left`;
+  };
+  
+  // Initial update
+  updateTimeText();
+  
+  // Update every second
+  const updateTimer = setInterval(updateTimeText, 1000);
+  
+  // Clean up timer when overlay is removed
+  const originalRemove = overlay.remove;
+  overlay.remove = function() {
+    clearInterval(updateTimer);
+    originalRemove.call(this);
+  };
+  
+  buttonsDiv.appendChild(playAgainBtn);
+  buttonsDiv.appendChild(justRestBtn);
+  overlay.appendChild(timeText);
+  overlay.appendChild(buttonsDiv);
+  
+  const flappyCard = flappyModal.querySelector('.card');
+  if (flappyCard) {
+    flappyCard.style.position = 'relative';
+    flappyCard.appendChild(overlay);
+  }
+}
+
 function closeFlappy(){
   running=false; cancelAnimationFrame(flappyRAF); byId('flappyModal').style.display='none'; detachFlappyControls();
   if(score > (state.flappyHighScore||0)){ state.flappyHighScore = score; save(); }
@@ -2841,8 +3053,8 @@ function step(ts){
   for(const p of pipes){ if(!p.passed && p.x + FLAPPY.width < bird.x){ p.passed = true; score++; progressiveDifficulty(); text('flappyScore',`Score: ${score} • Best: ${state.flappyHighScore||0}`); } }
   pipes = pipes.filter(p=> p.x + FLAPPY.width > 0);
   fCtx.clearRect(0,0,cnv.width,cnv.height); drawPipes(); drawBird();
-  if(bird.y < 0 || bird.y > cnv.height){ return closeFlappy(true); }
-  for(const p of pipes){ if(bird.x+10>p.x && bird.x-10<p.x+FLAPPY.width){ const topH=p.gapY-FLAPPY.gap/2, bottomY=p.gapY+FLAPPY.gap/2; if(bird.y-10<topH || bird.y+10>bottomY){ return closeFlappy(true); } } }
+  if(bird.y < 0 || bird.y > cnv.height){ return onFlappyLose(); }
+  for(const p of pipes){ if(bird.x+10>p.x && bird.x-10<p.x+FLAPPY.width){ const topH=p.gapY-FLAPPY.gap/2, bottomY=p.gapY+FLAPPY.gap/2; if(bird.y-10<topH || bird.y+10>bottomY){ return onFlappyLose(); } } }
   flappyRAF = requestAnimationFrame(step);
 }
 let _flHandlers=null;
@@ -2851,8 +3063,21 @@ function attachFlappyControls(){
   const startOrFlap = () => { if(!running){ running=true; resetFlappy(); flappyRAF=requestAnimationFrame(step); } else { flap(); } };
   const onCanvasClick  = (e)=>{ e.preventDefault(); startOrFlap(); };
   const onTouchStart   = (e)=>{ e.preventDefault(); startOrFlap(); };
-  const onKey          = (e)=>{ if(e.code==='Space'){ e.preventDefault(); startOrFlap(); } };
-  const onClose        = ()=> closeFlappy(false);
+  const onKey          = (e)=>{ 
+    if(e.code==='Space'){ e.preventDefault(); startOrFlap(); } 
+    // C) Prevent ESC from closing modal during break countdown
+    if(e.code==='Escape' && state.timeblock?.breakActive && state.timeblock?.breakEndsAt) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  };
+  const onClose        = ()=> {
+    // C) Only allow manual close if not during break countdown
+    if (state.timeblock?.breakActive && state.timeblock?.breakEndsAt) {
+      return; // Ignore close attempts during break
+    }
+    closeFlappy(false);
+  };
   cnv.addEventListener('click', onCanvasClick);
   cnv.addEventListener('touchstart', onTouchStart, { passive:false });
   window.addEventListener('keydown', onKey);
@@ -2861,6 +3086,9 @@ function attachFlappyControls(){
     state.flappyMuted = !state.flappyMuted;
     save();
     el.textContent = state.flappyMuted ? '🔇 Sound Off' : '🔊 Sound On';
+    // Update checkbox too
+    const checkbox = byId('flappySoundCheckbox');
+    if (checkbox) checkbox.checked = state.flappyMuted;
   });
   _flHandlers={onCanvasClick,onTouchStart,onKey,onClose};
 }
