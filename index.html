@@ -281,6 +281,7 @@
       <span class="pill" id="delayInfo">RT limit: 1183ms • Delay: 1000ms</span>
       <span class="pill" id="blockTimeInfo">1/5 0:00/6:00</span>
       <span class="pill" id="timerInfo">Time left: 30:00</span>
+      <span class="pill" id="oobStatusPill">OOB 15% | max OOB-in-a-row 0</span>
     </div>
     <div id="barControls">
       <button id="btnPlay">▶ Play</button>
@@ -575,10 +576,20 @@ try{
     blockStartTime: null,
     inBreak: false,
     breakStartTime: null,
-    totalBlocks: 25
+    totalBlocks: 25,
+    oobController: {
+      targetOobPct: 15,
+      lastAdaptTimeBlock: 0,
+      last60InBounds: [],
+      recentOobTrials: [],
+      healthCheckActive: false,
+      healthCheckEndTimeBlock: 0,
+      globalTimeBlockIndex: 0,
+      oobSeries: []
+    }
   };
 } catch(e){
-  state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO, currentBlock: 1, blockStartTime: null, inBreak: false, breakStartTime: null, totalBlocks: 25 };
+  state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO, currentBlock: 1, blockStartTime: null, inBreak: false, breakStartTime: null, totalBlocks: 25, oobController: { targetOobPct: 15, lastAdaptTimeBlock: 0, last60InBounds: [], recentOobTrials: [], healthCheckActive: false, healthCheckEndTimeBlock: 0, globalTimeBlockIndex: 0, oobSeries: [] } };
 }
 // Migration for audioType
 if (!state.audioType) {
@@ -607,6 +618,20 @@ if (!state.theme) {
 // Migration for flappySoundEnabled
 if (state.flappySoundEnabled === undefined) {
   state.flappySoundEnabled = true;
+  save();
+}
+// Migration for oobController
+if (!state.oobController) {
+  state.oobController = {
+    targetOobPct: 15,
+    lastAdaptTimeBlock: 0,
+    last60InBounds: [],
+    recentOobTrials: [],
+    healthCheckActive: false,
+    healthCheckEndTimeBlock: 0,
+    globalTimeBlockIndex: 0,
+    oobSeries: []
+  };
   save();
 }
 
@@ -910,6 +935,160 @@ function currentOctaves(){
 function rand(a){ return a[Math.floor(Math.random()*a.length)]; }
 function pcLabel(pc){ return PC_LABEL[pc] || pc; }
 
+/* ------------------ ADAPTIVE OOB CONTROLLER ------------------ */
+function updateOobController(trial) {
+  const oob = state.oobController;
+  
+  // Update rolling window for in-bounds trials only
+  if (!trial.oob && !trial.timeout && trial.guess !== null) {
+    oob.last60InBounds.push({
+      correct: trial.correct,
+      time: trial.time
+    });
+    // Keep only last 60
+    if (oob.last60InBounds.length > 60) {
+      oob.last60InBounds.shift();
+    }
+  }
+  
+  // Track recent OOB trials for streak prevention
+  if (trial.oob) {
+    oob.recentOobTrials.push({
+      correct: trial.correct,
+      time: trial.time
+    });
+    // Keep only last 10 for streak tracking
+    if (oob.recentOobTrials.length > 10) {
+      oob.recentOobTrials.shift();
+    }
+  } else {
+    // Reset streak on in-bounds trial
+    oob.recentOobTrials = [];
+  }
+  
+  save();
+}
+
+function getAcc60() {
+  const oob = state.oobController;
+  if (oob.last60InBounds.length === 0) return 0;
+  const correct = oob.last60InBounds.filter(t => t.correct).length;
+  return correct / oob.last60InBounds.length;
+}
+
+function adaptOobTarget() {
+  const oob = state.oobController;
+  
+  // Only adapt at boundary after every 3 TimeBlocks
+  const timeBlocksSinceLastAdapt = oob.globalTimeBlockIndex - oob.lastAdaptTimeBlock;
+  if (timeBlocksSinceLastAdapt < 3) return;
+  
+  const acc60 = getAcc60();
+  
+  // Adjust target OOB%
+  if (acc60 > 0.85) {
+    oob.targetOobPct = Math.max(5, oob.targetOobPct - 3);
+  } else if (acc60 < 0.70) {
+    oob.targetOobPct = Math.min(35, oob.targetOobPct + 3);
+  }
+  // Else hold current target
+  
+  oob.lastAdaptTimeBlock = oob.globalTimeBlockIndex;
+  save();
+}
+
+function updateOobHealthCheck() {
+  const oob = state.oobController;
+  
+  // Check if health check should end
+  if (oob.healthCheckActive && oob.globalTimeBlockIndex >= oob.healthCheckEndTimeBlock) {
+    oob.healthCheckActive = false;
+    save();
+  }
+  
+  // Check if we need to start health check
+  if (!oob.healthCheckActive && oob.recentOobTrials.length >= 20) {
+    const last20OobTrials = oob.recentOobTrials.slice(-20);
+    const oobCorrect = last20OobTrials.filter(t => t.correct).length;
+    const oobAcc = oobCorrect / 20;
+    
+    if (oobAcc < 0.60) {
+      oob.healthCheckActive = true;
+      oob.healthCheckEndTimeBlock = oob.globalTimeBlockIndex + 2;
+      save();
+    }
+  }
+}
+
+function shouldBeOobTrial() {
+  const oob = state.oobController;
+  
+  // Check streak guard - never >2 OOB in a row
+  if (oob.recentOobTrials.length >= 2) {
+    return false; // Force in-bounds trial
+  }
+  
+  // Determine effective OOB rate
+  let effectiveRate = oob.targetOobPct / 100;
+  
+  // Apply health check cap
+  if (oob.healthCheckActive) {
+    effectiveRate = Math.min(effectiveRate, 0.12); // Cap to 12%
+  }
+  
+  return Math.random() < effectiveRate;
+}
+
+function getOobCandidates(set, preferFarFromTrained = false) {
+  const baseOobs = currentOOBs(set);
+  
+  if (!preferFarFromTrained) {
+    return baseOobs;
+  }
+  
+  // For health check: prefer OOB chroma far from trained notes
+  const trainedPcs = trainedSet(set);
+  const trainedIndices = trainedPcs.map(pc => PC2I[pc]);
+  
+  const farOobs = baseOobs.filter(pc => {
+    const pcIndex = PC2I[pc];
+    return !trainedIndices.some(trainedIdx => {
+      const dist = Math.min(
+        Math.abs(pcIndex - trainedIdx),
+        12 - Math.abs(pcIndex - trainedIdx)
+      );
+      return dist <= 1; // Avoid ±1 semitone
+    });
+  });
+  
+  return farOobs.length > 0 ? farOobs : baseOobs;
+}
+
+function logTimeBlockOobData() {
+  const oob = state.oobController;
+  
+  // Calculate observed OOB% for this TimeBlock
+  const timeBlockStart = Date.now() - (6 * 60 * 1000); // 6 minutes ago
+  const recentTrials = state.trials.filter(t => t.time >= timeBlockStart);
+  const oobTrials = recentTrials.filter(t => t.oob);
+  const observedPct = recentTrials.length > 0 ? (oobTrials.length / recentTrials.length) * 100 : 0;
+  
+  oob.oobSeries.push({
+    globalTimeBlockIndex: oob.globalTimeBlockIndex,
+    targetPct: oob.targetOobPct,
+    last60Acc: getAcc60(),
+    observedPctThisBlock: observedPct
+  });
+  
+  save();
+}
+
+function updateOobStatusPill() {
+  const oob = state.oobController;
+  const maxInARow = Math.min(2, oob.recentOobTrials.length);
+  text('oobStatusPill', `OOB ${oob.targetOobPct}% | max OOB-in-a-row ${maxInARow}`);
+}
+
 function updateLevelUI(){
   const set=setFromIndex(state.levelIndex), block=blockFromIndex(state.levelIndex);
   text('setInfo', `Set ${set} / 12`);
@@ -924,6 +1103,9 @@ function updateLevelUI(){
   
   // Update block time display with current/total format
   updateBlockTimeDisplay();
+  
+  // Update OOB status pill
+  updateOobStatusPill();
 }
 
 function updateBlockTimeDisplay() {
@@ -1387,7 +1569,7 @@ function guess(pc){
   if(!currentNote){ return; }
   if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
   const ok = (!isOOBTrial && pc === truePc);
-  recordTrial(pc, ok, false, false);
+  recordTrial(pc, ok, false, isOOBTrial);
   feedback(ok, ok ? undefined : (isOOBTrial ? 'Incorrect — Out of Bounds' : `Incorrect — ${pcLabel(truePc)}`));
   currentNote = null; // Clear currentNote to prevent repeated guesses
   advanceCheck();
@@ -1425,11 +1607,17 @@ async function nextTrial(forceNew=false){
     if(!currentNote || forceNew){
       const set = setFromIndex(state.levelIndex);
       const usable = trainedSet(set);
-      const oobs = currentOOBs(set);
-      isOOBTrial = oobs.length && Math.random() < OOB_RATE;
+      const oobs = getOobCandidates(set, state.oobController.healthCheckActive);
+      isOOBTrial = oobs.length && shouldBeOobTrial();
       const pc = isOOBTrial ? rand(oobs) : rand(usable);
       truePc = pc;
-      currentNote = `${pc}${rand(currentOctaves())}`;
+      // For OOB trials, mirror the current octave distribution
+      if (isOOBTrial) {
+        // Use same octave distribution as in-bounds trials
+        currentNote = `${pc}${rand(currentOctaves())}`;
+      } else {
+        currentNote = `${pc}${rand(currentOctaves())}`;
+      }
     }
     await playSample(currentNote);
     if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
@@ -1444,7 +1632,7 @@ async function nextTrial(forceNew=false){
 function handleTimeout(){
   if(!sessionActive || paused || special) return;
   if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
-  recordTrial(null,false,true);
+  recordTrial(null,false,true, isOOBTrial);
   feedback(false, isOOBTrial ? 'Incorrect — Out of Bounds' : `Incorrect — ${pcLabel(truePc)}`);
   advanceCheck(); scheduleAuto();
 }
@@ -1473,7 +1661,15 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
   const block = blockFromIndex(state.levelIndex);
   if(block >= 21){ if(ok){ state.testFailStreak=0; hideSuggestBanner(); suggestedRestartFlag=false; } else { state.testFailStreak=(state.testFailStreak||0)+1; } }
   else { state.testFailStreak=0; hideSuggestBanner(); suggestedRestartFlag=false; }
-  state.trials.push({note:currentNote, pc:truePc, guess:guessLabel, correct:ok, timeout, oob:oobChosen, set:setFromIndex(state.levelIndex), block:block, time:Date.now()});
+  
+  const trial = {note:currentNote, pc:truePc, guess:guessLabel, correct:ok, timeout, oob:oobChosen, set:setFromIndex(state.levelIndex), block:block, time:Date.now()};
+  state.trials.push(trial);
+  
+  // Update OOB controller with this trial
+  updateOobController(trial);
+  updateOobHealthCheck();
+  updateOobStatusPill();
+  
   save(); updateLevelUI(); try{ drawChart(); }catch(_){}; 
   if(block >= 21 && !ok) maybeSuggestRestart();
 }
@@ -1686,6 +1882,12 @@ function checkBlockCompletion() {
   
   const blockTime = getBlockActiveTime();
   if (blockTime >= BLOCK_DURATION_MS) {
+    // TimeBlock completed - update OOB controller
+    state.oobController.globalTimeBlockIndex++;
+    logTimeBlockOobData();
+    adaptOobTarget();
+    updateOobStatusPill();
+    
     const BLOCKS_PER_SET = 5;
     const currentBlockInSet = ((state.currentBlock - 1) % BLOCKS_PER_SET) + 1;
     
@@ -2271,7 +2473,7 @@ function forceStartScreen(){
   if(input){ input.value=''; input.focus(); }
 }
 function resetInMemoryStateToDefaults(){
-  state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null };
+  state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, oobController: { targetOobPct: 15, lastAdaptTimeBlock: 0, last60InBounds: [], recentOobTrials: [], healthCheckActive: false, healthCheckEndTimeBlock: 0, globalTimeBlockIndex: 0, oobSeries: [] } };
   save();
 }
 function doFactoryReset(){
