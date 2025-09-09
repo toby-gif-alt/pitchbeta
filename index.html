@@ -589,7 +589,7 @@ try{
     }
   };
 } catch(e){
-  state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO, currentBlock: 1, blockStartTime: null, inBreak: false, breakStartTime: null, totalBlocks: 25, oobController: { targetOobPct: 15, lastAdaptTimeBlock: 0, last60InBounds: [], recentOobTrials: [], healthCheckActive: false, healthCheckEndTimeBlock: 0, globalTimeBlockIndex: 0, oobSeries: [] }, oobTargetPct: 0.15, oobStreak: 0, inBoundsLast60: [], trainingBlockIndex: 1, trainingBlockTrials: 0, currentBlockOctaveCount: {3: 0, 4: 0, 5: 0}, oobHealthCheckActive: false, oobHealthCheckEndBlock: 0 };
+  state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO, currentBlock: 1, blockStartTime: null, inBreak: false, breakStartTime: null, totalBlocks: 25, oobController: { targetOobPct: 15, lastAdaptTimeBlock: 0, last60InBounds: [], recentOobTrials: [], healthCheckActive: false, healthCheckEndTimeBlock: 0, globalTimeBlockIndex: 0, oobSeries: [] }, inBoundsLast60: [], trainingBlockIndex: 1, trainingBlockTrials: 0, currentBlockOctaveCount: {3: 0, 4: 0, 5: 0}, oobHealthCheckActive: false, oobHealthCheckEndBlock: 0, oob: { targetPct: 0.15, streak: 0, blockTarget: 0, plan: [], planOctaveMix: [], currentBlockIndex: 0, currentTrialInBlock: 0 } };
 }
 // Migration for audioType
 if (!state.audioType) {
@@ -644,6 +644,23 @@ if (typeof state.oobTargetPct === 'undefined') {
   state.currentBlockOctaveCount = {3: 0, 4: 0, 5: 0};
   state.oobHealthCheckActive = false;
   state.oobHealthCheckEndBlock = 0;
+  save();
+}
+
+// Migration for new OOB pre-planning state structure
+if (!state.oob) {
+  state.oob = {
+    targetPct: state.oobTargetPct || 0.15,  // Current adaptive target
+    streak: state.oobStreak || 0,           // Consecutive OOB trials scheduled
+    blockTarget: 0,                        // Frozen target for current block
+    plan: [],                              // Array of 20 booleans for current block
+    planOctaveMix: [],                     // Pre-computed octaves for planned OOB slots
+    currentBlockIndex: 0,                  // Track which block we're in
+    currentTrialInBlock: 0                 // Track which trial in current block (0-19)
+  };
+  // Clean up old state variables
+  delete state.oobTargetPct;
+  delete state.oobStreak;
   save();
 }
 
@@ -969,12 +986,15 @@ function updateTrainingBlockOobController(trial) {
     }
   }
   
-  // Update OOB streak
+  // Update OOB streak using new state structure
   if (trial.oob) {
-    state.oobStreak++;
+    state.oob.streak++;
   } else {
-    state.oobStreak = 0;  // Reset streak on in-bounds trial
+    state.oob.streak = 0;  // Reset streak on in-bounds trial
   }
+  
+  // Advance trial index within current block
+  state.oob.currentTrialInBlock++;
   
   save();
 }
@@ -991,11 +1011,11 @@ function adaptOobTargetAtTrainingBlockBoundary(blockIndex) {
   
   const acc60 = getTrainingBlockAcc60();
   
-  // Adjust target OOB%
+  // Adjust target OOB% using new state structure
   if (acc60 > 0.85) {
-    state.oobTargetPct = Math.max(0.05, state.oobTargetPct - 0.03);
+    state.oob.targetPct = Math.max(0.05, state.oob.targetPct - 0.03);
   } else if (acc60 < 0.70) {
-    state.oobTargetPct = Math.min(0.35, state.oobTargetPct + 0.03);
+    state.oob.targetPct = Math.min(0.35, state.oob.targetPct + 0.03);
   }
   // Else hold current target
   
@@ -1033,55 +1053,169 @@ function updateOobHealthCheckTrainingBlock() {
   }
 }
 
-function shouldBeOobTrialNew() {
-  // Check streak guard - never >=2 OOB in a row
-  if (state.oobStreak >= 2) {
-    return false; // Force in-bounds trial
-  }
+/* ------------------ NEW OOB PRE-PLANNING SYSTEM ------------------ */
+
+function initializeOobBlockPlan() {
+  // Freeze the current target for this entire 20-trial Training Block
+  state.oob.blockTarget = state.oob.targetPct;
   
-  // Determine effective OOB rate
-  let effectiveRate = state.oobTargetPct;
-  
-  // Apply health check cap
+  // Apply health check cap if active
+  let effectiveTarget = state.oob.blockTarget;
   if (state.oobHealthCheckActive) {
-    effectiveRate = Math.min(effectiveRate, 0.12); // Cap to 12%
+    effectiveTarget = Math.min(effectiveTarget, 0.12); // Cap to 12%
   }
   
-  return Math.random() < effectiveRate;
+  // Compute planned OOB count for this block
+  const plannedOOB = Math.round(effectiveTarget * 20);
+  
+  // Build the plan array with even distribution and streak guard
+  state.oob.plan = createOobPlan(plannedOOB);
+  
+  // Pre-compute octave mix for this block based on current in-bounds octave proportions
+  state.oob.planOctaveMix = createOctaveMixForBlock();
+  
+  // Reset block tracking
+  state.oob.currentTrialInBlock = 0;
+  
+  save();
+}
+
+function createOobPlan(plannedOOB) {
+  // Create array of 20 false values
+  const plan = new Array(20).fill(false);
+  
+  // If no OOB planned, return all false
+  if (plannedOOB === 0) {
+    return plan;
+  }
+  
+  // Distribute OOB trials evenly across the 20 slots
+  // Use even spacing to avoid clustering
+  const spacing = 20 / plannedOOB;
+  
+  let placed = 0;
+  for (let i = 0; i < plannedOOB && placed < plannedOOB; i++) {
+    let targetSlot = Math.floor(i * spacing);
+    
+    // Find next available slot that doesn't violate 2-in-a-row rule
+    while (targetSlot < 20 && placed < plannedOOB) {
+      if (canPlaceOobAt(plan, targetSlot)) {
+        plan[targetSlot] = true;
+        placed++;
+        break;
+      }
+      targetSlot++;
+    }
+  }
+  
+  // If we couldn't place all planned OOB due to spacing constraints,
+  // try to fill remaining slots from the end, respecting the 2-in-a-row rule
+  for (let slot = 19; slot >= 0 && placed < plannedOOB; slot--) {
+    if (!plan[slot] && canPlaceOobAt(plan, slot)) {
+      plan[slot] = true;
+      placed++;
+    }
+  }
+  
+  return plan;
+}
+
+function canPlaceOobAt(plan, slot) {
+  // Check if placing OOB at this slot would create >2 in a row
+  
+  // Count consecutive OOB before this slot
+  let beforeCount = 0;
+  for (let i = slot - 1; i >= 0 && plan[i]; i--) {
+    beforeCount++;
+  }
+  
+  // Count consecutive OOB after this slot
+  let afterCount = 0;
+  for (let i = slot + 1; i < 20 && plan[i]; i++) {
+    afterCount++;
+  }
+  
+  // Check if placing here would create a streak > 2
+  const totalStreak = beforeCount + 1 + afterCount;
+  return totalStreak <= 2;
+}
+
+function createOctaveMixForBlock() {
+  // Get octave distribution from current training block
+  const totalInBounds = state.currentBlockOctaveCount[3] + state.currentBlockOctaveCount[4] + state.currentBlockOctaveCount[5];
+  
+  // If no in-bounds trials yet in this block, use equal distribution
+  if (totalInBounds === 0) {
+    const availableOctaves = currentOctaves();
+    return availableOctaves.map(oct => ({ octave: oct, weight: 1.0 / availableOctaves.length }));
+  }
+  
+  // Calculate proportions and only include octaves that have appeared
+  const mix = [];
+  const availableOctaves = currentOctaves();
+  
+  for (const octave of availableOctaves) {
+    const count = state.currentBlockOctaveCount[octave] || 0;
+    if (count > 0) {  // Only include octaves that haven't appeared in-bounds yet
+      mix.push({ octave: octave, weight: count / totalInBounds });
+    }
+  }
+  
+  // If no octaves have appeared yet, fall back to equal distribution
+  if (mix.length === 0) {
+    return availableOctaves.map(oct => ({ octave: oct, weight: 1.0 / availableOctaves.length }));
+  }
+  
+  return mix;
+}
+
+function sampleOctaveFromMix(octaveMix) {
+  if (octaveMix.length === 0) {
+    return rand(currentOctaves());
+  }
+  
+  const randomValue = Math.random();
+  let cumulative = 0;
+  
+  for (const item of octaveMix) {
+    cumulative += item.weight;
+    if (randomValue <= cumulative) {
+      return item.octave;
+    }
+  }
+  
+  // Fallback to last item
+  return octaveMix[octaveMix.length - 1].octave;
+}
+
+function shouldBeOobTrialNew() {
+  // A) Enforce streak guard at scheduling time
+  if (state.oob.streak >= 2) {
+    return false; // FORCE in-bounds trial
+  }
+  
+  // B) Use pre-planned OOB slots
+  // Check if we're at the start of a new block and need to initialize plan
+  if (state.oob.currentTrialInBlock === 0 || state.oob.plan.length === 0) {
+    initializeOobBlockPlan();
+  }
+  
+  // Get the planned decision for this trial position
+  const trialIndex = state.oob.currentTrialInBlock;
+  if (trialIndex >= 20) {
+    // Safety check - shouldn't happen, but if it does, return false
+    return false;
+  }
+  
+  return state.oob.plan[trialIndex] === true;
 }
 
 function getOobCandidatesWithMirroring(set) {
   const baseOobs = currentOOBs(set);
   if (baseOobs.length === 0) return [];
   
-  // Get octave distribution from current training block
-  const totalInBounds = state.currentBlockOctaveCount[3] + state.currentBlockOctaveCount[4] + state.currentBlockOctaveCount[5];
-  if (totalInBounds === 0) {
-    // No in-bounds trials yet in this block, use current octaves
-    return baseOobs.map(pc => `${pc}${rand(currentOctaves())}`).map(note => note.slice(0, -1)); // Return just PC
-  }
-  
-  // Calculate proportions
-  const octave3Prop = state.currentBlockOctaveCount[3] / totalInBounds;
-  const octave4Prop = state.currentBlockOctaveCount[4] / totalInBounds;  
-  const octave5Prop = state.currentBlockOctaveCount[5] / totalInBounds;
-  
-  // Choose octave based on proportions
-  const rand_val = Math.random();
-  let targetOctave;
-  if (rand_val < octave3Prop) {
-    targetOctave = 3;
-  } else if (rand_val < octave3Prop + octave4Prop) {
-    targetOctave = 4;
-  } else {
-    targetOctave = 5;
-  }
-  
-  // Only use octaves that have been introduced
-  const availableOctaves = currentOctaves();
-  if (!availableOctaves.includes(targetOctave)) {
-    targetOctave = rand(availableOctaves);
-  }
+  // Use pre-computed octave mix for this trial
+  const targetOctave = sampleOctaveFromMix(state.oob.planOctaveMix);
   
   // For health check: prefer OOB chroma far from trained notes
   if (state.oobHealthCheckActive) {
@@ -1113,24 +1247,26 @@ function logTrainingBlockOobData(blockIndex, adaptBoundary) {
     t.block === blockFromIndex(state.levelIndex)
   );
   const oobTrials = blockTrials.filter(t => t.oob);
-  const observedPct = blockTrials.length > 0 ? (oobTrials.length / blockTrials.length) * 100 : 0;
+  const observedPct = blockTrials.length > 0 ? (oobTrials.length / blockTrials.length) : 0;
   
   // Push to qa.oobSeries (note: this creates qa object if it doesn't exist)
   if (!window.qa) window.qa = {};
   if (!window.qa.oobSeries) window.qa.oobSeries = [];
   
+  // C) Use frozen block target in logging as specified
   window.qa.oobSeries.push({
+    setIndex: setFromIndex(state.levelIndex),
     blockIndex: blockIndex,
     adaptBoundary: adaptBoundary,
-    targetPct: state.oobTargetPct,
+    targetPct: state.oob.blockTarget,  // Use frozen-in-block value
     last60Acc: getTrainingBlockAcc60(),
     observedPctThisBlock: observedPct
   });
 }
 
 function updateOobStatusPillNew() {
-  const maxInARow = Math.min(state.oobStreak, 2);
-  const targetPctDisplay = Math.round(100 * state.oobTargetPct);
+  const maxInARow = Math.min(state.oob.streak, 2);
+  const targetPctDisplay = Math.round(100 * state.oob.targetPct);
   text('oobStatusPill', `OOB ${targetPctDisplay}% | max OOB-in-a-row ${maxInARow}`);
 }
 
@@ -1750,6 +1886,11 @@ function advanceCheck(){
   // Reset training block counters
   state.trainingBlockTrials = 0;
   state.currentBlockOctaveCount = {3: 0, 4: 0, 5: 0};
+  
+  // Reset OOB plan for next block
+  state.oob.currentTrialInBlock = 0;
+  state.oob.plan = [];
+  state.oob.planOctaveMix = [];
   
   // Show feedback for test blocks (21-24) at completion
   if(block >= 21) {
@@ -2532,7 +2673,7 @@ function forceStartScreen(){
   if(input){ input.value=''; input.focus(); }
 }
 function resetInMemoryStateToDefaults(){
-  state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, oobController: { targetOobPct: 15, lastAdaptTimeBlock: 0, last60InBounds: [], recentOobTrials: [], healthCheckActive: false, healthCheckEndTimeBlock: 0, globalTimeBlockIndex: 0, oobSeries: [] }, oobTargetPct: 0.15, oobStreak: 0, inBoundsLast60: [], trainingBlockIndex: 1, trainingBlockTrials: 0, currentBlockOctaveCount: {3: 0, 4: 0, 5: 0} };
+  state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, oobController: { targetOobPct: 15, lastAdaptTimeBlock: 0, last60InBounds: [], recentOobTrials: [], healthCheckActive: false, healthCheckEndTimeBlock: 0, globalTimeBlockIndex: 0, oobSeries: [] }, inBoundsLast60: [], trainingBlockIndex: 1, trainingBlockTrials: 0, currentBlockOctaveCount: {3: 0, 4: 0, 5: 0}, oob: { targetPct: 0.15, streak: 0, blockTarget: 0, plan: [], planOctaveMix: [], currentBlockIndex: 0, currentTrialInBlock: 0 } };
   save();
 }
 function doFactoryReset(){
