@@ -777,6 +777,17 @@ if (!state.confusionMatrix || !state.perfStats || typeof state.lastInBoundsPc ==
   save();
 }
 
+// Initialize confusion scheduler state for frozen block weights
+if (!state.conf) {
+  state.conf = {
+    blockWeights: {},           // Frozen weights for current 20-trial block
+    topPairAtBlockStart: null,  // Top confusion pair computed at block start
+    prevPc: null,               // Previous PC for anti-streak tracking
+    runLen: 0                   // Current run length for anti-streak
+  };
+  save();
+}
+
 // Apply theme on load
 applyTheme(state.theme);
 function save(){ try{ localStorage.setItem('apTrainer', JSON.stringify(state)); }catch(e){ report(e); } }
@@ -1654,7 +1665,62 @@ function updatePerfStats(pc, correct, rtMs) {
   stats.totalSeen++;
 }
 
-// Get top confusion pair from last ~200 in-bounds trials
+// Compute stats at block START and build frozen block weights
+function computeBlockWeightsAtStart() {
+  const set = setFromIndex(state.levelIndex);
+  const trainedPcs = trainedSet(set);
+  
+  // A) Compute perf stats from last 40 in-bounds trials
+  for (const pc of trainedPcs) {
+    const stats = state.perfStats[pc];
+    if (stats && stats.last40InBounds) {
+      const last40N = stats.last40InBounds.length;
+      const last40Acc = last40N > 0 ? 
+        stats.last40InBounds.filter(t => t.correct).length / last40N : 0;
+      stats.last40Acc = last40Acc;
+    }
+  }
+  
+  // A) Find topPair from last ~200 in-bounds trials
+  const topPair = getTopConfusionPair();
+  
+  // B) Build frozen block weights (only for currently trained PCs)
+  const weights = {};
+  for (const pc of trainedPcs) {
+    let w = 1.0; // Base weight
+    
+    // Weakness boost: if last40Acc < 0.80 → +0.5 (THIS WAS MISSING)
+    const stats = state.perfStats[pc];
+    if (stats && stats.last40Acc < 0.80) {
+      w += 0.5;
+    }
+    
+    // Top confusion boost: +0.5 to the TRUE pc of top confusion pair
+    if (topPair && topPair.true === pc) {
+      w += 0.5;
+    }
+    
+    // Floor: keep at least 0.5 weight
+    w = Math.max(w, 0.5);
+    weights[pc] = w;
+  }
+  
+  // Normalize to sum 1
+  const totalWeight = Object.values(weights).reduce((sum, w) => sum + w, 0);
+  if (totalWeight > 0) {
+    for (const pc of trainedPcs) {
+      weights[pc] = weights[pc] / totalWeight;
+    }
+  }
+  
+  // Store frozen weights and reset streak tracking
+  state.conf.blockWeights = weights;
+  state.conf.topPairAtBlockStart = topPair;
+  state.conf.prevPc = null;
+  state.conf.runLen = 0;
+  
+  save();
+}
 function getTopConfusionPair() {
   const last200InBounds = (state.trials || [])
     .filter(t => !t.oob && !t.timeout && t.guess !== null)
@@ -1696,97 +1762,106 @@ function getTopConfusionPair() {
   return maxCount > 0 ? {true: topTrue, wrong: topWrong, count: maxCount} : null;
 }
 
+// Sample next in-bounds trial using frozen weights + anti-streak ≤ 2
+function choosePcWithAntiStreak() {
+  const W = state.conf.blockWeights;
+  if (!W || Object.keys(W).length === 0) return null;
+  
+  // Helper: sample from discrete distribution
+  function sampleDiscrete(weights) {
+    const keys = Object.keys(weights);
+    const rand = Math.random();
+    let cumulative = 0;
+    for (const pc of keys) {
+      cumulative += weights[pc];
+      if (rand <= cumulative) return pc;
+    }
+    return keys[keys.length - 1]; // Fallback
+  }
+  
+  // Helper: sample excluding a specific PC
+  function sampleDiscreteExclude(weights, excludePc) {
+    const filtered = {};
+    let totalWeight = 0;
+    for (const pc in weights) {
+      if (pc !== excludePc) {
+        filtered[pc] = weights[pc];
+        totalWeight += weights[pc];
+      }
+    }
+    if (totalWeight === 0) return null;
+    
+    // Normalize and sample
+    for (const pc in filtered) {
+      filtered[pc] = filtered[pc] / totalWeight;
+    }
+    return sampleDiscrete(filtered);
+  }
+  
+  // Helper: find PC with highest weight excluding a specific PC
+  function argmaxKey(weights, scoreFn) {
+    let bestPc = null;
+    let bestScore = -Infinity;
+    for (const pc in weights) {
+      const score = scoreFn(pc);
+      if (score > bestScore) {
+        bestScore = score;
+        bestPc = pc;
+      }
+    }
+    return bestPc;
+  }
+  
+  let pc = sampleDiscrete(W); // Weighted pick
+  
+  if (pc === state.conf.prevPc && state.conf.runLen >= 2) {
+    // Try once excluding prevPc
+    pc = sampleDiscreteExclude(W, state.conf.prevPc) || pc;
+    if (pc === state.conf.prevPc) {
+      // Force change: pick the highest weight among PCs != prevPc
+      pc = argmaxKey(W, k => (k === state.conf.prevPc ? -Infinity : W[k]));
+    }
+  }
+  
+  // Update streak bookkeeping
+  if (pc === state.conf.prevPc) {
+    state.conf.runLen++;
+  } else {
+    state.conf.prevPc = pc;
+    state.conf.runLen = 1;
+  }
+  
+  return pc;
+}
+
 // Confusion-aware note selection for in-bounds trials
 function selectInBoundsNoteConfusionAware(usable) {
   if (!usable || usable.length === 0) return null;
   
   initializeConfusionTracking();
   
-  // Calculate weights for each trained PC
-  const weights = {};
-  const topConfusion = getTopConfusionPair();
-  
-  for (const pc of usable) {
-    // Base weight
-    weights[pc] = 1.0;
-    
-    // Weakness boost: if last40Acc < 0.80 → +0.5
-    const stats = state.perfStats[pc];
-    if (stats && stats.last40Acc < 0.80) {
-      weights[pc] += 0.5;
-    }
-    
-    // Top confusion boost: +0.5 to the TRUE pc of top confusion pair
-    if (topConfusion && topConfusion.true === pc) {
-      weights[pc] += 0.5;
-    }
-    
-    // Floor: keep at least 0.5 weight
-    weights[pc] = Math.max(0.5, weights[pc]);
+  // Check if we need to compute weights at the start of a new 20-trial TrainingBlock
+  if (state.trainingBlockTrials === 0 || !state.conf.blockWeights || Object.keys(state.conf.blockWeights).length === 0) {
+    computeBlockWeightsAtStart();
   }
   
-  // Normalize to probabilities
-  const totalWeight = Object.values(weights).reduce((sum, w) => sum + w, 0);
-  const probabilities = {};
-  for (const pc of usable) {
-    probabilities[pc] = weights[pc] / totalWeight;
-  }
-  
-  // Sample from the distribution
-  function sampleFromProbs(probs) {
-    const rand = Math.random();
-    let cumulative = 0;
-    for (const pc of usable) {
-      cumulative += probs[pc];
-      if (rand <= cumulative) return pc;
-    }
-    return usable[usable.length - 1]; // Fallback
-  }
-  
-  let selectedPc = sampleFromProbs(probabilities);
-  
-  // Anti-streak: if same as previous, re-sample once
-  if (selectedPc === state.lastInBoundsPc && usable.length > 1) {
-    selectedPc = sampleFromProbs(probabilities);
-  }
-  
-  return selectedPc;
+  // Use frozen block weights with anti-streak rule
+  return choosePcWithAntiStreak();
 }
 
 // Log confusion series data for completed training blocks
 function logConfusionSeriesData(blockIndex) {
   // Only log once per 20-trial training block (every block completion)
   
-  const set = setFromIndex(state.levelIndex);
-  const trainedPcs = trainedSet(set);
-  const topConfusion = getTopConfusionPair();
-  
-  // Calculate current weights for all trained PCs
-  const weights = {};
-  for (const pc of trainedPcs) {
-    weights[pc] = 1.0; // Base weight
-    
-    const stats = state.perfStats[pc];
-    if (stats && stats.last40Acc < 0.80) {
-      weights[pc] += 0.5; // Weakness boost
-    }
-    
-    if (topConfusion && topConfusion.true === pc) {
-      weights[pc] += 0.5; // Top confusion boost
-    }
-    
-    weights[pc] = Math.max(0.5, weights[pc]); // Floor
-  }
-  
   // Create qa object if needed
   if (!window.qa) window.qa = {};
   if (!window.qa.confSeries) window.qa.confSeries = [];
   
-  // Log the confusion series entry
+  // Log the confusion series entry using frozen weights
   window.qa.confSeries.push({
     blockIndex: blockIndex,
-    weights: weights,
-    topConfusion: topConfusion
+    weights: state.conf.blockWeights || {},
+    topConfusion: state.conf.topPairAtBlockStart
   });
 }
 
@@ -2666,9 +2741,8 @@ function recordTrial(trial) {
     state.lastInBoundsPc = truePc;
     
     // Add top confusion pair to trial record for logging
-    const topConfusion = getTopConfusionPair();
-    if (topConfusion) {
-      trialRecord.confTopPairAtTime = topConfusion;
+    if (state.conf.topPairAtBlockStart) {
+      trialRecord.confTopPairAtTime = state.conf.topPairAtBlockStart;
     }
   }
   
