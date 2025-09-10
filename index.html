@@ -4530,6 +4530,7 @@ function selectOctaveForInBounds(pc) {
       adjustedMix[oct] *= scaleFactor;
     }
     adjustedMix[centerOct] += biasAmount;
+    console.log(`🎵 Octave override for ${pc}: biasing toward center (${centerOct})`, adjustedMix);
   }
   
   // Sample from the adjusted mix
@@ -4539,11 +4540,13 @@ function selectOctaveForInBounds(pc) {
   for (const oct of state.oct.allowed) {
     cumulative += adjustedMix[oct] || 0;
     if (rand <= cumulative) {
+      console.log(`🎵 Selected octave ${oct} for in-bounds ${pc} (rand=${rand.toFixed(3)}, mix=${JSON.stringify(adjustedMix)})`);
       return oct;
     }
   }
   
   // Fallback to center octave
+  console.log(`🎵 Fallback to center octave ${state.oct.center} for ${pc}`);
   return state.oct.center;
 }
 
@@ -4561,11 +4564,13 @@ function selectOctaveForOOB(pc) {
   for (const oct of state.oct.allowed) {
     cumulative += mix[oct] || 0;
     if (rand <= cumulative) {
+      console.log(`🎵 OOB octave ${oct} for ${pc} (rand=${rand.toFixed(3)}, mirroring mix=${JSON.stringify(mix)})`);
       return oct;
     }
   }
   
   // Fallback
+  console.log(`🎵 OOB fallback to center octave ${state.oct.center} for ${pc}`);
   return state.oct.center;
 }
 
@@ -4576,10 +4581,12 @@ function onInBoundsGraded(trial) {
   // Add trial to current set tracking
   state.oct.inBoundsSinceSetStart.push(trial);
   
-  // Check window thresholds
   const inBoundsCount = state.oct.inBoundsSinceSetStart.length;
+  console.log(`🎯 In-bounds trial ${inBoundsCount} completed (set ${state.oct.setCounter + 1})`);
   
+  // Check window thresholds
   if (inBoundsCount === 12 || inBoundsCount === 16 || inBoundsCount === 20 || inBoundsCount === 24) {
+    console.log(`🎯 Window threshold reached: ${inBoundsCount} trials, evaluating performance...`);
     evaluateWindowsAndMaybeStep();
   }
 }
@@ -4669,7 +4676,7 @@ function evaluateWindowsAndMaybeStep() {
   
   // Log the decision
   if (toMix || isEndOfSet) {
-    state.oct.history.push({
+    const logEntry = {
       ts: Date.now(),
       set: state.oct.setCounter,
       event: eventType,
@@ -4679,7 +4686,13 @@ function evaluateWindowsAndMaybeStep() {
       sd: stats.sd,
       from: fromMix,
       to: toMix || fromMix
-    });
+    };
+    state.oct.history.push(logEntry);
+    
+    console.log(`🏆 Octave policy decision:`, logEntry);
+    if (toMix && JSON.stringify(fromMix) !== JSON.stringify(toMix)) {
+      console.log(`🎯 Mix changed from ${JSON.stringify(fromMix)} to ${JSON.stringify(toMix)}`);
+    }
   }
   
   // Update per-note overrides based on rolling performance
@@ -4760,6 +4773,47 @@ function updatePerNoteOverrides() {
     }
   }
 }
+
+/* ------------------ OCTAVE POLICY DEBUG HELPERS ------------------ */
+
+// Debug helper function - expose to global scope for console access
+window.debugOctavePolicy = function() {
+  if (!state.oct) {
+    console.log('❌ Octave policy not initialized');
+    return;
+  }
+  
+  const trials = state.oct.inBoundsSinceSetStart;
+  const octaveCount = {3: 0, 4: 0, 5: 0};
+  trials.forEach(trial => {
+    const octave = trial.targetOctave || parseInt(trial.note?.slice(-1));
+    if (octave >= 3 && octave <= 5) {
+      octaveCount[octave]++;
+    }
+  });
+  
+  console.log('🎵 Octave Policy Debug Info:');
+  console.log('📊 Current state:', {
+    setCounter: state.oct.setCounter,
+    trialsInCurrentSet: trials.length,
+    currentMix: state.oct.currentMix,
+    baselineMix: state.oct.baselineMix
+  });
+  console.log('📈 Octave distribution:', octaveCount);
+  console.log('📝 Recent history:', state.oct.history.slice(-3));
+  console.log('⚠️ Per-note overrides:', state.oct.perNoteOverrides);
+  
+  // Calculate expected vs actual distribution
+  const total = trials.length;
+  if (total > 0) {
+    const expectedDist = {
+      3: Math.round(state.oct.currentMix[3] * total),
+      4: Math.round(state.oct.currentMix[4] * total), 
+      5: Math.round(state.oct.currentMix[5] * total)
+    };
+    console.log('🎯 Expected vs Actual:', {expected: expectedDist, actual: octaveCount});
+  }
+};
 
 function getOobCandidatesWithMirroring(set) {
   const baseOobs = currentOOBs(set);
