@@ -7001,6 +7001,105 @@ window.qaAnalyzeDetune = function(last = 200) {
   }
 };
 
+/* ------------------ JL GUARD SYSTEM ------------------ */
+// === JL GUARD: force JL changes only at 20-trial block boundaries, max ±1 step ===
+(() => {
+  window.state ||= {}; state.jl ||= { perPc:{} }; state.counters ||= { trialInBlock:0, blockIndex:0 };
+  window.qa ||= {}; qa.jlSeries ||= [];
+
+  function snap() {
+    const per = state.jitter?.levelByPc || {};
+    const s = {};
+    Object.keys(per).forEach(pc => s[pc] = (per[pc]|0));
+    return s;
+  }
+
+  // keep a shadow of levels at the start of each block + a queue of requested changes
+  window.__jlGuard ||= { shadow: null, pending: {}, lastTrialInBlock: -1 };
+
+  function atBoundary() {
+    // Detect if we just transitioned to a new block
+    const current = (state.counters?.trialInBlock|0);
+    const last = window.__jlGuard.lastTrialInBlock;
+    
+    // Update tracking
+    window.__jlGuard.lastTrialInBlock = current;
+    
+    // We're at boundary if we went from a high number back to 0 (or if it's the first call)
+    return (last > 0 && current === 0) || (last === -1 && current === 0);
+  }
+
+  function applyQueued() {
+    const per = state.jitter?.levelByPc || {};
+    const pend = window.__jlGuard.pending || {};
+    const bi = state.counters?.blockIndex|0;
+
+    Object.keys(pend).forEach(pc => {
+      const from = (per[pc]|0) ?? 0;
+      // apply only a single step toward the queued direction
+      const dir = Math.sign(pend[pc]); // +1 or -1
+      const to = Math.max(0, Math.min(3, from + (dir||0)));
+      if (to !== from) {
+        per[pc] = to;
+        qa.jlSeries.push({ blockIndex: bi, pc, from, to, reason: 'boundary-queued' });
+        console.log('[JL]', pc, `JL${from} -> JL${to}`, 'at block', bi);
+      }
+    });
+    // reset queue & resnapshot for the new block
+    window.__jlGuard.pending = {};
+    window.__jlGuard.shadow = snap();
+  }
+
+  function guardJL() {
+    const per = state.jitter?.levelByPc || {};
+    
+    if (atBoundary()) {
+      // At boundary: apply any queued changes and reset shadow for new block
+      applyQueued();
+      return;
+    }
+
+    // Ensure we have a shadow (this should be set at boundary, but handle edge cases)
+    if (!window.__jlGuard.shadow) {
+      window.__jlGuard.shadow = snap();
+    }
+
+    // Mid-block: revert any JL changes and queue them for boundary
+    const shadow = window.__jlGuard.shadow;
+    Object.keys(per).forEach(pc => {
+      const cur = (per[pc]|0);
+      const base = shadow[pc];
+      if (base == null) { 
+        // If we don't have a shadow for this PC, record current as the base
+        shadow[pc] = cur; 
+        return; 
+      }
+      if (cur !== base) {
+        const dir = Math.sign(cur - base); // +1 promotion, -1 demotion
+        console.log(`[JL Guard] Mid-block change detected for ${pc}: JL${base} -> JL${cur}, reverting and queueing`);
+        // revert now, queue the intent
+        per[pc] = base;
+        window.__jlGuard.pending[pc] = (window.__jlGuard.pending[pc]||0) + dir;
+      }
+    });
+  }
+
+  // hook finalizeGrade if present; else sample periodically
+  const origFinalize = window.finalizeGrade;
+  if (typeof origFinalize === 'function') {
+    window.finalizeGrade = function(...args){
+      const r = origFinalize.apply(this,args);
+      try { guardJL(); } catch(e){ console.warn('JL guard error', e); }
+      return r;
+    };
+    console.log('✔ JL guard hooked into finalizeGrade');
+  } else {
+    clearInterval(window.__jlGuardTimer);
+    window.__jlGuardTimer = setInterval(() => { try { guardJL(); } catch(_){} }, 200);
+    console.log('✔ JL guard running via interval');
+  }
+})();
+
 /* ------------------ INIT ------------------ */
 window.addEventListener('load', wireOnce);
 window.addEventListener('resize', ()=>{ try{ drawChart(); }catch(_){ }});
