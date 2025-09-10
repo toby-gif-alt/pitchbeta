@@ -3843,31 +3843,37 @@ function checkOobAdaptation() {
   return true;
 }
 
-// 1) Define adaptOobTargetAtTrainingBlockBoundary function - single exported function on window
-function adaptOobTargetAtTrainingBlockBoundary() {
-  const blockIndex = state.counters.blockIndex;
-  const last60 = state.oobController.last60InBounds || [];
+// 3) Ensure adaptOobTargetAtTrainingBlockBoundary() exists and is called ONLY at block boundaries
+// Runs only when blockIndex % 3 === 0
+// Uses last 60 in-bounds; if <40, skip with a "skipped" log row
+// Step ±3 toward 70–85% target; clamp 5–35%
+function adaptOobTargetAtTrainingBlockBoundary(blockIndex) {
+  // Only run on every 3rd block
+  if (blockIndex % 3 !== 0) {
+    return false;
+  }
+  
+  const { n: last60N, acc: last60Acc } = getTrainingBlockAcc60();
   
   // Must have at least 40 in-bounds trials
-  if (last60.length < 40) {
-    console.log(`OOB adaptation skipped: only ${last60.length} in-bounds trials (need ≥40)`);
+  if (last60N < 40) {
+    console.log(`OOB adaptation skipped: only ${last60N} in-bounds trials (need ≥40)`);
     
     // Push log row to qa.oobSeries with skipped indication
     if (!window.qa) window.qa = {};
     if (!window.qa.oobSeries) window.qa.oobSeries = [];
     window.qa.oobSeries.push({
       blockIndex: blockIndex,
-      last60N: last60.length,
+      context: 'adaptor',
+      last60N: last60N,
       acc: null,
       oobPctBefore: null,
       oobPctAfter: null,
       skipped: true
     });
-    return;
+    return false;
   }
   
-  // Calculate accuracy from last 60 in-bounds trials
-  const acc = last60.filter(t => t.correct).length / last60.length;
   const oobPctBefore = state.conf.oobPct || 15; // Current OOB percentage
   
   // Target band: 70-85% in-bounds accuracy
@@ -3876,10 +3882,10 @@ function adaptOobTargetAtTrainingBlockBoundary() {
   
   let oobPctAfter = oobPctBefore;
   
-  if (acc < targetMin) {
+  if (last60Acc < targetMin) {
     // Too hard - reduce OOB by 3%
     oobPctAfter = Math.max(5, oobPctBefore - 3);
-  } else if (acc > targetMax) {
+  } else if (last60Acc > targetMax) {
     // Too easy - increase OOB by 3%  
     oobPctAfter = Math.min(35, oobPctBefore + 3);
   }
@@ -3893,15 +3899,18 @@ function adaptOobTargetAtTrainingBlockBoundary() {
   if (!window.qa.oobSeries) window.qa.oobSeries = [];
   window.qa.oobSeries.push({
     blockIndex: blockIndex,
-    last60N: last60.length,
-    acc: Math.round(acc * 1000) / 1000, // Round to 3 decimal places
+    context: 'adaptor',
+    last60N: last60N,
+    acc: Math.round(last60Acc * 1000) / 1000, // Round to 3 decimal places
     oobPctBefore: oobPctBefore,
-    oobPctAfter: oobPctAfter
+    oobPctAfter: oobPctAfter,
+    skipped: false
   });
   
-  console.log(`OOB adaptation: Block ${blockIndex}, Acc ${(acc*100).toFixed(1)}%, ${oobPctBefore}% → ${oobPctAfter}%`);
+  console.log(`OOB adaptation: Block ${blockIndex}, Acc ${(last60Acc*100).toFixed(1)}%, ${oobPctBefore}% → ${oobPctAfter}%`);
   
   save();
+  return true;
 }
 
 // Export function to window as required
@@ -3946,6 +3955,12 @@ function checkOobHealthConditions() {
     
     console.log(`Health check auto-deactivated: reached end block ${state.oobController.healthCheckEndBlock}`);
   }
+}
+
+// Update OOB health check at training block boundaries
+function updateOobHealthCheckTrainingBlock() {
+  // Simply call the existing health check logic
+  checkOobHealthConditions();
 }
 
 /* ------------------ CONFUSION-AWARE SCHEDULING ------------------ */
@@ -4507,28 +4522,63 @@ function getOobCandidatesWithMirroring(set) {
   return {pc: rand(baseOobs), octave: targetOctave};
 }
 
-function logTrainingBlockOobData(blockIndex, adaptBoundary) {
+// 1) Implement getTrainingBlockAcc60()
+// Filter last 60 in-bounds (!oob) from state.trials
+// Return { n, acc } with acc=null if n===0
+function getTrainingBlockAcc60() {
+  const trials = state.trials || [];
+  
+  // Filter in-bounds trials (not OOB)
+  const inBoundsTrials = trials.filter(t => !t.oob);
+  
+  // Get last 60 in-bounds trials
+  const last60InBounds = inBoundsTrials.slice(-60);
+  const n = last60InBounds.length;
+  
+  // Return acc=null if no trials
+  if (n === 0) {
+    return { n: 0, acc: null };
+  }
+  
+  // Calculate accuracy
+  const correct = last60InBounds.filter(t => t.correct).length;
+  const acc = correct / n;
+  
+  return { n, acc };
+}
+
+// 2) Implement logTrainingBlockOobData(context='boundary')
+// Uses getTrainingBlockAcc60()
+// Appends one row to qa.oobSeries: { blockIndex, context, last60N, last60Acc, oobPct }
+// Console log a compact line for QA
+function logTrainingBlockOobData(blockIndex, context = 'boundary') {
+  // Get last 60 in-bounds accuracy stats
+  const { n: last60N, acc: last60Acc } = getTrainingBlockAcc60();
+  
   // Calculate observed OOB% for this Training Block
   const blockTrials = state.trials.filter(t => 
     t.set === setFromIndex(state.levelIndex) && 
     t.block === blockFromIndex(state.levelIndex)
   );
   const oobTrials = blockTrials.filter(t => t.oob);
-  const observedPct = blockTrials.length > 0 ? (oobTrials.length / blockTrials.length) : 0;
+  const oobPct = blockTrials.length > 0 ? (oobTrials.length / blockTrials.length * 100) : 0;
   
   // Push to qa.oobSeries (note: this creates qa object if it doesn't exist)
   if (!window.qa) window.qa = {};
   if (!window.qa.oobSeries) window.qa.oobSeries = [];
   
-  // C) Use frozen block target in logging as specified
+  // Append one row to qa.oobSeries as specified
   window.qa.oobSeries.push({
-    setIndex: setFromIndex(state.levelIndex),
     blockIndex: blockIndex,
-    adaptBoundary: adaptBoundary,
-    targetPct: state.oob.blockTarget,  // Use frozen-in-block value
-    last60Acc: getTrainingBlockAcc60(),
-    observedPctThisBlock: observedPct
+    context: context,
+    last60N: last60N,
+    last60Acc: last60Acc,
+    oobPct: Math.round(oobPct * 10) / 10  // Round to 1 decimal place
   });
+  
+  // Console log a compact line for QA
+  const accStr = last60Acc !== null ? `${(last60Acc * 100).toFixed(1)}%` : 'null';
+  console.log(`QA Block ${blockIndex}: last60=${last60N}(${accStr}), OOB=${oobPct.toFixed(1)}%`);
 }
 
 function updateOobStatusPill() {
@@ -5342,8 +5392,9 @@ function advanceCheck(){
   const key = String(state.levelIndex);
   
   // Training Block completed - handle adaptive OOB
+  // Call AFTER logger as specified in requirements
+  logTrainingBlockOobData(block, 'boundary');
   const adaptBoundary = adaptOobTargetAtTrainingBlockBoundary(block);
-  logTrainingBlockOobData(block, adaptBoundary);
   updateOobHealthCheckTrainingBlock();
   updateOobStatusPill();
   
