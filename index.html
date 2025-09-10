@@ -456,6 +456,9 @@ const sampleMap = {
   piano: {}
 };
 
+// Expose sampleMap to global scope for debugging
+window.sampleMap = sampleMap;
+
 // Asset reporting for debugging
 window.assetsReport = {
   piano: { present: [], missing: [] }
