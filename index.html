@@ -535,6 +535,26 @@ const PC=["C","Db","D","Eb","E","F","Gb","G","Ab","A","Bb","B"];
 const PC_LABEL={ C:"C", Db:"C#/Db", D:"D", Eb:"D#/Eb", E:"E", F:"F", Gb:"F#/Gb", G:"G", Ab:"G#/Ab", A:"A", Bb:"A#/Bb", B:"B" };
 const UNLOCK_ORDER = ["F","E","Gb","Eb","G","D","Ab","Db","A","C","Bb","B"];
 
+/* ------------------ PITCH CLASS CANONICALIZER ------------------ */
+function normalizePc(x) {
+  if (!x) return null;
+  x = String(x).trim();
+  
+  // Handle special case: Out of Bounds
+  if (x.toUpperCase() === 'OOB' || x.toLowerCase() === 'out of bounds') return 'OOB';
+  
+  // Normalize common inputs
+  x = x.replace(/\s+/g,'').replace(/♭/g,'b').toUpperCase();
+  // Map sharps to flats (we store flats)
+  const sharpToFlat = { 'A#':'Bb','C#':'Db','D#':'Eb','F#':'Gb','G#':'Ab' };
+  if (sharpToFlat[x]) x = sharpToFlat[x];
+  // Uppercase first letter, keep 'b' as lowercase
+  if (/^[A-G]B$/.test(x)) x = x[0] + 'b';
+  // Validate
+  const CANON = ['A','Bb','B','C','Db','D','Eb','E','F','Gb','G','Ab'];
+  return CANON.includes(x) ? x : null;
+}
+
 const LEVELS_PER_SET=24, SETS=12, LEVELS_TOTAL=SETS*LEVELS_PER_SET;
 const TONE_MS=800;
 const THRESH_24=[0.20,0.25,0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.60,0.65,0.70,0.75,0.78,0.80,0.83,0.85,0.88,0.90,0.90,0.90,0.90,0.90,0.90];
@@ -740,6 +760,12 @@ if (!state.oob) {
 if (typeof state.trialOpen === 'undefined') {
   state.trialOpen = false;
   state.toneStartMs = null;
+  save();
+}
+
+// Migration for current trial state (new grading system)
+if (!state.current) {
+  state.current = null;  // Will be set when trial starts
   save();
 }
 
@@ -2207,15 +2233,20 @@ function paintNotes(){
   for(const pc of sorted){
     const b=document.createElement('button');
     b.textContent=pcLabel(pc);
-    b.dataset.pc=pc;
+    // B) Set data-pc to canonical label
+    b.dataset.pc=pc;  // pc is already canonical from PC array
     b.className='note';
     b.type='button';
-    b.addEventListener('click', ()=> guess(pc));
+    // B) In click handler, read canonical pc and call gradeGuess
+    b.addEventListener('click', (e)=> {
+      const guessPc = normalizePc(e.target.dataset.pc || e.target.textContent);
+      gradeGuess(guessPc);
+    });
     pad.appendChild(b);
   }
   safe('btnOOB', el=> {
     el.style.display = set>=12 ? 'none' : 'block';
-    el.onclick = ()=> chooseOOB();
+    el.onclick = ()=> gradeGuess('OOB');
   });
 }
 
@@ -2645,35 +2676,7 @@ function drawTrackerChart() {
 }
 
 /* -------- Normal trials -------- */
-function guess(pc){
-  if(!sessionActive || paused || shepRunning || special) return;
-  if(!currentNote){ return; }
-  if(!state.trialOpen) return; // Input locking - ignore late clicks
-  if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
-  const isOOB = !!isOOBTrial;
-  const clicked = pc;
-  const correct = isOOB ? (clicked === 'OOB') : (clicked === truePc);
-  recordTrial({ guess: clicked, correct: correct, timeout: false });
-  feedback(correct, correct ? undefined : (isOOB ? 'Incorrect — Out of Bounds' : `Incorrect — ${pcLabel(truePc)}`));
-  currentNote = null; // Clear currentNote to prevent repeated guesses
-  advanceCheck();
-  scheduleAuto();
-}
-function chooseOOB(){
-  if(!sessionActive || paused || shepRunning || special) return;
-  if(!currentNote) return;
-  if(!state.trialOpen) return; // Input locking - ignore late clicks
-  if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
-  const isOOB = !!isOOBTrial;
-  const clicked = 'OOB';
-  const correct = isOOB ? (clicked === 'OOB') : (clicked === truePc);
-  recordTrial({ guess: clicked, correct: correct, timeout: false });
-  const msg = correct ? undefined : `Incorrect — ${pcLabel(truePc)}`;
-  feedback(correct, msg);
-  currentNote = null; // Clear currentNote to prevent repeated guesses
-  advanceCheck();
-  scheduleAuto();
-}
+/* NOTE: guess() and chooseOOB() functions removed - replaced by gradeGuess() */
 
 /* Driving */
 function scheduleAuto(){ if(autoTimer){ clearTimeout(autoTimer); autoTimer=null; } if(autoNext && sessionActive && !paused && !shepRunning && !special){ autoTimer = setTimeout(()=> nextTrial(true), delayMs); } }
@@ -2696,50 +2699,60 @@ async function nextTrial(forceNew=false){
       const trained = getTrainedPCs();
       const isOOB = shouldBeOobTrialNew() && currentOOBs(setFromIndex(state.levelIndex)).length > 0;
       
-      let truePc;
+      let chosenPc;
       if (isOOB) {
-        truePc = pickOobPc(trained);
+        chosenPc = pickOobPc(trained);
       } else {
         // Use confusion-aware scheduler for in-bounds
         const usable = trainedSet(setFromIndex(state.levelIndex));
-        truePc = selectInBoundsNoteConfusionAware(usable) || (trained.length > 0 ? trained[Math.floor(Math.random() * trained.length)] : 'F'); // Fallback
+        chosenPc = selectInBoundsNoteConfusionAware(usable) || (trained.length > 0 ? trained[Math.floor(Math.random() * trained.length)] : 'F'); // Fallback
       }
       
-      // B) Create trial object with explicit tagging
-      const trial = {
-        truePc,  // the ground-truth pitch class being presented
-        plannedOOB: !!isOOB,
-        // ... (octave/timbre fields will be added)
-      };
+      // C) Freeze the ground-truth at schedule time
+      const truePc = normalizePc(chosenPc);
+      const plannedOOB = !!isOOB;
+      let detuneCents = 0, detuneMode = 'anchor', jlLevel = null;
+      let chosenOctave;
       
-      // B) Before audio playback, set and freeze the oob flag - do NOT recalc later
-      trial.oob = trial.plannedOOB;         // freeze this flag now
-      if (trial.oob) {
-        trial.detuneCents = 0; 
-        trial.detuneMode = 'oob'; 
-        trial.jlLevel = null;
+      if (plannedOOB) {
+        detuneCents = 0; 
+        detuneMode = 'oob'; 
+        jlLevel = null;
         
         // Set octave for OOB
         const set = setFromIndex(state.levelIndex);
         const oobResult = getOobCandidatesWithMirroring(set);
-        currentNote = `${truePc}${oobResult.octave}`;
+        chosenOctave = oobResult.octave;
+        currentNote = `${truePc}${chosenOctave}`;
       } else {
         // in-bounds: call chooseDetuneMode(truePc) and assign cents/mode/jlLevel
         const detuneInfo = selectDetune(truePc, false);
-        trial.detuneCents = detuneInfo.cents;
-        trial.detuneMode = detuneInfo.mode;
-        trial.jlLevel = detuneInfo.jlLevel;
+        detuneCents = detuneInfo.cents;
+        detuneMode = detuneInfo.mode;
+        jlLevel = detuneInfo.jlLevel;
         
-        const octave = rand(currentOctaves());
-        currentNote = `${truePc}${octave}`;
+        chosenOctave = rand(currentOctaves());
+        currentNote = `${truePc}${chosenOctave}`;
       }
       
-      // Store frozen trial state globally for grading to use
-      isOOBTrial = trial.oob;  // This preserves the frozen flag
-      currentDetuneCents = trial.detuneCents;
-      currentDetuneMode = trial.detuneMode;
-      currentJlLevel = trial.jlLevel;
-      window.currentTrialState = trial;  // Store for recordTrial to use
+      // C) Freeze in state.current (REQUIRED for grading)
+      state.current = {
+        truePc,                                // REQUIRED; non-null
+        oob: !!plannedOOB,
+        octave: chosenOctave,
+        timbre: state.audioType || 'sine',
+        detuneCents, detuneMode, jlLevel,
+        startedAt: performance.now()
+      };
+      
+      // Store frozen trial state globally for backward compatibility
+      isOOBTrial = plannedOOB;
+      currentDetuneCents = detuneCents;
+      currentDetuneMode = detuneMode;
+      currentJlLevel = jlLevel;
+      
+      // Open the trial for input
+      state.trialOpen = true;
     }
     
     await playSample(currentNote, currentDetuneCents);
@@ -2758,12 +2771,171 @@ async function nextTrial(forceNew=false){
   }catch(e){ report(e); }
   finally{ inFlightTrial=false; }
 }
+
+/* ------------------ CENTRALIZED GRADING ------------------ */
+// D) Grade from the frozen ground-truth only
+function gradeGuess(guessPcRaw) {
+  if(!sessionActive || paused || shepRunning || special) return;
+  if(!currentNote){ return; }
+  if(!state.trialOpen) return; // Input locking - ignore late clicks
+  
+  const guessPc = normalizePc(guessPcRaw);
+  const cur = state.current;
+  if (!cur || !cur.truePc) {
+    console.warn('MISSING_TRUE_PC at grade time', {cur, guessPc});
+    showToast('Oops—note not ready. Try again.'); 
+    return;
+  }
+  
+  // Clear RT timer
+  if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
+  
+  const correct = !!(guessPc && guessPc === cur.truePc);
+  const trial = {
+    time: Date.now(),
+    note: cur.truePc + String(cur.octave ?? ''),
+    truePc: cur.truePc,
+    guessPc: guessPc || null,
+    correct,
+    oob: !!cur.oob,
+    rtMs: Math.round(performance.now() - (cur.startedAt || performance.now())),
+    detuneCents: cur.detuneCents ?? 0,
+    detuneMode: cur.detuneMode || (cur.oob ? 'oob' : 'anchor'),
+    jlLevel: cur.jlLevel ?? null,
+    timbreUsed: cur.timbre || state.audioType || 'sine'
+  };
+  
+  // G) One logging line for diagnostics
+  console.log('GRADE', { truePc: trial.truePc, guessPc: trial.guessPc, correct: trial.correct, oob: trial.oob });
+  
+  // Add to trials array
+  (state.trials ||= []).push(trial);
+  
+  // Update stats/scheduler as before
+  recordTrialStats(trial);
+  
+  // Render feedback
+  renderFeedback(trial);
+  
+  // Clear current note and close trial
+  currentNote = null;
+  state.trialOpen = false;
+  
+  advanceCheck();
+  scheduleAuto();
+}
+
+// E) Make the feedback UI null-safe
+function renderFeedback(trial) {
+  const correctPc = trial.truePc || '(unknown)';
+  if (trial.correct) {
+    feedback(true);
+  } else {
+    const safeLabel = trial.truePc ? pcLabel(trial.truePc) : '(unknown)';
+    feedback(false, `Incorrect — it was ${safeLabel}`);
+  }
+}
+
+// Helper to show toast messages
+function showToast(message) {
+  // Reuse existing feedback system for toast
+  const box=byId('feedbackBox'); const overlay=byId('feedbackOverlay');
+  if(!box||!overlay) return;
+  box.style.background= 'var(--bad)';
+  box.textContent = message;
+  overlay.style.display='flex'; requestAnimationFrame(()=>overlay.classList.add('show'));
+  setTimeout(()=>{ overlay.classList.remove('show'); overlay.style.display='none'; }, 1000);
+}
+
+// Handle trial statistics and progression
+function recordTrialStats(trial) {
+  const correct = trial.correct;
+  
+  // Update level counters
+  state.levelTrials++;
+  if(correct) state.levelCorrect++;
+  state.trainingBlockTrials = (state.trainingBlockTrials || 0) + 1;
+  
+  const block = blockFromIndex(state.levelIndex);
+  if(block >= 21){ 
+    if(correct){ 
+      state.testFailStreak=0; 
+    } else { 
+      state.testFailStreak = (state.testFailStreak || 0) + 1; 
+    }
+  }
+  
+  // Update jitter statistics for in-bounds trials
+  if (!trial.oob && trial.truePc) {
+    const trainedPcs = getTrainedPCs();
+    if (trainedPcs.includes(trial.truePc)) {
+      addJitterStat(trial.truePc, correct, trial.rtMs);
+      evaluateJitterLevel(trial.truePc);
+    }
+  }
+  
+  // Update confusion tracking for in-bounds errors
+  if (!trial.oob && !correct && trial.guessPc && trial.truePc) {
+    const trainedPcs = getTrainedPCs();
+    if (trainedPcs.includes(trial.truePc) && trainedPcs.includes(trial.guessPc)) {
+      updateConfusionMatrix(trial.truePc, trial.guessPc);
+      updatePerfStats(trial.truePc, correct, trial.rtMs);
+      state.lastInBoundsPc = trial.truePc;
+    }
+  }
+  
+  // Update OOB controller
+  updateTrainingBlockOobController(trial);
+  
+  save(); 
+  updateLevelUI(); 
+  try{ drawChart(); }catch(_){}; 
+  if(block >= 21 && !correct) maybeSuggestRestart();
+}
 function handleTimeout(){
   if(!sessionActive || paused || special) return;
+  if(!state.trialOpen) return;
   if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
-  recordTrial({ guess: null, correct: false, timeout: true });
-  feedback(false, isOOBTrial ? 'Incorrect — Out of Bounds' : `Incorrect — ${pcLabel(truePc)}`);
-  advanceCheck(); scheduleAuto();
+  
+  const cur = state.current;
+  if (!cur || !cur.truePc) {
+    console.warn('MISSING_TRUE_PC at timeout', {cur});
+    return;
+  }
+  
+  const trial = {
+    time: Date.now(),
+    note: cur.truePc + String(cur.octave ?? ''),
+    truePc: cur.truePc,
+    guessPc: null,
+    correct: false,
+    timeout: true,
+    oob: !!cur.oob,
+    rtMs: Math.round(performance.now() - (cur.startedAt || performance.now())),
+    detuneCents: cur.detuneCents ?? 0,
+    detuneMode: cur.detuneMode || (cur.oob ? 'oob' : 'anchor'),
+    jlLevel: cur.jlLevel ?? null,
+    timbreUsed: cur.timbre || state.audioType || 'sine'
+  };
+  
+  // G) One logging line for diagnostics
+  console.log('GRADE', { truePc: trial.truePc, guessPc: trial.guessPc, correct: trial.correct, oob: trial.oob });
+  
+  // Add to trials array
+  (state.trials ||= []).push(trial);
+  
+  // Update stats/scheduler
+  recordTrialStats(trial);
+  
+  // Render feedback
+  renderFeedback(trial);
+  
+  // Clear current note and close trial
+  currentNote = null;
+  state.trialOpen = false;
+  
+  advanceCheck(); 
+  scheduleAuto();
 }
 
 /* Suggestion banner */
@@ -2785,105 +2957,7 @@ function maybeSuggestRestart(){
   if(state.testFailStreak >= 10 && !suggestedRestartFlag){ suggestedRestartFlag = true; showSuggestBanner(); }
 }
 
-function recordTrial(trial) {
-  // Close the trial immediately to prevent late clicks
-  state.trialOpen = false;
-  
-  // Calculate reaction time
-  let rtMs = trial.rtMs;
-  if (rtMs == null) {
-    rtMs = performance.now() - (state.toneStartMs || performance.now());
-  }
-  
-  // C) Grading must NOT change oob flag - keep the oob flag that was frozen at scheduling time
-  // Use the frozen trial state from scheduling, don't recompute oob
-  const frozenTrial = window.currentTrialState || {};
-  const isOOB = frozenTrial.oob !== undefined ? frozenTrial.oob : !!isOOBTrial;
-  const clicked = trial.guess;
-  
-  // C) Only compute correctness from guess vs truePc
-  const correct = isOOB ? (clicked === 'OOB') : (clicked === truePc);
-  
-  // Update counters
-  state.levelTrials++;
-  if(correct) state.levelCorrect++;
-  state.trainingBlockTrials++;
-  
-  const block = blockFromIndex(state.levelIndex);
-  if(block >= 21){ 
-    if(correct){ 
-      state.testFailStreak=0; 
-      hideSuggestBanner(); 
-      suggestedRestartFlag=false; 
-    } else { 
-      state.testFailStreak=(state.testFailStreak||0)+1; 
-    } 
-  } else { 
-    state.testFailStreak=0; 
-    hideSuggestBanner(); 
-    suggestedRestartFlag=false; 
-  }
-  
-  // C) Create trial record preserving frozen oob flag and detune info from scheduling
-  const trialRecord = {
-    note: currentNote, 
-    pc: truePc, 
-    guess: clicked, 
-    correct: correct, 
-    timeout: trial.timeout || false, 
-    oob: isOOB,  // Use the frozen flag, not recomputed
-    set: setFromIndex(state.levelIndex), 
-    block: block, 
-    time: Date.now(),
-    rtMs: rtMs,
-    // Jitter system fields - use frozen values from scheduling
-    detuneCents: frozenTrial.detuneCents !== undefined ? frozenTrial.detuneCents : currentDetuneCents,
-    detuneMode: frozenTrial.detuneMode || currentDetuneMode,
-    jlLevel: frozenTrial.jlLevel !== undefined ? frozenTrial.jlLevel : currentJlLevel,
-    timbreUsed: state.audioType
-  };
-  
-  state.trials.push(trialRecord);
-  
-  // D) Update confusion tracking ONLY for in-bounds trials in trained set
-  if (!isOOB && !trial.timeout && clicked !== null && truePc) {
-    const trainedPcs = getTrainedPCs();
-    
-    // Only track if both true and guess are in the trained set
-    if (trainedPcs.includes(truePc) && (clicked === 'OOB' || trainedPcs.includes(clicked))) {
-      // Update confusion matrix on errors
-      if (!correct && clicked !== 'OOB') {
-        updateConfusionMatrix(truePc, clicked);
-      }
-      
-      // Update per-note performance stats
-      updatePerfStats(truePc, correct, rtMs);
-      
-      // Update last in-bounds PC for anti-streak
-      state.lastInBoundsPc = truePc;
-      
-      // Add top confusion pair to trial record for logging
-      if (state.conf.topPairAtBlockStart) {
-        trialRecord.confTopPairAtTime = state.conf.topPairAtBlockStart;
-      }
-    }
-  }
-  
-  // D) Update jitter statistics ONLY for in-bounds trials with trained PCs
-  if (!isOOB) {
-    const trainedPcs = getTrainedPCs();
-    if (trainedPcs.includes(truePc)) {
-      addJitterStat(truePc, correct, rtMs);
-      evaluateJitterLevel(truePc);
-    }
-  }
-  
-  // Update new OOB controller with this trial
-  updateTrainingBlockOobController(trialRecord);
-  
-  save(); updateLevelUI(); try{ drawChart(); }catch(_){}; 
-  if(block >= 21 && !correct) maybeSuggestRestart();
-}
+/* NOTE: recordTrial() function removed - replaced by recordTrialStats() and centralized grading */
 
 function feedback(ok, wrongMsgOverride){
   const fb=blockHasFeedback(blockFromIndex(state.levelIndex));
