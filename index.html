@@ -196,6 +196,27 @@
       </div>
     </div>
     
+    <!-- Variety Mode Status -->
+    <div class="row" style="margin-top:8px;gap:12px">
+      <div class="scopeWrap">
+        <span style="opacity:.9">Variety Mode (Week 3+):</span>
+        <span id="varietyModeStatus" class="scopeSelect" style="padding:8px 12px;background:var(--muted2);border:1px solid var(--muted);cursor:default">Off (Week 1-2)</span>
+        <button id="varietyModeHelp" class="scopeBtn" style="background:var(--muted);font-size:12px;padding:6px 8px">?</button>
+      </div>
+    </div>
+    
+    <!-- Dev Variety Mode Toggle (hidden by default) -->
+    <div class="row" id="devVarietyRow" style="margin-top:8px;gap:12px;display:none">
+      <div class="scopeWrap">
+        <span style="opacity:.9">Dev: Force Variety Now:</span>
+        <select id="forceVarietySelect" class="scopeSelect">
+          <option value="off">Off (Normal)</option>
+          <option value="on">On (Force Variety)</option>
+        </select>
+        <button id="applyForceVarietyBtn" class="scopeBtn">Change</button>
+      </div>
+    </div>
+    
     <!-- Theme Selection -->
     <div class="row" style="margin-top:8px;gap:12px">
       <div class="scopeWrap">
@@ -963,6 +984,19 @@ try{
       date: getTodayDateString(), // YYYY-MM-DD format
       minutesCompleted: 0,        // total minutes completed today (0..30)
       completedAt: null           // timestamp when 30 min reached, null if not complete
+    },
+    timbre: {
+      chosen: AUDIO_TYPES.PIANO,  // user selection from main menu
+      enabled: true,              // always true; variety is gated by week
+      mode: 'single',             // 'single' | 'variety', computed from gating
+      varietyStartDate: null,     // date of first training day + 14 days (YYYY-MM-DD)
+      today: getTodayDateString(), // current date (YYYY-MM-DD)
+      rotationIndex: 0,           // cycles alternates daily when in variety
+      currentProportions: { chosen: 1.0, alt: 0.0 }, // becomes {0.8, 0.2} in variety
+      altPool: [AUDIO_TYPES.SINE, AUDIO_TYPES.GUITAR], // excludes chosen; rotate daily
+      perPcStats: {},             // [pc]: { [timbre]: { last40:[], acc:0..1, medianCents, sdCents } }
+      rescue: {},                 // [pc]: { [timbre]: { active:boolean, untilBlock:number } }
+      history: []                 // log decisions & rescues
     }
   };
 } catch(e){
@@ -1215,6 +1249,24 @@ if (!state.daily) {
   save();
 }
 
+// Migration for timbre variety system
+if (!state.timbre) {
+  state.timbre = {
+    chosen: state.audioType || AUDIO_TYPES.PIANO, // migrate existing audioType
+    enabled: true,
+    mode: 'single',
+    varietyStartDate: null,
+    today: getTodayDateString(),
+    rotationIndex: 0,
+    currentProportions: { chosen: 1.0, alt: 0.0 },
+    altPool: [AUDIO_TYPES.SINE, AUDIO_TYPES.GUITAR].filter(t => t !== (state.audioType || AUDIO_TYPES.PIANO)),
+    perPcStats: {},
+    rescue: {},
+    history: []
+  };
+  save();
+}
+
 // Reset daily progress if date has changed (date rollover)
 if (state.daily && state.daily.date !== getTodayDateString()) {
   state.daily = {
@@ -1231,6 +1283,14 @@ if (state.daily && state.daily.date !== getTodayDateString()) {
     inBreak: false,
     breakRemainingMs: 0
   };
+  // Update timbre today field and rotation
+  if (state.timbre) {
+    state.timbre.today = getTodayDateString();
+    // Advance rotation index for variety mode
+    if (state.timbre.mode === 'variety') {
+      state.timbre.rotationIndex = (state.timbre.rotationIndex + 1) % state.timbre.altPool.length;
+    }
+  }
   save();
 }
 
@@ -1248,6 +1308,238 @@ function todayKey(ts){ return dateAtMidnight(ts||Date.now()); }
 function weekIndex(ts){ const base=ts||Date.now(); if(!state.startDate) return 0; return Math.floor((base-state.startDate)/(7*24*60*60*1000)); }
 function currentWeekIdx(){ return weekIndex(Date.now()); }
 function weekStartTs(){ if(!state.startDate) return todayKey(Date.now()); const idx=currentWeekIdx(); const base=dateAtMidnight(state.startDate); return base + idx*7*86400000; }
+
+/* ------------------ TIMBRE VARIETY SYSTEM ------------------ */
+
+function initTimbreVarietySystem() {
+  if (!state.startDate) return; // No training started yet
+  
+  // Set variety start date if not already set (first training day + 14 days)
+  if (!state.timbre.varietyStartDate) {
+    const startDate = new Date(state.startDate);
+    startDate.setDate(startDate.getDate() + 14);
+    state.timbre.varietyStartDate = startDate.toISOString().split('T')[0]; // YYYY-MM-DD format
+    save();
+  }
+  
+  // Update mode based on current date
+  updateTimbreMode();
+  
+  // Update alt pool when chosen timbre changes
+  updateAltPool();
+}
+
+function updateTimbreMode() {
+  if (!state.timbre.varietyStartDate && !state.timbre.forceVariety) {
+    state.timbre.mode = 'single';
+    state.timbre.currentProportions = { chosen: 1.0, alt: 0.0 };
+    return;
+  }
+  
+  // Check dev override first
+  if (state.timbre.forceVariety) {
+    state.timbre.mode = 'variety';
+    state.timbre.currentProportions = { chosen: 0.8, alt: 0.2 };
+    return;
+  }
+  
+  const today = new Date(getTodayDateString());
+  const varietyStart = new Date(state.timbre.varietyStartDate);
+  
+  if (today >= varietyStart) {
+    state.timbre.mode = 'variety';
+    state.timbre.currentProportions = { chosen: 0.8, alt: 0.2 };
+  } else {
+    state.timbre.mode = 'single';
+    state.timbre.currentProportions = { chosen: 1.0, alt: 0.0 };
+  }
+}
+
+function updateAltPool() {
+  const allTypes = [AUDIO_TYPES.PIANO, AUDIO_TYPES.SINE, AUDIO_TYPES.GUITAR];
+  state.timbre.altPool = allTypes.filter(t => t !== state.timbre.chosen);
+  // Reset rotation index when pool changes
+  state.timbre.rotationIndex = 0;
+}
+
+function selectTimbreForTrial(pc) {
+  // Initialize if needed
+  initTimbreVarietySystem();
+  
+  // Always use chosen timbre in single mode
+  if (state.timbre.mode === 'single') {
+    return state.timbre.chosen;
+  }
+  
+  // Check for active rescue for this pc
+  const rescue = state.timbre.rescue[pc];
+  if (rescue) {
+    for (const timbre in rescue) {
+      if (rescue[timbre].active && rescue[timbre].untilBlock >= (state.currentBlock || 1)) {
+        // Rescue active: use 50% chosen, 50% weak timbre
+        const useWeakTimbre = Math.random() < 0.5;
+        return useWeakTimbre ? timbre : state.timbre.chosen;
+      }
+    }
+  }
+  
+  // Normal variety mode: 80% chosen, 20% alternate
+  const useAlt = Math.random() < state.timbre.currentProportions.alt;
+  if (useAlt && state.timbre.altPool.length > 0) {
+    const altIndex = state.timbre.rotationIndex % state.timbre.altPool.length;
+    return state.timbre.altPool[altIndex];
+  }
+  
+  return state.timbre.chosen;
+}
+
+function updateTimbreStats(pc, timbre, correct, detuneCents) {
+  if (!state.timbre.perPcStats[pc]) {
+    state.timbre.perPcStats[pc] = {};
+  }
+  if (!state.timbre.perPcStats[pc][timbre]) {
+    state.timbre.perPcStats[pc][timbre] = {
+      last40: [],
+      acc: 0,
+      medianCents: 0,
+      sdCents: 0
+    };
+  }
+  
+  const stats = state.timbre.perPcStats[pc][timbre];
+  
+  // Add to last40 (keep only last 40 trials)
+  stats.last40.push({ correct, detuneCents: detuneCents || 0 });
+  if (stats.last40.length > 40) {
+    stats.last40.shift();
+  }
+  
+  // Update accuracy
+  if (stats.last40.length > 0) {
+    stats.acc = stats.last40.filter(t => t.correct).length / stats.last40.length;
+  }
+  
+  // Update median and SD of detune cents
+  if (stats.last40.length > 0) {
+    const cents = stats.last40.map(t => t.detuneCents).sort((a, b) => a - b);
+    stats.medianCents = cents[Math.floor(cents.length / 2)];
+    const mean = cents.reduce((a, b) => a + b, 0) / cents.length;
+    const variance = cents.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / cents.length;
+    stats.sdCents = Math.sqrt(variance);
+  }
+  
+  // Check if rescue needed
+  checkTimbreRescue(pc, timbre);
+}
+
+function checkTimbreRescue(pc, timbre) {
+  const stats = state.timbre.perPcStats[pc]?.[timbre];
+  if (!stats || stats.last40.length < 10) return; // Need at least 10 trials
+  
+  const needsRescue = stats.acc < 0.75 || Math.abs(stats.medianCents) > 25;
+  
+  if (!state.timbre.rescue[pc]) {
+    state.timbre.rescue[pc] = {};
+  }
+  
+  const rescue = state.timbre.rescue[pc][timbre] || { active: false, untilBlock: 0 };
+  
+  if (needsRescue && !rescue.active) {
+    // Start rescue
+    rescue.active = true;
+    rescue.untilBlock = (state.currentBlock || 1) + 1; // Next 1 block
+    state.timbre.rescue[pc][timbre] = rescue;
+    
+    // Log rescue start
+    state.timbre.history.push({
+      ts: Date.now(),
+      blockIndex: state.currentBlock || 1,
+      pc,
+      timbre,
+      event: 'rescue-start',
+      acc: stats.acc,
+      median: stats.medianCents
+    });
+    
+    save();
+  } else if (rescue.active && stats.acc >= 0.80 && Math.abs(stats.medianCents) <= 20) {
+    // End rescue
+    rescue.active = false;
+    state.timbre.rescue[pc][timbre] = rescue;
+    
+    // Log rescue end
+    state.timbre.history.push({
+      ts: Date.now(),
+      blockIndex: state.currentBlock || 1,
+      pc,
+      timbre,
+      event: 'rescue-end',
+      acc: stats.acc,
+      median: stats.medianCents
+    });
+    
+    save();
+  }
+}
+
+function logTimbreBlockEnd() {
+  // Log block summary
+  const altTimbre = state.timbre.altPool.length > 0 ? 
+    state.timbre.altPool[state.timbre.rotationIndex % state.timbre.altPool.length] : null;
+  
+  state.timbre.history.push({
+    ts: Date.now(),
+    blockIndex: state.currentBlock || 1,
+    mode: state.timbre.mode,
+    proportions: { ...state.timbre.currentProportions },
+    chosen: state.timbre.chosen,
+    altOfDay: altTimbre
+  });
+  
+  save();
+}
+
+function updateVarietyModeUI() {
+  const statusEl = byId('varietyModeStatus');
+  const devRowEl = byId('devVarietyRow');
+  
+  if (!statusEl) return;
+  
+  initTimbreVarietySystem(); // Ensure system is initialized
+  
+  if (state.timbre.mode === 'variety') {
+    if (state.timbre.forceVariety) {
+      statusEl.textContent = 'On (Dev Override)';
+      statusEl.style.background = 'var(--accent)';
+      statusEl.style.color = 'var(--bg)';
+    } else {
+      statusEl.textContent = 'On (80/20)';
+      statusEl.style.background = 'var(--good)';
+      statusEl.style.color = 'var(--text)';
+    }
+  } else {
+    if (state.timbre.varietyStartDate) {
+      const today = new Date(getTodayDateString());
+      const varietyStart = new Date(state.timbre.varietyStartDate);
+      const daysLeft = Math.ceil((varietyStart - today) / (24 * 60 * 60 * 1000));
+      
+      if (daysLeft > 0) {
+        statusEl.textContent = `Off (${daysLeft} days left)`;
+      } else {
+        statusEl.textContent = 'Off (Week 1-2)';
+      }
+    } else {
+      statusEl.textContent = 'Off (Week 1-2)';
+    }
+    statusEl.style.background = 'var(--muted2)';
+    statusEl.style.color = 'var(--text)';
+  }
+  
+  // Show dev row if needed (for testing)
+  if (devRowEl && state.timbre.forceVariety) {
+    devRowEl.style.display = 'flex';
+  }
+}
 
 /* ------------------ DAILY SESSION HELPERS ------------------ */
 function isQAMode() {
@@ -2372,10 +2664,13 @@ function findClosestGuitarSample(targetNote) {
 }
 
 /* Always play a tone (sample -> oscillator -> fallback) */
-async function playSample(note, detuneCents = 0){
+async function playSample(note, detuneCents = 0, timbreOverride = null){
   // Capture tone start timing for reaction time calculation
   state.toneStartMs = performance.now();
   state.trialOpen = true;
+  
+  // Determine which timbre to use
+  const timbre = timbreOverride || state.audioType;
   
   try{
     await resumeCtx();
@@ -2385,7 +2680,7 @@ async function playSample(note, detuneCents = 0){
     const detuneMultiplier = Math.pow(2, detuneCents / 1200);
     
     // Handle different audio types
-    if (state.audioType === AUDIO_TYPES.PIANO) {
+    if (timbre === AUDIO_TYPES.PIANO) {
       try {
         // Parse note to get PC and octave
         const m = /^([A-G](?:b)?)(\d)$/.exec(note);
@@ -2424,7 +2719,7 @@ async function playSample(note, detuneCents = 0){
       } catch(e) {
         console.warn('Piano sample playback failed:', e);
       }
-    } else if (state.audioType === AUDIO_TYPES.GUITAR) {
+    } else if (timbre === AUDIO_TYPES.GUITAR) {
       try{
         const {sample, semitones} = findClosestGuitarSample(note);
         const url = `${AUDIO_GUITAR}/${GUITAR_SAMPLES[sample]}`;
@@ -2452,7 +2747,7 @@ async function playSample(note, detuneCents = 0){
         src.start(t); src.stop(t + TONE_MS/1000 / pitchRatio);
         return;
       }catch(_e){}
-    } else if (state.audioType === AUDIO_TYPES.SINE) {
+    } else if (timbre === AUDIO_TYPES.SINE) {
       // Skip to sine wave generation
     } else {
       // Default to piano, fallback to sine
@@ -5443,12 +5738,22 @@ async function nextTrial(forceNew=false){
       
       // C) Freeze in state.current (REQUIRED for grading)
       state.meta.trialSeq = (state.meta.trialSeq || 0) + 1;
+      // Select timbre for this trial
+      const selectedTimbre = plannedOOB && state.lastInBoundsTimbre ? 
+        state.lastInBoundsTimbre : // OOB mirrors in-bounds timbre
+        selectTimbreForTrial(truePc); // Normal selection
+      
+      // Store selected timbre for next OOB trial
+      if (!plannedOOB) {
+        state.lastInBoundsTimbre = selectedTimbre;
+      }
+      
       state.current = {
         trialId: state.meta.trialSeq,        // integer incrementing
         truePc,                                // REQUIRED; non-null
         oob: !!plannedOOB,
         octave: chosenOctave,
-        timbre: state.audioType || 'sine',
+        timbre: selectedTimbre,
         detuneCents, detuneMode, jlLevel,
         startedAt: performance.now()
       };
@@ -5463,7 +5768,7 @@ async function nextTrial(forceNew=false){
       state.trialOpen = true;
     }
     
-    await playSample(currentNote, currentDetuneCents);
+    await playSample(currentNote, currentDetuneCents, state.current.timbre);
     if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
     const baseRt = rtWindowForSet(setFromIndex(state.levelIndex));
     const rtms = baseRt + firstRtBonusMs + LATENCY_CUSHION_MS;
@@ -5534,6 +5839,11 @@ function finalizeGrade(args) {
   
   state.trials.push(t);
   state.grade.inProgress = false;
+
+  // Update timbre statistics for variety mode
+  if (cur.timbre && cur.truePc && !isOobTrial) { // Only track in-bounds trials
+    updateTimbreStats(cur.truePc, cur.timbre, correct, cur.detuneCents || 0);
+  }
 
   renderFeedback(t);
   scheduleNextTrial();
@@ -5728,6 +6038,9 @@ function advanceCheck(){
   
   // Log confusion series data
   logConfusionSeriesData(block);
+  
+  // Log timbre block end for variety mode
+  logTimbreBlockEnd();
   
   // Reset training block counters
   state.trainingBlockTrials = 0;
@@ -6517,6 +6830,9 @@ function populatePitchSelect(){
   PC.forEach(pc=> sel.appendChild(mk(pc, pcLabel(pc))));
   sel.onchange = ()=> drawChart();
   const gran = byId('granularitySelect'); if(gran){ gran.onchange = ()=> drawChart(); gran.value='WEEKLY'; }
+  
+  // Update variety mode UI when menu is shown
+  updateVarietyModeUI();
 }
 
 /* ------------------ TUTORIAL PAGER ------------------ */
@@ -6629,18 +6945,50 @@ function wireOnce(){
 
   // Audio type selection
   safe('audioTypeSelect', el=> {
-    el.value = state.audioType || AUDIO_TYPES.PIANO;
+    el.value = state.timbre?.chosen || state.audioType || AUDIO_TYPES.PIANO;
   });
   safe('applyAudioBtn', el=> el.onclick=()=>{
     const newType = byId('audioTypeSelect')?.value || AUDIO_TYPES.PIANO;
-    state.audioType = newType;
+    state.audioType = newType; // Keep for legacy compatibility
+    
+    // Update timbre state
+    if (state.timbre) {
+      state.timbre.chosen = newType;
+      updateAltPool(); // Update alternate pool
+    }
+    
     save();
     const labels = {
-      [AUDIO_TYPES.PIANO]: 'Piano (C4-B6)',
-      [AUDIO_TYPES.SINE]: 'Sine Wave (C4-B6)', 
+      [AUDIO_TYPES.PIANO]: 'Piano (C3-B5)',
+      [AUDIO_TYPES.SINE]: 'Sine Wave (C3-B5)', 
       [AUDIO_TYPES.GUITAR]: 'Guitar (C3-B5)'
     };
     alert(`Audio changed to ${labels[newType] || 'Piano'}`);
+    updateVarietyModeUI(); // Update variety mode status
+  });
+
+  // Variety Mode Help
+  safe('varietyModeHelp', el=> el.onclick=()=>{
+    alert('Variety Mode:\n\n' +
+          '• Weeks 1-2: Uses only your chosen timbre (100%)\n' +
+          '• Week 3+: Uses 80% chosen timbre, 20% alternate timbres (rotates daily)\n' +
+          '• Activates automatically 2 weeks after starting training\n' +
+          '• Includes per-timbre rescue when accuracy is low on specific timbres');
+  });
+
+  // Dev Force Variety Mode Toggle
+  safe('forceVarietySelect', el=> {
+    el.value = state.timbre?.forceVariety ? 'on' : 'off';
+  });
+  safe('applyForceVarietyBtn', el=> el.onclick=()=>{
+    const newSetting = byId('forceVarietySelect')?.value === 'on';
+    if (state.timbre) {
+      state.timbre.forceVariety = newSetting;
+      updateTimbreMode(); // Recalculate mode
+    }
+    save();
+    alert(`Force Variety Mode ${newSetting ? 'enabled' : 'disabled'}`);
+    updateVarietyModeUI(); // Update UI
   });
 
   // Theme selection
