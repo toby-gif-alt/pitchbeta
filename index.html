@@ -1344,6 +1344,37 @@ function playFlappySound() {
   }
 }
 
+// Piano URL resolution function as specified in requirements
+function resolvePianoUrl(pc, octave) {
+  // Canonical flat pitch class names (A, Bb, B, C, Db, D, Eb, E, F, Gb, G, Ab)
+  const noteKey = `${pc}${octave}`;
+  
+  // Try in order as specified:
+  // a) `audio/${pc}${octave}.mp3` - the repo's real location
+  const primaryPath = `./audio/${noteKey}.mp3`;
+  
+  // b) If pc has a sharp enharmonic: `audio/${sharp}${octave}.mp3`
+  const flatToSharp = { 
+    'Bb': 'A#', 'Db': 'C#', 'Eb': 'D#', 
+    'Gb': 'F#', 'Ab': 'G#' 
+  };
+  const sharpPath = flatToSharp[pc] ? `./audio/${flatToSharp[pc]}${octave}.mp3` : null;
+  
+  // c) Optional fallback: `audio/piano/${pc}${octave}.mp3`
+  const pianoFallback = `./audio/piano/${noteKey}.mp3`;
+  
+  // d) Optional fallback: sharp in `audio/piano/` as well
+  const pianoSharpFallback = flatToSharp[pc] ? `./audio/piano/${flatToSharp[pc]}${octave}.mp3` : null;
+  
+  return {
+    primaryPath,
+    sharpPath,
+    pianoFallback,
+    pianoSharpFallback,
+    noteKey
+  };
+}
+
 // Piano sample initialization and validation
 async function initializePianoSamples() {
   const canonicalPCs = ["A","Bb","B","C","Db","D","Eb","E","F","Gb","G","Ab"];
@@ -1361,51 +1392,41 @@ async function initializePianoSamples() {
   
   for (const pc of canonicalPCs) {
     for (const octave of octaves) {
-      const noteKey = `${pc}${octave}`;
-      
-      // File discovery: prefer "audio/piano/<PC><octave>.mp3", fallback to "audio/<PC><octave>.mp3"
-      const preferredPath = `./audio/piano/${noteKey}.mp3`;
-      const fallbackPath = `./audio/${noteKey}.mp3`;
-      
       const loadPromise = (async () => {
         try {
-          // Try preferred path first
-          let buffer;
-          try {
-            buffer = await loadBuffer(preferredPath);
-            window.assetsReport.piano.present.push(preferredPath);
-          } catch (e) {
-            // Try fallback path
+          const { primaryPath, sharpPath, pianoFallback, pianoSharpFallback, noteKey } = resolvePianoUrl(pc, octave);
+          let buffer = null;
+          let loadedPath = null;
+          
+          // Try paths in order as specified
+          const pathsToTry = [
+            primaryPath,
+            ...(sharpPath ? [sharpPath] : []),
+            pianoFallback,
+            ...(pianoSharpFallback ? [pianoSharpFallback] : [])
+          ];
+          
+          for (const path of pathsToTry) {
             try {
-              buffer = await loadBuffer(fallbackPath);
-              window.assetsReport.piano.present.push(fallbackPath);
-            } catch (e2) {
-              // Both failed - mark as missing
-              window.assetsReport.piano.missing.push(`${noteKey}.mp3 (tried ${preferredPath} and ${fallbackPath})`);
-              console.warn(`Missing piano sample: ${noteKey}`);
-              
-              // Fallback: find nearest available octave for this PC
-              let fallbackBuffer = null;
-              for (const testOctave of [3, 4, 5, 2, 6, 1, 7]) {
-                if (testOctave >= 3 && testOctave <= 5) continue; // Skip target octaves
-                try {
-                  const testNote = `${pc}${testOctave}`;
-                  fallbackBuffer = await loadBuffer(`./audio/${testNote}.mp3`);
-                  console.warn(`Using fallback ${testNote} for missing ${noteKey}`);
-                  break;
-                } catch (e3) {
-                  // Continue searching
-                }
-              }
-              buffer = fallbackBuffer; // May be null if no fallback found
+              buffer = await loadBuffer(path);
+              loadedPath = path;
+              break;
+            } catch (e) {
+              // Continue to next path
             }
           }
           
-          if (buffer) {
+          if (buffer && loadedPath) {
             sampleMap.piano[pc][octave] = buffer;
+            // Store canonical name like "Eb4.mp3" in present list
+            window.assetsReport.piano.present.push(`${noteKey}.mp3`);
+          } else {
+            // Log ONE warning as specified
+            console.warn(`Missing piano sample: ${noteKey}.mp3`);
+            window.assetsReport.piano.missing.push(`${noteKey}.mp3`);
           }
         } catch (e) {
-          console.error(`Failed to load piano sample ${noteKey}:`, e);
+          console.error(`Failed to load piano sample ${pc}${octave}:`, e);
         }
       })();
       
