@@ -1534,10 +1534,17 @@ function currentOctaves(){
   if (state.audioType === AUDIO_TYPES.GUITAR) {
     return [3,4,5]; // Guitar uses C3-B5
   }
-  return [4,5,6]; // Piano uses C4-B6
+  return [3,4,5]; // Piano now uses C3-B5 (was C4-B6)
 }
 function rand(a){ return a[Math.floor(Math.random()*a.length)]; }
 function pcLabel(pc){ return PC_LABEL[pc] || pc; }
+
+// Octave clamping function - enforces final octave ∈ {3,4,5}
+function clampOctave(octave) {
+  if (octave < 3) return 3;
+  if (octave > 5) return 5;
+  return octave;
+}
 
 /* ------------------ ADAPTIVE OOB CONTROLLER (Training Block Based) ------------------ */
 function updateTrainingBlockOobController(trial) {
@@ -2002,7 +2009,8 @@ function logConfusionSeriesData(blockIndex) {
   window.qa.confSeries.push({
     blockIndex: blockIndex,
     weights: {...(state.conf.blockWeights || {})},  // Copy to ensure keys match trained
-    topConfusion: state.conf.topPairAtBlockStart
+    topConfusion: state.conf.topPairAtBlockStart,
+    trained: getTrainedPCs()  // Include trained set as required
   });
 }
 
@@ -2124,7 +2132,7 @@ function createOctaveMixForBlock() {
 
 function sampleOctaveFromMix(octaveMix) {
   if (octaveMix.length === 0) {
-    return rand(currentOctaves());
+    return clampOctave(rand(currentOctaves()));
   }
   
   const randomValue = Math.random();
@@ -2338,7 +2346,7 @@ function nextSpecialTrial(){
   const isTarget = Math.random()<0.5;
   const pitchPc = isTarget ? special.targetPc : rand(plusMinusTwoPitches.filter(p => p !== special.targetPc));
   truePc = pitchPc; isOOBTrial = !isTarget;
-  currentNote = `${pitchPc}${rand(currentOctaves())}`;
+  currentNote = `${pitchPc}${clampOctave(rand(currentOctaves()))}`;
   playSample(currentNote);
   clearTimeout(rtTimer); rtTimer=null; // no RT in specials
   text('promptPill','Target or Other?');
@@ -2748,7 +2756,7 @@ async function nextTrial(forceNew=false){
         // Set octave for OOB
         const set = setFromIndex(state.levelIndex);
         const oobResult = getOobCandidatesWithMirroring(set);
-        chosenOctave = oobResult.octave;
+        chosenOctave = clampOctave(oobResult.octave);  // Apply octave clamp
         currentNote = `${truePc}${chosenOctave}`;
       } else {
         // in-bounds: call chooseDetuneMode(truePc) and assign cents/mode/jlLevel
@@ -2757,7 +2765,7 @@ async function nextTrial(forceNew=false){
         detuneMode = detuneInfo.mode;
         jlLevel = detuneInfo.jlLevel;
         
-        chosenOctave = rand(currentOctaves());
+        chosenOctave = clampOctave(rand(currentOctaves()));  // Apply octave clamp
         currentNote = `${truePc}${chosenOctave}`;
       }
       
@@ -3886,7 +3894,7 @@ function flap(){
     } else {
       // Regular flappy bird with musical pitches (only during rewards)
       const pc = rand(PC); 
-      const note = `${pc}${rand(currentOctaves())}`; 
+      const note = `${pc}${clampOctave(rand(currentOctaves()))}`; 
       playSample(note);
     }
   }
