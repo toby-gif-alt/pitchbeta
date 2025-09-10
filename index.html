@@ -117,7 +117,7 @@
           <h3>🎹 Octaves (per study)</h3>
           <ul>
             <li>Training tones span <strong>three octaves</strong> and are randomized within blocks.</li>
-            <li><strong>Piano/Sine:</strong> C4–B6 • <strong>Guitar:</strong> C3–B5</li>
+            <li><strong>Piano/Sine/Guitar:</strong> C3–B5</li>
             <li>This encourages learning the <em>chroma</em> (pitch class), not just pitch height.</li>
             <li>Tone length: <strong>800 ms</strong>.</li>
           </ul>
@@ -188,8 +188,8 @@
       <div class="scopeWrap">
         <span style="opacity:.9">Audio type:</span>
         <select id="audioTypeSelect" class="scopeSelect">
-          <option value="piano">Piano (C4-B6)</option>
-          <option value="sine">Sine Wave (C4-B6)</option>
+          <option value="piano">Piano (C3-B5)</option>
+          <option value="sine">Sine Wave (C3-B5)</option>
           <option value="guitar">Guitar (C3-B5)</option>
         </select>
         <button id="applyAudioBtn" class="scopeBtn">Change</button>
@@ -315,7 +315,7 @@
       <button class="note" id="btnOther" type="button">Other (OOB)</button>
     </div>
 
-    <p style="opacity:.75;margin-top:8px">800 ms tone • RT limit adapts with set size • 24 blocks per set • Octaves randomized (C4–B6)</p>
+    <p style="opacity:.75;margin-top:8px">800 ms tone • RT limit adapts with set size • 24 blocks per set • Octaves randomized (C3–B5)</p>
   </div>
 
   <!-- Assessment Screen -->
@@ -443,6 +443,23 @@
 const AUDIO_PIANO='./audio';
 const AUDIO_GUITAR='./Guitar';
 const AUDIO_TYPES = {PIANO: 'piano', SINE: 'sine', GUITAR: 'guitar'};
+
+// Timbre ranges for direct sample usage (no octave remapping)
+const TIMBRE_RANGE = {
+  sine: [3, 5],    // synth
+  piano: [3, 5],   // use piano assets directly
+  guitar: [3, 5]   // existing wav programmatic set
+};
+
+// Piano sample map: sampleMap.piano[PC][octave] = AudioBuffer
+const sampleMap = {
+  piano: {}
+};
+
+// Asset reporting for debugging
+window.assetsReport = {
+  piano: { present: [], missing: [] }
+};
 
 // Theme definitions
 const THEMES = {
@@ -1318,6 +1335,86 @@ function playFlappySound() {
   }
 }
 
+// Piano sample initialization and validation
+async function initializePianoSamples() {
+  const canonicalPCs = ["A","Bb","B","C","Db","D","Eb","E","F","Gb","G","Ab"];
+  const octaves = TIMBRE_RANGE.piano; // [3, 4, 5]
+  
+  // Initialize sample map structure
+  for (const pc of canonicalPCs) {
+    sampleMap.piano[pc] = {};
+  }
+  
+  // Clear asset report
+  window.assetsReport.piano = { present: [], missing: [] };
+  
+  const loadPromises = [];
+  
+  for (const pc of canonicalPCs) {
+    for (const octave of octaves) {
+      const noteKey = `${pc}${octave}`;
+      
+      // File discovery: prefer "audio/piano/<PC><octave>.mp3", fallback to "audio/<PC><octave>.mp3"
+      const preferredPath = `./audio/piano/${noteKey}.mp3`;
+      const fallbackPath = `./audio/${noteKey}.mp3`;
+      
+      const loadPromise = (async () => {
+        try {
+          // Try preferred path first
+          let buffer;
+          try {
+            buffer = await loadBuffer(preferredPath);
+            window.assetsReport.piano.present.push(preferredPath);
+          } catch (e) {
+            // Try fallback path
+            try {
+              buffer = await loadBuffer(fallbackPath);
+              window.assetsReport.piano.present.push(fallbackPath);
+            } catch (e2) {
+              // Both failed - mark as missing
+              window.assetsReport.piano.missing.push(`${noteKey}.mp3 (tried ${preferredPath} and ${fallbackPath})`);
+              console.warn(`Missing piano sample: ${noteKey}`);
+              
+              // Fallback: find nearest available octave for this PC
+              let fallbackBuffer = null;
+              for (const testOctave of [3, 4, 5, 2, 6, 1, 7]) {
+                if (testOctave >= 3 && testOctave <= 5) continue; // Skip target octaves
+                try {
+                  const testNote = `${pc}${testOctave}`;
+                  fallbackBuffer = await loadBuffer(`./audio/${testNote}.mp3`);
+                  console.warn(`Using fallback ${testNote} for missing ${noteKey}`);
+                  break;
+                } catch (e3) {
+                  // Continue searching
+                }
+              }
+              buffer = fallbackBuffer; // May be null if no fallback found
+            }
+          }
+          
+          if (buffer) {
+            sampleMap.piano[pc][octave] = buffer;
+          }
+        } catch (e) {
+          console.error(`Failed to load piano sample ${noteKey}:`, e);
+        }
+      })();
+      
+      loadPromises.push(loadPromise);
+    }
+  }
+  
+  // Wait for all samples to load
+  await Promise.all(loadPromises);
+  
+  // Log summary
+  if (window.assetsReport.piano.missing.length > 0) {
+    console.warn(`Piano samples missing: ${window.assetsReport.piano.missing.join(', ')}`);
+  }
+  
+  console.log(`Piano samples loaded: ${window.assetsReport.piano.present.length} present, ${window.assetsReport.piano.missing.length} missing`);
+}
+
 /* Guitar sample mapping - available samples and their pitches */
 const GUITAR_SAMPLES = {
   'E2': 'E2.wav', 'A2': 'A2.wav', 'D3': 'D3.wav', 
@@ -1363,25 +1460,44 @@ async function playSample(note, detuneCents = 0){
     
     // Handle different audio types
     if (state.audioType === AUDIO_TYPES.PIANO) {
-      try{
-        const url = `${AUDIO_PIANO}/${note}.mp3`;
-        const buf = await loadBuffer(url);
-        const src = ctx.createBufferSource();
-        src.buffer = buf;
+      try {
+        // Parse note to get PC and octave
+        const m = /^([A-G](?:b)?)(\d)$/.exec(note);
+        if (!m) throw new Error(`Invalid note format: ${note}`);
         
-        // Apply detune using detune property if available, otherwise playbackRate
-        if (src.detune) {
-          src.detune.value = detuneCents;
+        const pc = m[1];
+        const octave = parseInt(m[2]);
+        
+        // Clamp octave to TIMBRE_RANGE for piano
+        const clampedOctave = Math.max(TIMBRE_RANGE.piano[0], Math.min(TIMBRE_RANGE.piano[1], octave));
+        
+        // Use direct sample from sample map (no octave remapping)
+        const buffer = sampleMap.piano[pc] && sampleMap.piano[pc][clampedOctave];
+        
+        if (buffer) {
+          const src = ctx.createBufferSource();
+          src.buffer = buffer;
+          
+          // Apply fine detune only (no coarse octave transposition)
+          if (src.detune) {
+            src.detune.value = detuneCents;
+          } else {
+            src.playbackRate.value = detuneMultiplier;
+          }
+          
+          const g = ctx.createGain(); 
+          g.gain.value = 1;
+          src.connect(g).connect(ctx.destination);
+          const t = ctx.currentTime;
+          src.start(t); 
+          src.stop(t + TONE_MS/1000);
+          return;
         } else {
-          src.playbackRate.value = detuneMultiplier;
+          console.warn(`No piano sample found for ${pc}${clampedOctave}, falling back to sine`);
         }
-        
-        const g = ctx.createGain(); g.gain.value = 1;
-        src.connect(g).connect(ctx.destination);
-        const t = ctx.currentTime;
-        src.start(t); src.stop(t + TONE_MS/1000);
-        return;
-      }catch(_e){}
+      } catch(e) {
+        console.warn('Piano sample playback failed:', e);
+      }
     } else if (state.audioType === AUDIO_TYPES.GUITAR) {
       try{
         const {sample, semitones} = findClosestGuitarSample(note);
@@ -2798,6 +2914,10 @@ function finalizeGrade(args) {
     detuneMode: cur.detuneMode || (cur.oob ? 'oob' : 'anchor'),
     jlLevel: cur.jlLevel ?? null,
     timbreUsed: cur.timbre || state.audioType || 'sine',
+    // Piano-specific octave tracking
+    targetOctave: cur.octave ?? null,
+    sourceOctave: (state.audioType === AUDIO_TYPES.PIANO) ? cur.octave : cur.octave, // For piano: sourceOctave = targetOctave (no remapping)
+    semitoneShift: (state.audioType === AUDIO_TYPES.PIANO) ? 0 : (cur.semitoneShift ?? 0), // Piano has no coarse octave shift
     // Legacy fields for compatibility with old readers:
     pc: cur.truePc,
     guess: isOobGuess ? 'OOB' : guessPc
@@ -3475,6 +3595,9 @@ function wireOnce(){
   
   // E) Preload flappy audio on app init
   preloadFlappyAudio();
+  
+  // Initialize piano samples for octaves 3,4,5
+  initializePianoSamples();
   
   // Start
   safe('startBtn', el=> el.onclick=()=>{
