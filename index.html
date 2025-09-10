@@ -1262,25 +1262,22 @@ function pickOobPc(trained) {
 
 // A) Source of truth for trained set - implements getTrainedPCs() requirement
 function getTrainedPCs() {
-  // Preferred: read from existing app state
-  if (Array.isArray(state?.training?.activeSet) && state.training.activeSet.length) {
+  // Preferred: state.training.activeSet if non-empty (array of canonical flats)
+  if (Array.isArray(state?.training?.activeSet) && state.training.activeSet.length > 0) {
     return [...state.training.activeSet];
   }
 
-  if (Array.isArray(state?.currentSet) && state.currentSet.length) {
-    return [...state.currentSet];
-  }
-
-  // Fallback: derive from UI (enabled pitch buttons) 
+  // Else: read enabled .note-btn elements and use el.dataset.pc (canonical flats)
   const els = Array.from(document.querySelectorAll('.note-btn:not([aria-disabled="true"])'));
-  const pcs = els.map(el => el.dataset.pc || el.textContent?.trim()).filter(Boolean);
+  const pcs = els.map(el => el.dataset.pc).filter(Boolean);
   if (pcs.length > 0) {
-    return Array.from(new Set(pcs));
+    return Array.from(new Set(pcs)); // Return unique array
   }
 
-  // Final fallback: use current trained set from level index
+  // Never return [] if any note buttons are enabled - use level-based fallback
   const set = setFromIndex(state.levelIndex);
-  return trainedSet(set);
+  const fallbackPcs = trainedSet(set);
+  return fallbackPcs.length > 0 ? fallbackPcs : ['C']; // Ultimate fallback to ensure non-empty
 }
 
 /* ------------------ AUDIO ------------------ */
@@ -1531,10 +1528,8 @@ function getPlusMinusTwoSemitones(targetPc){
   return pitches;
 }
 function currentOctaves(){ 
-  if (state.audioType === AUDIO_TYPES.GUITAR) {
-    return [3,4,5]; // Guitar uses C3-B5
-  }
-  return [4,5,6]; // Piano uses C4-B6
+  // Clamp generated octaves to 3–5 (inclusive). Remove any use of 6.
+  return [3,4,5]; // Both Guitar and Piano use C3-B5
 }
 function rand(a){ return a[Math.floor(Math.random()*a.length)]; }
 function pcLabel(pc){ return PC_LABEL[pc] || pc; }
@@ -1758,6 +1753,9 @@ function computeBlockWeightsAtStart() {
   // D) Use getTrainedPCs() as source of truth for trained set
   const trainedPcs = getTrainedPCs();
   
+  // Store trained PCs in state.conf.trainedAtBlockStart for logging
+  state.conf.trainedAtBlockStart = [...trainedPcs];
+  
   // D) Compute perf stats from last 40 in-bounds trials per trained PC
   for (const pc of trainedPcs) {
     const stats = state.perfStats[pc];
@@ -1935,12 +1933,7 @@ function choosePcWithAntiStreak() {
   let pc = sampleDiscrete(W); // Weighted pick
   
   if (pc === state.conf.prevPc && state.conf.runLen >= 2) {
-    // Try once excluding prevPc
     pc = sampleDiscreteExclude(W, state.conf.prevPc) || pc;
-    if (pc === state.conf.prevPc) {
-      // Force change: pick the highest weight among PCs != prevPc
-      pc = argmaxKey(W, k => (k === state.conf.prevPc ? -Infinity : W[k]));
-    }
   }
   
   // Update streak bookkeeping
@@ -2432,13 +2425,8 @@ function beginAssessment() {
     const randomAudioType = rand(audioTypes);
     const randomPc = rand(PC);
     
-    // Use appropriate octave range for the audio type
-    let octaves;
-    if (randomAudioType === AUDIO_TYPES.GUITAR) {
-      octaves = [3, 4, 5];
-    } else {
-      octaves = [4, 5, 6];
-    }
+    // Use appropriate octave range for the audio type - clamp to 3-5
+    let octaves = [3, 4, 5]; // Both audio types now use same range
     const randomOctave = rand(octaves);
     
     assessmentTrials.push({
@@ -2762,8 +2750,9 @@ async function nextTrial(forceNew=false){
       }
       
       // C) Freeze in state.current (REQUIRED for grading)
+      state.meta.trialSeq = (state.meta.trialSeq || 0) + 1;
       state.current = {
-        trialId: ++state.meta.trialSeq,        // integer incrementing
+        trialId: state.meta.trialSeq,        // integer incrementing
         truePc,                                // REQUIRED; non-null
         oob: !!plannedOOB,
         octave: chosenOctave,
@@ -2803,8 +2792,8 @@ async function nextTrial(forceNew=false){
 
 function finalizeGrade(args) {
   const cur = state.current;
-  if (!cur || state.grade.inProgress) return;
-  state.grade.inProgress = true;
+  if (!cur || state.grade?.inProgress || state.grade?.lastTrialId === cur.trialId) return;
+  state.grade = { inProgress: true, lastTrialId: cur.trialId };
 
   // A) Handle both old and new calling conventions for compatibility
   if (typeof args === 'string' || args === null) {
@@ -2848,7 +2837,6 @@ function finalizeGrade(args) {
   };
   
   state.trials.push(t);
-  state.grade.lastTrialId = cur.trialId;
   state.grade.inProgress = false;
 
   renderFeedback(t);
