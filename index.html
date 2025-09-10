@@ -492,6 +492,9 @@ const MIDI_PC_BASE = {
   Eb: 75, E: 76, F: 77, Gb: 78, G: 79, Ab: 80
 };
 
+// Audio sampling rate for recall system
+const RECALL_SAMPLE_RATE = 44100;
+
 // Timbre ranges for direct sample usage (no octave remapping)
 const TIMBRE_RANGE = {
   sine: [3, 5],    // synth
@@ -2626,35 +2629,70 @@ function createHumButton(targetPc, onComplete) {
       display.innerHTML = '<span style="color: var(--accent); font-weight: 600;">Recording... keep humming</span>';
       result.innerHTML = '';
       
-      // Hardened mic pipeline for Recall
+      // AudioWorklet mic pipeline
       const ctx = (window.audioCtx ||= new (window.AudioContext||window.webkitAudioContext)());
       await ctx.resume(); // must be after a user gesture
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: false, noiseSuppression: false, autoGainControl: false,
-          channelCount: 1
-        }
-      });
-      const source = ctx.createMediaStreamSource(stream);
+      
+      if (!ctx.audioWorklet) {
+        console.warn('AudioWorklet not supported; falling back to ScriptProcessor');
+        // Fallback: use existing ScriptProcessor path
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+            channelCount: 1
+          }
+        });
+        const source = ctx.createMediaStreamSource(stream);
+        const N = 2048;
+        const proc = ctx.createScriptProcessor(N, 1, 1);
+        source.connect(proc);
+        const sink = ctx.createGain(); sink.gain.value = 0; proc.connect(sink); sink.connect(ctx.destination);
+        
+        state.recall = state.recall || {};
+        state.recall.backend = 'script';
+        state.recall.detector = window.detectors.createPitchDetector({ method:'yin', sampleRate: ctx.sampleRate });
+        
+        let frames = [];
+        proc.onaudioprocess = (e) => {
+          if (!recording) return;
+          const ch0 = e.inputBuffer.getChannelData(0);
+          frames.push(new Float32Array(ch0));
+        };
+        state.recall.frames = frames;
+      } else {
+        await ctx.audioWorklet.addModule('worklets/recall-capture-processor.js');
+        const node = new AudioWorkletNode(ctx, 'recall-capture');
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { 
+            echoCancellation: false, 
+            noiseSuppression: false, 
+            autoGainControl: false, 
+            channelCount: 1 
+          }
+        });
+        const src = ctx.createMediaStreamSource(stream);
+        src.connect(node); // node does not need to connect to destination
+        
+        state.recall = state.recall || {};
+        state.recall.backend = 'worklet';
+        state.recall.frames = []; // store last session frames
+        state.recall.framesCount = 0;
+        node.port.onmessage = (e) => {
+          if (!recording) return;
+          // e.data is a transferred Float32Array
+          state.recall.frames.push(e.data);
+          state.recall.framesCount = (state.recall.framesCount || 0) + 1;
+        };
+        state.recall.workletNode = node;
+      }
 
-      // Use ScriptProcessor or AudioWorklet. ScriptProcessor is OK here:
-      const N = 2048;
-      const proc = ctx.createScriptProcessor(N, 1, 1);
-      source.connect(proc);
-      const sink = ctx.createGain(); sink.gain.value = 0; proc.connect(sink); sink.connect(ctx.destination);
-
-      // Create detector once per session
-      state.recall = state.recall || {};
+      // Create detector once
       state.recall.detector = window.detectors.createPitchDetector({ method:'yin', sampleRate: ctx.sampleRate });
-
-      // Capture frames during a 2s take
-      let frames = [];
-      proc.onaudioprocess = (e) => {
-        if (!recording) return;
-        const ch0 = e.inputBuffer.getChannelData(0);
-        // copy to avoid ring buffer reuse
-        frames.push(new Float32Array(ch0));
-      };
+      
+      // Start/Stop capture per prompt: start
+      state.recall.frames = []; 
+      state.recall.framesCount = 0; 
+      state.recall.capturing = true;
       
       // Start pitch detection loop
       const detectPitch = () => {
@@ -2662,8 +2700,8 @@ function createHumButton(targetPc, onComplete) {
         
         const elapsed = performance.now() - recordingStart;
         
-        if (frames.length > 0) {
-          const latestFrame = frames[frames.length - 1];
+        if (state.recall.frames.length > 0) {
+          const latestFrame = state.recall.frames[state.recall.frames.length - 1];
           const hz = state?.recall?.detector?.getPitch(latestFrame) || null;
           
           if (hz && hz > 80 && hz < 800) {
@@ -2701,6 +2739,10 @@ function createHumButton(targetPc, onComplete) {
     if (!recording) return;
     
     recording = false;
+    
+    // Stop capture per prompt: stop
+    state.recall.capturing = false; 
+    const frames = (state.recall && state.recall.frames) ? state.recall.frames.slice() : [];
     
     if (microphone) {
       microphone.disconnect();
@@ -2918,35 +2960,70 @@ function createSequentialHumButton(targetPc, index) {
     button.style.background = 'var(--bad)';
     
     try {
-      // Hardened mic pipeline for Recall
+      // AudioWorklet mic pipeline
       const ctx = (window.audioCtx ||= new (window.AudioContext||window.webkitAudioContext)());
       await ctx.resume(); // must be after a user gesture
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: false, noiseSuppression: false, autoGainControl: false,
-          channelCount: 1
-        }
-      });
-      const source = ctx.createMediaStreamSource(stream);
+      
+      if (!ctx.audioWorklet) {
+        console.warn('AudioWorklet not supported; falling back to ScriptProcessor');
+        // Fallback: use existing ScriptProcessor path
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+            channelCount: 1
+          }
+        });
+        const source = ctx.createMediaStreamSource(stream);
+        const N = 2048;
+        const proc = ctx.createScriptProcessor(N, 1, 1);
+        source.connect(proc);
+        const sink = ctx.createGain(); sink.gain.value = 0; proc.connect(sink); sink.connect(ctx.destination);
+        
+        state.recall = state.recall || {};
+        state.recall.backend = 'script';
+        state.recall.detector = window.detectors.createPitchDetector({ method:'yin', sampleRate: ctx.sampleRate });
+        
+        let frames = [];
+        proc.onaudioprocess = (e) => {
+          if (!recording) return;
+          const ch0 = e.inputBuffer.getChannelData(0);
+          frames.push(new Float32Array(ch0));
+        };
+        state.recall.frames = frames;
+      } else {
+        await ctx.audioWorklet.addModule('worklets/recall-capture-processor.js');
+        const node = new AudioWorkletNode(ctx, 'recall-capture');
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { 
+            echoCancellation: false, 
+            noiseSuppression: false, 
+            autoGainControl: false, 
+            channelCount: 1 
+          }
+        });
+        const src = ctx.createMediaStreamSource(stream);
+        src.connect(node); // node does not need to connect to destination
+        
+        state.recall = state.recall || {};
+        state.recall.backend = 'worklet';
+        state.recall.frames = []; // store last session frames
+        state.recall.framesCount = 0;
+        node.port.onmessage = (e) => {
+          if (!recording) return;
+          // e.data is a transferred Float32Array
+          state.recall.frames.push(e.data);
+          state.recall.framesCount = (state.recall.framesCount || 0) + 1;
+        };
+        state.recall.workletNode = node;
+      }
 
-      // Use ScriptProcessor or AudioWorklet. ScriptProcessor is OK here:
-      const N = 2048;
-      const proc = ctx.createScriptProcessor(N, 1, 1);
-      source.connect(proc);
-      const sink = ctx.createGain(); sink.gain.value = 0; proc.connect(sink); sink.connect(ctx.destination);
-
-      // Create detector once per session
-      state.recall = state.recall || {};
+      // Create detector once
       state.recall.detector = window.detectors.createPitchDetector({ method:'yin', sampleRate: ctx.sampleRate });
-
-      // Capture frames during a 2s take
-      let frames = [];
-      proc.onaudioprocess = (e) => {
-        if (!recording) return;
-        const ch0 = e.inputBuffer.getChannelData(0);
-        // copy to avoid ring buffer reuse
-        frames.push(new Float32Array(ch0));
-      };
+      
+      // Start/Stop capture per prompt: start
+      state.recall.frames = []; 
+      state.recall.framesCount = 0; 
+      state.recall.capturing = true;
       
       const recordingStart = Date.now();
       
@@ -2955,8 +3032,8 @@ function createSequentialHumButton(targetPc, index) {
         
         const elapsed = Date.now() - recordingStart;
         
-        if (frames.length > 0) {
-          const latestFrame = frames[frames.length - 1];
+        if (state.recall.frames.length > 0) {
+          const latestFrame = state.recall.frames[state.recall.frames.length - 1];
           const hz = state?.recall?.detector?.getPitch(latestFrame) || null;
           
           if (hz && hz > 80 && hz < 800) {
@@ -2985,6 +3062,10 @@ function createSequentialHumButton(targetPc, index) {
     if (!recording) return;
     
     recording = false;
+    
+    // Stop capture per prompt: stop
+    state.recall.capturing = false; 
+    const frames = (state.recall && state.recall.frames) ? state.recall.frames.slice() : [];
     
     if (microphone) {
       microphone.disconnect();
@@ -3093,54 +3174,79 @@ function renderRecallReviewPhase() {
   });
 }
 
-// Generate review content with needle gauge
+// Generate review content with three-note gauge
 function generateRecallReviewContent(take) {
   if (!take.nearestMidi || take.medianCents === null) {
     return `
       <h3>Target: ${pcLabel(take.pc)}</h3>
       <p style="color:var(--bad)">No clear pitch detected</p>
-      <p style="opacity:0.7">${take.validSamples} audio samples recorded</p>
+      <p style="opacity:0.7">${take.validSamples || 0} audio samples recorded</p>
     `;
   }
   
-  // Get the two adjacent semitones for the gauge
-  const mLo = Math.floor(take.nearestMidi);
-  const mHi = mLo + 1;
+  // Determine TARGET midi: target = base + 12*nearestOct
+  const target = take.nearestMidi;
+  const lower = target - 1; // lower semitone
+  const upper = target + 1; // upper semitone
   
-  // Convert MIDI to note labels with octaves
-  const loNote = midiToNoteLabel(mLo);
-  const hiNote = midiToNoteLabel(mHi);
+  // Convert all three to canonical labels with octaves (flats)
+  const lowerLabel = midiToNoteLabel(lower);
+  const targetLabel = midiToNoteLabel(target); 
+  const upperLabel = midiToNoteLabel(upper);
   
-  // Calculate gauge position (0-100 between mLo and mHi)
-  const mMed = take.nearestMidi + (take.medianCents / 100);
-  const gaugePos = Math.max(0, Math.min(100, (mMed - mLo) * 100));
+  // Gauge domain: [-100¢, 0¢, +100¢] (center = TARGET). Needle at medianCents.
+  const gaugePos = Math.max(0, Math.min(100, (take.medianCents + 100) / 2)); // Convert -100 to +100 range to 0-100%
   
-  // Format cents with sign
-  const centsStr = take.medianCents > 0 ? `+${take.medianCents}¢` : `${take.medianCents}¢`;
-  const sharpFlat = take.medianCents > 0 ? '(sharp)' : take.medianCents < 0 ? '(flat)' : '(on pitch)';
+  // Color by verdict:
+  // - green: |median| ≤ 10¢ AND SD ≤ 15¢
+  // - yellow: |median| ≤ 30¢ 
+  // - red: otherwise
+  let verdictColor;
+  if (Math.abs(take.medianCents) <= 10 && take.sdCents <= 15) {
+    verdictColor = 'var(--good)'; // green
+  } else if (Math.abs(take.medianCents) <= 30) {
+    verdictColor = 'var(--accent)'; // yellow
+  } else {
+    verdictColor = 'var(--bad)'; // red
+  }
   
-  // Verdict color
-  const verdictColors = {
-    'On target': 'var(--good)',
-    'Close': 'var(--accent)', 
-    'Off': 'var(--bad)'
-  };
-  const verdictColor = verdictColors[take.verdict] || 'var(--neutral)';
+  // Format cents with sign - numeric "+12¢ sharp" or "−18¢ flat"
+  const centsStr = take.medianCents > 0 ? `+${Math.round(take.medianCents)}¢ sharp` : 
+                   take.medianCents < 0 ? `${Math.round(take.medianCents)}¢ flat` :
+                   `${Math.round(take.medianCents)}¢ on pitch`;
   
   return `
-    <h3>Target: ${pcLabel(take.pc)} (nearest ${midiToNoteLabel(take.nearestMidi)})</h3>
-    <div style="margin:20px 0">
-      <div style="display:flex;justify-content:space-between;margin-bottom:8px;font-size:14px;font-weight:600">
-        <span>${loNote}</span>
-        <span>${hiNote}</span>
+    <h3>Target: ${pcLabel(take.pc)}</h3>
+    <div style="margin:24px 0">
+      <!-- Three-note gauge labels -->
+      <div style="display:flex;justify-content:space-between;margin-bottom:12px;font-size:16px;font-weight:600">
+        <span style="opacity:0.8">${lowerLabel}</span>
+        <span style="color:var(--accent);font-size:18px">${targetLabel}</span>
+        <span style="opacity:0.8">${upperLabel}</span>
       </div>
-      <div style="position:relative;height:20px;background:var(--muted);border-radius:10px;overflow:hidden">
-        <div style="position:absolute;left:${gaugePos}%;top:0;bottom:0;width:4px;background:${verdictColor};transform:translateX(-50%)"></div>
+      
+      <!-- Gauge with needle -->
+      <div style="position:relative;height:24px;background:linear-gradient(to right, var(--muted) 0%, var(--muted2) 50%, var(--muted) 100%);border-radius:12px;overflow:hidden;border:1px solid var(--muted)">
+        <!-- Center line for TARGET -->
+        <div style="position:absolute;left:50%;top:0;bottom:0;width:2px;background:var(--accent);opacity:0.6;transform:translateX(-50%)"></div>
+        <!-- Needle at medianCents position -->
+        <div style="position:absolute;left:${gaugePos}%;top:0;bottom:0;width:4px;background:${verdictColor};transform:translateX(-50%);border-radius:2px;box-shadow:0 0 4px rgba(0,0,0,0.3)"></div>
+      </div>
+      
+      <!-- Scale markers -->
+      <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:12px;opacity:0.6">
+        <span>-100¢</span>
+        <span>0¢</span>
+        <span>+100¢</span>
       </div>
     </div>
-    <div style="margin:16px 0">
-      <div style="font-size:18px;font-weight:600;color:${verdictColor}">${centsStr} ${sharpFlat}</div>
-      <div style="opacity:0.7;margin-top:4px">Stability: ${take.sdCents}¢ SD • ${take.validSamples} samples</div>
+    
+    <!-- Results -->
+    <div style="margin:20px 0">
+      <div style="font-size:20px;font-weight:600;color:${verdictColor};margin-bottom:8px">${centsStr}</div>
+      <div style="opacity:0.7;font-size:14px">
+        Stability: ${Math.round(take.sdCents)}¢ SD • ${take.validSamples || 0} samples
+      </div>
     </div>
   `;
 }
