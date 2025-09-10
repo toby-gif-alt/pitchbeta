@@ -1862,31 +1862,15 @@ function getTopConfusionPair() {
 }
 
 // F) Anti-streak ≤ 2 for in-bounds sampling with guardrails
-function choosePcWithAntiStreak() {
-  const trained = getTrainedPCs();
-  
-  // H) Guardrails: If no trained PCs, return null
-  if (!trained || trained.length === 0) {
-    console.warn('choosePcWithAntiStreak: No trained PCs available');
+function choosePcWithAntiStreak(weights) {
+  // Guardrails: If no weights, return null
+  if (!weights || Object.keys(weights).length === 0) {
+    console.warn('choosePcWithAntiStreak: No weights available');
     return null;
   }
   
-  // H) Guardrails: If only one trained PC, return it directly (anti-streak is moot)
-  if (trained.length === 1) {
-    const onlyPc = trained[0];
-    state.conf.prevPc = onlyPc;
-    state.conf.runLen = (state.conf.prevPc === onlyPc) ? (state.conf.runLen || 0) + 1 : 1;
-    return onlyPc;
-  }
-  
-  const W = state.conf.blockWeights;
-  if (!W || Object.keys(W).length === 0) {
-    console.warn('choosePcWithAntiStreak: No block weights available');
-    return null;
-  }
-  
-  // Helper: sample from discrete distribution
-  function sampleDiscrete(weights) {
+  // Helper: sample from discrete distribution (weightedSample)
+  function weightedSample(weights) {
     const keys = Object.keys(weights);
     const rand = Math.random();
     let cumulative = 0;
@@ -1897,8 +1881,8 @@ function choosePcWithAntiStreak() {
     return keys[keys.length - 1]; // Fallback
   }
   
-  // Helper: sample excluding a specific PC
-  function sampleDiscreteExclude(weights, excludePc) {
+  // Helper: sample excluding a specific PC (weightedSampleExcluding)
+  function weightedSampleExcluding(weights, excludePc) {
     const filtered = {};
     let totalWeight = 0;
     for (const pc in weights) {
@@ -1913,30 +1897,13 @@ function choosePcWithAntiStreak() {
     for (const pc in filtered) {
       filtered[pc] = filtered[pc] / totalWeight;
     }
-    return sampleDiscrete(filtered);
+    return weightedSample(filtered);
   }
   
-  // Helper: find PC with highest weight excluding a specific PC
-  function argmaxKey(weights, scoreFn) {
-    let bestPc = null;
-    let bestScore = -Infinity;
-    for (const pc in weights) {
-      const score = scoreFn(pc);
-      if (score > bestScore) {
-        bestScore = score;
-        bestPc = pc;
-      }
-    }
-    return bestPc;
-  }
-  
-  let pc = sampleDiscrete(W); // Weighted pick
-  
+  let pc = weightedSample(weights);
   if (pc === state.conf.prevPc && state.conf.runLen >= 2) {
-    pc = sampleDiscreteExclude(W, state.conf.prevPc) || pc;
+    pc = weightedSampleExcluding(weights, state.conf.prevPc) || pc;
   }
-  
-  // Update streak bookkeeping
   if (pc === state.conf.prevPc) {
     state.conf.runLen++;
   } else {
@@ -1980,7 +1947,7 @@ function selectInBoundsNoteConfusionAware(usable) {
   }
   
   // Use frozen block weights with anti-streak rule
-  return choosePcWithAntiStreak();
+  return choosePcWithAntiStreak(state.conf.blockWeights);
 }
 
 // G) Log confusion series data for completed training blocks (once per block)
