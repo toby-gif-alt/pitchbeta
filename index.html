@@ -1102,6 +1102,14 @@ if (!state.recall) {
   save();
 }
 
+// 4) Initialize review arrays for warm review pager
+if (!state.recall.review) {
+  state.recall.review = [];
+}
+if (typeof state.recall.reviewIndex === 'undefined') {
+  state.recall.reviewIndex = 0;
+}
+
 // Migration for confusion tracking
 if (!state.confusionMatrix || !state.perfStats || typeof state.lastInBoundsPc === 'undefined') {
   // Initialize confusion tracking structures
@@ -1270,13 +1278,121 @@ function startDailySession() {
     };
   }
   
-  // Start the session timer
-  if (sessionTimer) clearInterval(sessionTimer);
-  sessionTimer = setInterval(updateDailySession, 100); // Update every 100ms
+  // Start the unified ticker instead of separate session timer
+  startUnifiedTicker();
   
   save();
   updateSessionUI();
   return true;
+}
+
+/* ------------------ UNIFIED TIMER SYSTEM ------------------ */
+// 3) Single source of truth for timers + UI sync  
+let unifiedTickerId = null;
+
+function startUnifiedTicker() {
+  if (unifiedTickerId) {
+    clearInterval(unifiedTickerId);
+  }
+  
+  // Single 1Hz ticker that updates all UI timer labels
+  unifiedTickerId = setInterval(updateAllTimerUI, 1000);
+}
+
+function stopUnifiedTicker() {
+  if (unifiedTickerId) {
+    clearInterval(unifiedTickerId);
+    unifiedTickerId = null;
+  }
+}
+
+function updateAllTimerUI() {
+  // Update session timers if active
+  if (state.session && state.session.startedAt) {
+    updateSessionUI();
+  }
+  
+  // Update menu timer to reflect remaining time = 30 - (minutesCompleted + elapsedMs/60000)
+  updateMenuTimer();
+  
+  // Update trainer timer if on trainer screen
+  if (sessionActive) {
+    updateTrainerTimer();
+  }
+  
+  // Handle daily session progression
+  if (sessionActive && !paused && !state.session.inBreak) {
+    // Update session elapsed time
+    const elapsed = state.session.elapsedMs + 1000;
+    const blockElapsed = state.session.blockElapsedMs + 1000;
+    
+    if (blockElapsed >= getCurrentBlockDuration()) {
+      // Block complete
+      completeDailyBlock();
+    } else {
+      state.session.elapsedMs = elapsed;
+      state.session.blockElapsedMs = blockElapsed;
+      
+      // Update daily progress
+      state.daily.minutesCompleted = Math.floor(elapsed / 60000);
+      if (state.daily.minutesCompleted >= 30 && !state.daily.completedAt) {
+        state.daily.completedAt = Date.now();
+      }
+    }
+    
+    save();
+  }
+  
+  // Handle break countdowns
+  if (state.session && state.session.inBreak && state.session.breakRemainingMs > 0) {
+    state.session.breakRemainingMs = Math.max(0, state.session.breakRemainingMs - 1000);
+    if (state.session.breakRemainingMs === 0) {
+      endDailyBreak();
+    }
+    save();
+  }
+}
+
+function updateMenuTimer() {
+  const capInfo = byId('capInfo');
+  if (!capInfo) return;
+  
+  if (isDailyLocked()) {
+    capInfo.textContent = '🎉 Daily goal achieved!';
+    capInfo.style.background = 'var(--good)';
+  } else {
+    // Menu timer must reflect remaining time = 30 - (minutesCompleted + elapsedMs/60000)
+    const minutesCompleted = state.daily.minutesCompleted || 0;
+    const currentElapsedMs = (state.session && state.session.startedAt) ? state.session.elapsedMs : 0;
+    const currentMinutes = Math.floor(currentElapsedMs / 60000);
+    const totalMinutes = minutesCompleted + currentMinutes;
+    const remaining = Math.max(0, 30 - totalMinutes);
+    
+    capInfo.textContent = `Left: ${remaining}:00 of 30:00`;
+    capInfo.style.background = '';
+  }
+}
+
+function updateTrainerTimer() {
+  if (!state.session || !state.session.startedAt) return;
+  
+  const timerInfo = byId('timerInfo');
+  if (timerInfo) {
+    const minutesCompleted = state.daily.minutesCompleted || 0;
+    const currentElapsedMs = state.session.elapsedMs || 0;
+    const currentMinutes = Math.floor(currentElapsedMs / 60000);
+    const totalMinutes = minutesCompleted + currentMinutes;
+    const remainingMinutes = Math.max(0, 30 - totalMinutes);
+    const remainingSeconds = Math.max(0, 60 - Math.floor((currentElapsedMs % 60000) / 1000));
+    
+    if (remainingMinutes === 0 && remainingSeconds === 0) {
+      timerInfo.textContent = 'Time up!';
+      // Trigger session end
+      endSessionWithWarmRecall();
+    } else {
+      timerInfo.textContent = `Left: ${remainingMinutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+    }
+  }
 }
 
 function updateDailySession() {
@@ -1600,10 +1716,17 @@ function activeDuration(session){
 /* ------------------ FLAGS/TIMERS ------------------ */
 let sessionActive=false, paused=false;
 let rtTimer=null, autoTimer=null, tickId=null, timeblockTickId=null, breakModalTimer=null;
-function stopAllTimers(){ if(tickId){ clearInterval(tickId); tickId=null; } if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; } if(autoTimer){ clearTimeout(autoTimer); autoTimer=null; } if(timeblockTickId){ cancelAnimationFrame(timeblockTickId); timeblockTickId=null; } if(breakModalTimer){ clearInterval(breakModalTimer); breakModalTimer=null; }
+function stopAllTimers(){ 
+  if(tickId){ clearInterval(tickId); tickId=null; } 
+  if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; } 
+  if(autoTimer){ clearTimeout(autoTimer); autoTimer=null; } 
+  if(timeblockTickId){ cancelAnimationFrame(timeblockTickId); timeblockTickId=null; } 
+  if(breakModalTimer){ clearInterval(breakModalTimer); breakModalTimer=null; }
+  // Stop unified ticker
+  stopUnifiedTicker();
+}
 
 /* one-shot suppression so strict modal doesn't appear right after specials */
-}
 let suppressStrictOnce=false;
 
 /* ------------------ TIMEBLOCK SYSTEM ------------------ */
@@ -3173,12 +3296,51 @@ function startRecallReview() {
   currentRecallSession.phase = 'review';
   currentRecallSession.reviewIndex = 0;
   
+  // 4) Keep persistent review state in state.recall as specified
+  if (!state.recall.review) {
+    state.recall.review = [];
+  }
+  if (typeof state.recall.reviewIndex === 'undefined') {
+    state.recall.reviewIndex = 0;
+  }
+  
+  // Update persistent state with current session takes
+  state.recall.review = [...currentRecallSession.takes];
+  state.recall.reviewIndex = 0;
+  
   // Save all results to state
   for (const take of currentRecallSession.takes) {
     saveRecallData(currentRecallSession.type, take);
   }
   
   renderRecallReviewPhase();
+}
+
+// 4) Improved review navigation using persistent state  
+function updateRecallReviewUI(item, i, total) {
+  // Update the UI elements that show current position and content
+  const positionEl = document.querySelector('.recall-review-position');
+  if (positionEl) {
+    positionEl.textContent = `Result ${i + 1} of ${total}`;
+  }
+  
+  // Update the main content area
+  const contentEl = document.querySelector('.recall-review-content');
+  if (contentEl && item) {
+    contentEl.innerHTML = generateRecallReviewContent(item);
+  }
+  
+  // Update button states
+  const prevBtn = byId('btnRecallPrev');
+  const nextBtn = byId('btnRecallNext');
+  
+  if (prevBtn) {
+    prevBtn.disabled = (i === 0);
+  }
+  
+  if (nextBtn) {
+    nextBtn.textContent = (i < total - 1) ? 'Next ▶' : 'Done';
+  }
 }
 
 // Render the review phase carousel
@@ -3190,7 +3352,11 @@ function renderRecallReviewPhase() {
   
   if (!modal) return;
   
-  const currentTake = currentRecallSession.takes[currentRecallSession.reviewIndex];
+  // Use persistent state for navigation
+  const reviewItems = state.recall.review || currentRecallSession.takes;
+  const reviewIndex = state.recall.reviewIndex !== undefined ? state.recall.reviewIndex : currentRecallSession.reviewIndex;
+  const currentTake = reviewItems[reviewIndex];
+  
   if (!currentTake) return;
   
   // Generate review content
@@ -3201,36 +3367,42 @@ function renderRecallReviewPhase() {
     <div class="card" style="max-width:600px;margin:20px;text-align:center">
       <h2>${currentRecallSession.type === 'cold' ? '🧊 Cold' : '🔥 Warm'} Recall - Review</h2>
       <div style="margin:20px 0">
-        <div class="pill" style="margin-bottom:16px">
-          Result ${currentRecallSession.reviewIndex + 1} of ${currentRecallSession.takes.length}
+        <div class="pill recall-review-position" style="margin-bottom:16px">
+          Result ${reviewIndex + 1} of ${reviewItems.length}
         </div>
-        <div style="background:var(--muted2);border-radius:12px;padding:20px;margin:16px 0">
+        <div class="recall-review-content" style="background:var(--muted2);border-radius:12px;padding:20px;margin:16px 0">
           ${reviewContent}
         </div>
       </div>
       <div style="display:flex;justify-content:space-between;gap:12px">
         <button id="btnRecallPrev" style="background:var(--muted)" 
-          ${currentRecallSession.reviewIndex === 0 ? 'disabled' : ''}>◀ Back</button>
+          ${reviewIndex === 0 ? 'disabled' : ''}>◀ Back</button>
         <div style="flex:1"></div>
         <button id="btnRecallNext" style="background:var(--good)">
-          ${currentRecallSession.reviewIndex < currentRecallSession.takes.length - 1 ? 'Next ▶' : 'Done'}
+          ${reviewIndex < reviewItems.length - 1 ? 'Next ▶' : 'Done'}
         </button>
       </div>
     </div>
   `;
   
-  // Wire up navigation
+  // 4) Wire Next/Back buttons to increment/decrement reviewIndex and call updateRecallReviewUI
   safe('btnRecallPrev', el => el.onclick = () => {
-    if (currentRecallSession.reviewIndex > 0) {
-      currentRecallSession.reviewIndex--;
-      renderRecallReviewPhase();
+    if (state.recall.reviewIndex > 0) {
+      state.recall.reviewIndex--;
+      currentRecallSession.reviewIndex = state.recall.reviewIndex; // Keep in sync
+      const item = reviewItems[state.recall.reviewIndex];
+      updateRecallReviewUI(item, state.recall.reviewIndex, reviewItems.length);
+      renderRecallReviewPhase(); // Re-render for complete update
     }
   });
   
   safe('btnRecallNext', el => el.onclick = () => {
-    if (currentRecallSession.reviewIndex < currentRecallSession.takes.length - 1) {
-      currentRecallSession.reviewIndex++;
-      renderRecallReviewPhase();
+    if (state.recall.reviewIndex < reviewItems.length - 1) {
+      state.recall.reviewIndex++;
+      currentRecallSession.reviewIndex = state.recall.reviewIndex; // Keep in sync
+      const item = reviewItems[state.recall.reviewIndex];
+      updateRecallReviewUI(item, state.recall.reviewIndex, reviewItems.length);
+      renderRecallReviewPhase(); // Re-render for complete update
     } else {
       finishRecallReview();
     }
@@ -3332,8 +3504,8 @@ function finishRecallReview() {
   // Close modal and continue
   if (currentRecallSession.type === 'cold') {
     closeColdRecall();
-    // After cold recall, continue to training
-    showScreen('trainerScreen');
+    // After cold recall, continue to training with proper handoff
+    startTraining();
   } else {
     closeWarmRecall();  
     // After warm recall, end day
@@ -3343,17 +3515,117 @@ function finishRecallReview() {
   currentRecallSession = null;
 }
 
-// Close recall modals
+// Close recall modals with proper audio cleanup
 function closeColdRecall() {
   byId('coldRecallModal').style.display = 'none';
+  
+  // 2) Stop capture, disconnect worklet/script nodes, stop mic tracks, clear flags
+  stopRecallCapture();
   closeMicrophone();
+  
+  // Resume AudioContext if needed (in case it was suspended)
+  if (recallAudioContext && recallAudioContext.state === 'suspended') {
+    recallAudioContext.resume().catch(err => {
+      console.warn('Failed to resume recallAudioContext:', err);
+    });
+  }
+  
+  // Guard: never leave recall.capturing true
+  if (state.recall && typeof state.recall.capturing !== 'undefined') {
+    state.recall.capturing = false;
+  }
+  
   currentRecallSession = null;
 }
 
 function closeWarmRecall() {
   byId('warmRecallModal').style.display = 'none';  
+  
+  // 2) Stop capture, disconnect worklet/script nodes, stop mic tracks, clear flags
+  stopRecallCapture();
   closeMicrophone();
+  
+  // Resume AudioContext if needed
+  if (recallAudioContext && recallAudioContext.state === 'suspended') {
+    recallAudioContext.resume().catch(err => {
+      console.warn('Failed to resume recallAudioContext:', err);
+    });
+  }
+  
+  // Guard: never leave recall.capturing true
+  if (state.recall && typeof state.recall.capturing !== 'undefined') {
+    state.recall.capturing = false;
+  }
+  
   currentRecallSession = null;
+}
+
+// 2) Single entry point for starting training after recall
+function startTraining() {
+  // Show trainer screen
+  showScreen('trainerScreen');
+  
+  // Ensure session timers are running (initialize if needed)
+  if (!state.session.startedAt) {
+    // Initialize session state
+    state.session.startedAt = Date.now();
+    state.session.elapsedMs = 0;
+    state.session.blocksDone = 0;
+    state.session.blockElapsedMs = 0;
+    state.session.inBreak = false;
+    state.session.breakRemainingMs = 0;
+  }
+  
+  if (!sessionActive) {
+    if (!state.startDate) state.startDate = Date.now();
+    ensureWeekRoll();
+    sessionActive = true;
+    paused = false;
+    
+    // Create new session record
+    (state.sessions || []).push({
+      start: Date.now(),
+      end: null,
+      pauses: [],
+      completed: false
+    });
+    
+    // Start daily session system
+    if (!startDailySession()) {
+      showScreen('menuScreen');
+      return;
+    }
+    
+    // Keep legacy timeblock system for compatibility
+    if (!state.timeblock.breakActive) {
+      if (state.timeblock.running) {
+        state.timeblock.startedAt = performance.now();
+      }
+      startTimeBlockTimer();
+    }
+  }
+  
+  // Schedule the first trial
+  scheduleNextTrial();
+  save();
+}
+
+// Helper function to stop recall capture and clean up audio worklets
+function stopRecallCapture() {
+  // Stop any active audio worklets or processing
+  if (recallAudioContext) {
+    try {
+      // Disconnect all nodes to clean up the audio graph
+      if (recallMicrophone) {
+        recallMicrophone.disconnect();
+      }
+      if (recallAnalyser) {
+        recallAnalyser.disconnect();
+      }
+    } catch (err) {
+      console.warn('Error disconnecting recall audio nodes:', err);
+    }
+  }
 }
 
 // Update recall display in dashboard
@@ -3566,59 +3838,76 @@ function checkOobAdaptation() {
     return false;
   }
   
-  // Run adaptation
-  adaptOobPercentage(blockIndex);
+  // Run adaptation using the exported function
+  adaptOobTargetAtTrainingBlockBoundary();
   return true;
 }
 
-// Core adaptation logic
-function adaptOobPercentage(blockIndex) {
-  const last60 = state.oobController.last60InBounds;
+// 1) Define adaptOobTargetAtTrainingBlockBoundary function - single exported function on window
+function adaptOobTargetAtTrainingBlockBoundary() {
+  const blockIndex = state.counters.blockIndex;
+  const last60 = state.oobController.last60InBounds || [];
+  
+  // Must have at least 40 in-bounds trials
+  if (last60.length < 40) {
+    console.log(`OOB adaptation skipped: only ${last60.length} in-bounds trials (need ≥40)`);
+    
+    // Push log row to qa.oobSeries with skipped indication
+    if (!window.qa) window.qa = {};
+    if (!window.qa.oobSeries) window.qa.oobSeries = [];
+    window.qa.oobSeries.push({
+      blockIndex: blockIndex,
+      last60N: last60.length,
+      acc: null,
+      oobPctBefore: null,
+      oobPctAfter: null,
+      skipped: true
+    });
+    return;
+  }
+  
+  // Calculate accuracy from last 60 in-bounds trials
   const acc = last60.filter(t => t.correct).length / last60.length;
-  const oobPctBefore = state.conf.oobPct;
+  const oobPctBefore = state.conf.oobPct || 15; // Current OOB percentage
   
   // Target band: 70-85% in-bounds accuracy
+  const targetMin = 0.70;
+  const targetMax = 0.85;
+  
   let oobPctAfter = oobPctBefore;
   
-  if (acc > 0.85) {
-    // Decrease OOB by 3 points (make it harder)
-    oobPctAfter = oobPctBefore - 3;
-  } else if (acc < 0.70) {
-    // Increase OOB by 3 points (make it easier)
-    oobPctAfter = oobPctBefore + 3;
+  if (acc < targetMin) {
+    // Too hard - reduce OOB by 3%
+    oobPctAfter = Math.max(5, oobPctBefore - 3);
+  } else if (acc > targetMax) {
+    // Too easy - increase OOB by 3%  
+    oobPctAfter = Math.min(35, oobPctBefore + 3);
   }
-  // Else keep unchanged
+  // If within target range (70-85%), no change needed
   
-  // Clamp to [5, 35] range
-  oobPctAfter = Math.max(5, Math.min(35, oobPctAfter));
-  
-  // Apply health check cap if active
-  if (state.oobController.healthCheckActive) {
-    oobPctAfter = Math.min(oobPctAfter, 12);
-  }
-  
-  // Update state
+  // Update the OOB percentage in state
   state.conf.oobPct = oobPctAfter;
   
-  // Log to qa.oobSeries
+  // Push log row to qa.oobSeries
   if (!window.qa) window.qa = {};
   if (!window.qa.oobSeries) window.qa.oobSeries = [];
-  
   window.qa.oobSeries.push({
     blockIndex: blockIndex,
+    last60N: last60.length,
     acc: Math.round(acc * 1000) / 1000, // Round to 3 decimal places
     oobPctBefore: oobPctBefore,
-    oobPctAfter: oobPctAfter,
-    last60N: last60.length
+    oobPctAfter: oobPctAfter
   });
   
   console.log(`OOB adaptation: Block ${blockIndex}, Acc ${(acc*100).toFixed(1)}%, ${oobPctBefore}% → ${oobPctAfter}%`);
   
-  // Check health conditions
-  checkOobHealthConditions();
-  
   save();
 }
+
+// Export function to window as required
+window.adaptOobTargetAtTrainingBlockBoundary = adaptOobTargetAtTrainingBlockBoundary;
+
+// Note: adaptOobPercentage function replaced by adaptOobTargetAtTrainingBlockBoundary
 
 // Health check for beginners - monitor rolling OOB accuracy
 function checkOobHealthConditions() {
@@ -5875,6 +6164,9 @@ function wireOnce(){
   
   // Initialize piano samples for octaves 3,4,5
   initializePianoSamples();
+  
+  // Start unified ticker for timer updates
+  startUnifiedTicker();
   
   // Start
   safe('startBtn', el=> el.onclick=()=>{
