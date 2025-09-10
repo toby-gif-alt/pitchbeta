@@ -555,6 +555,16 @@ function normalizePc(x) {
   return CANON.includes(x) ? x : null;
 }
 
+// Extract pitch class from note string (e.g., "Eb4" → "Eb")
+function pcFromNote(note) {
+  if (!note) return null;
+  const noteStr = String(note).trim();
+  // Match pitch class at start: letter optionally followed by 'b' or '#'
+  const match = noteStr.match(/^([A-G][b#]?)/);
+  if (!match) return null;
+  return normalizePc(match[1]);
+}
+
 const LEVELS_PER_SET=24, SETS=12, LEVELS_TOTAL=SETS*LEVELS_PER_SET;
 const TONE_MS=800;
 const THRESH_24=[0.20,0.25,0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.60,0.65,0.70,0.75,0.78,0.80,0.83,0.85,0.88,0.90,0.90,0.90,0.90,0.90,0.90];
@@ -800,6 +810,22 @@ if (!state.confusionMatrix || !state.perfStats || typeof state.lastInBoundsPc ==
   }
   
   state.lastInBoundsPc = null;
+  save();
+}
+
+// Migration for atomic grading system
+if (!state.meta) {
+  state.meta = {
+    trialSeq: 0  // Integer incrementing for each trial
+  };
+  save();
+}
+
+if (!state.grade) {
+  state.grade = {
+    lastTrialId: 0,
+    inProgress: false
+  };
   save();
 }
 
@@ -2737,6 +2763,7 @@ async function nextTrial(forceNew=false){
       
       // C) Freeze in state.current (REQUIRED for grading)
       state.current = {
+        trialId: ++state.meta.trialSeq,        // integer incrementing
         truePc,                                // REQUIRED; non-null
         oob: !!plannedOOB,
         octave: chosenOctave,
@@ -2772,57 +2799,69 @@ async function nextTrial(forceNew=false){
   finally{ inFlightTrial=false; }
 }
 
-/* ------------------ CENTRALIZED GRADING ------------------ */
-// D) Grade from the frozen ground-truth only
-function gradeGuess(guessPcRaw) {
-  if(!sessionActive || paused || shepRunning || special) return;
-  if(!currentNote){ return; }
-  if(!state.trialOpen) return; // Input locking - ignore late clicks
-  
-  const guessPc = normalizePc(guessPcRaw);
+/* ------------------ ATOMIC GRADING SYSTEM ------------------ */
+
+function finalizeGrade(guessPcRaw) {
   const cur = state.current;
-  if (!cur || !cur.truePc) {
-    console.warn('MISSING_TRUE_PC at grade time', {cur, guessPc});
-    showToast('Oops—note not ready. Try again.'); 
-    return;
-  }
-  
-  // Clear RT timer
-  if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
-  
-  const correct = !!(guessPc && guessPc === cur.truePc);
-  const trial = {
+  if (!cur || state.grade.inProgress) return;
+  state.grade.inProgress = true;
+
+  const guessPc = normalizePc(guessPcRaw);
+  const correct = !!(guessPc && cur.truePc && guessPc === cur.truePc);
+  const isTimeout = guessPc === null;
+
+  const t = {
     time: Date.now(),
+    trialId: cur.trialId,
     note: cur.truePc + String(cur.octave ?? ''),
     truePc: cur.truePc,
-    guessPc: guessPc || null,
+    guessPc,
     correct,
+    timeout: isTimeout,
     oob: !!cur.oob,
     rtMs: Math.round(performance.now() - (cur.startedAt || performance.now())),
     detuneCents: cur.detuneCents ?? 0,
     detuneMode: cur.detuneMode || (cur.oob ? 'oob' : 'anchor'),
     jlLevel: cur.jlLevel ?? null,
-    timbreUsed: cur.timbre || state.audioType || 'sine'
+    timbreUsed: cur.timbre || state.audioType || 'sine',
+    // legacy fields for any old readers:
+    pc: cur.truePc,
+    guess: guessPc
   };
   
-  // G) One logging line for diagnostics
-  console.log('GRADE', { truePc: trial.truePc, guessPc: trial.guessPc, correct: trial.correct, oob: trial.oob });
-  
-  // Add to trials array
-  (state.trials ||= []).push(trial);
-  
-  // Update stats/scheduler as before
-  recordTrialStats(trial);
-  
-  // Render feedback
-  renderFeedback(trial);
-  
+  state.trials.push(t);
+  state.grade.lastTrialId = cur.trialId;
+  state.grade.inProgress = false;
+
+  renderFeedback(t);
+  scheduleNextTrial();
+}
+
+function scheduleNextTrial() {
   // Clear current note and close trial
   currentNote = null;
   state.trialOpen = false;
   
+  // Clear RT timer
+  if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
+  
+  // Update stats/scheduler
+  if (state.trials.length > 0) {
+    const lastTrial = state.trials[state.trials.length - 1];
+    recordTrialStats(lastTrial);
+  }
+  
   advanceCheck();
   scheduleAuto();
+}
+
+/* ------------------ CENTRALIZED GRADING (LEGACY - REPLACED) ------------------ */
+// D) Grade from the frozen ground-truth only
+function gradeGuess(guessPcRaw) {
+  if(!sessionActive || paused || shepRunning || special) return;
+  if(!state.trialOpen) return; // Input locking - ignore late clicks
+  
+  finalizeGrade(guessPcRaw);
 }
 
 // E) Make the feedback UI null-safe
@@ -2895,47 +2934,8 @@ function recordTrialStats(trial) {
 function handleTimeout(){
   if(!sessionActive || paused || special) return;
   if(!state.trialOpen) return;
-  if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
   
-  const cur = state.current;
-  if (!cur || !cur.truePc) {
-    console.warn('MISSING_TRUE_PC at timeout', {cur});
-    return;
-  }
-  
-  const trial = {
-    time: Date.now(),
-    note: cur.truePc + String(cur.octave ?? ''),
-    truePc: cur.truePc,
-    guessPc: null,
-    correct: false,
-    timeout: true,
-    oob: !!cur.oob,
-    rtMs: Math.round(performance.now() - (cur.startedAt || performance.now())),
-    detuneCents: cur.detuneCents ?? 0,
-    detuneMode: cur.detuneMode || (cur.oob ? 'oob' : 'anchor'),
-    jlLevel: cur.jlLevel ?? null,
-    timbreUsed: cur.timbre || state.audioType || 'sine'
-  };
-  
-  // G) One logging line for diagnostics
-  console.log('GRADE', { truePc: trial.truePc, guessPc: trial.guessPc, correct: trial.correct, oob: trial.oob });
-  
-  // Add to trials array
-  (state.trials ||= []).push(trial);
-  
-  // Update stats/scheduler
-  recordTrialStats(trial);
-  
-  // Render feedback
-  renderFeedback(trial);
-  
-  // Clear current note and close trial
-  currentNote = null;
-  state.trialOpen = false;
-  
-  advanceCheck(); 
-  scheduleAuto();
+  finalizeGrade(null); // Call finalizeGrade once with null guess
 }
 
 /* Suggestion banner */
