@@ -225,8 +225,20 @@
       </div>
     </div>
 
+    <!-- Recall History -->
+    <div class="card" id="recallCard" style="margin-top:14px">
+      <h3>🎯 Recall History</h3>
+      <div style="margin-bottom:8px">
+        <button id="btnExportRecall" style="background:var(--accent);color:var(--bg);font-weight:700;margin-right:8px">📄 Export Recall CSV</button>
+        <span style="opacity:0.7;font-size:13px">Today's cold/warm pitch recall results</span>
+      </div>
+      <div id="recallHistoryToday" style="border:1px solid var(--muted);border-radius:12px;padding:12px;background:var(--card);min-height:80px">
+        <p id="recallHistoryEmpty" style="opacity:0.7;text-align:center;margin:20px 0">No recall data for today</p>
+      </div>
+    </div>
+
     <!-- Progress -->
-    <div class="card" id="progressCard">
+    <div class="card" id="progressCard" style="margin-top:14px">
       <h3>📈 Progress</h3>
       <div id="progressControls">
         <label for="pitchSelect">Pitch:</label>
@@ -408,6 +420,34 @@
       <div style="margin-top:20px">
         <button id="btnRetakeAssessmentModal" style="background:var(--good);margin:0 8px">Try Again</button>
         <button id="btnBackMenuModal" style="background:var(--muted);margin:0 8px">Back to Menu</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Cold Recall Modal -->
+  <div id="coldRecallModal" style="position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;z-index:80">
+    <div class="card" style="max-width:600px;margin:20px;text-align:center">
+      <h2>🧊 Cold Recall</h2>
+      <p style="opacity:0.8;margin:16px 0">Hum the following notes <em>before</em> training begins. This tests your baseline pitch recognition.</p>
+      <div id="coldRecallNotes" style="margin:20px 0">
+        <!-- Notes will be populated dynamically -->
+      </div>
+      <div style="margin-top:20px">
+        <button id="btnColdRecallComplete" style="background:var(--good);margin:0 8px;display:none">Start Training</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Warm Recall Modal -->
+  <div id="warmRecallModal" style="position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;z-index:80">
+    <div class="card" style="max-width:600px;margin:20px;text-align:center">
+      <h2>🔥 Warm Recall</h2>
+      <p style="opacity:0.8;margin:16px 0">Great job! Now hum the same notes <em>after</em> your training session to see improvement.</p>
+      <div id="warmRecallNotes" style="margin:20px 0">
+        <!-- Notes will be populated dynamically -->
+      </div>
+      <div style="margin-top:20px">
+        <button id="btnWarmRecallComplete" style="background:var(--good);margin:0 8px;display:none">Finish Session</button>
       </div>
     </div>
   </div>
@@ -805,6 +845,12 @@ if (!state.jitter) {
     levelByPc: {},
     statsByPc: {}
   };
+  save();
+}
+
+// Migration for recall system
+if (!state.recall) {
+  state.recall = {}; // Format: state.recall[YYYY-MM-DD] = { cold: [...], warm: [...] }
   save();
 }
 
@@ -1270,6 +1316,9 @@ function updateCapsUI(){
     else lp.style.display='none';
   }
   const pf = byId('playFlappy'); if(pf) pf.disabled = !locked;
+  
+  // Update recall display when in menu screen
+  try { updateRecallDisplay(); } catch(_) {}
 }
 function setFromIndex(i){return Math.floor((i-1)/LEVELS_PER_SET)+1;}
 function blockFromIndex(i){return ((i-1)%LEVELS_PER_SET)+1;}
@@ -1639,6 +1688,597 @@ async function playShepard20s(){
   await new Promise(r=>setTimeout(r,dur*1000));
   overlay.style.display='none'; shepRunning=false;
   if(wasActive){ pauseEnd(); safe('btnPause', el=> el.textContent='⏸ Pause'); }
+}
+
+/* ------------------ PITCH DETECTION SYSTEM ------------------ */
+let micStream = null;
+let pitchDetector = null;
+let recordingActive = false;
+
+// YIN pitch detection algorithm
+class YINPitchDetector {
+  constructor(sampleRate = 44100, bufferSize = 2048) {
+    this.sampleRate = sampleRate;
+    this.bufferSize = bufferSize;
+    this.threshold = 0.1;
+    this.probabilityThreshold = 0.1;
+  }
+  
+  // Autocorrelation method for pitch detection
+  autocorrelate(buffer) {
+    const SIZE = buffer.length;
+    const rms = Math.sqrt(buffer.reduce((sum, val) => sum + val * val, 0) / SIZE);
+    
+    if (rms < 0.01) return -1; // Not enough signal
+    
+    let r1 = 0, r2 = SIZE - 1;
+    for (let i = 0; i < SIZE / 2; i++) {
+      if (Math.abs(buffer[i]) < 0.2) r1 = i;
+      else break;
+    }
+    for (let i = 1; i < SIZE / 2; i++) {
+      if (Math.abs(buffer[SIZE - i]) < 0.2) r2 = SIZE - i;
+      else break;
+    }
+    
+    const trimmedBuffer = buffer.slice(r1, r2);
+    const correlations = new Array(trimmedBuffer.length);
+    
+    for (let i = 0; i < trimmedBuffer.length; i++) {
+      let correlation = 0;
+      for (let j = 0; j < trimmedBuffer.length - i; j++) {
+        correlation += Math.abs((trimmedBuffer[j]) - (trimmedBuffer[i + j]));
+      }
+      correlations[i] = correlation;
+    }
+    
+    let d = 0;
+    while (correlations[d] > correlations[d + 1]) d++;
+    
+    let maxval = -1, maxpos = -1;
+    for (let i = d; i < trimmedBuffer.length; i++) {
+      if (correlations[i] > maxval) {
+        maxval = correlations[i];
+        maxpos = i;
+      }
+    }
+    
+    let T0 = maxpos;
+    
+    // Parabolic interpolation
+    const x1 = correlations[T0 - 1], x2 = correlations[T0], x3 = correlations[T0 + 1];
+    const a = (x1 - 2 * x2 + x3) / 2;
+    const b = (x3 - x1) / 2;
+    if (a) T0 = T0 - b / (2 * a);
+    
+    return this.sampleRate / T0;
+  }
+  
+  // Convert frequency to MIDI note number
+  frequencyToMidi(frequency) {
+    return 69 + 12 * Math.log2(frequency / 440);
+  }
+  
+  // Convert frequency to cents deviation from nearest equal temperament note
+  frequencyToCents(frequency, targetFrequency) {
+    return Math.round(1200 * Math.log2(frequency / targetFrequency));
+  }
+  
+  // Get the frequency of a note (e.g., "A4" -> 440Hz)
+  noteToFrequency(noteName) {
+    const noteRegex = /^([A-G][b#]?)(\d+)$/;
+    const match = noteName.match(noteRegex);
+    if (!match) return 440; // Default A4
+    
+    const [, pitchClass, octaveStr] = match;
+    const octave = parseInt(octaveStr);
+    
+    // Map pitch classes to semitone offsets from C
+    const pcToSemitones = {
+      'C': 0, 'Db': 1, 'C#': 1, 'D': 2, 'Eb': 3, 'D#': 3, 'E': 4,
+      'F': 5, 'Gb': 6, 'F#': 6, 'G': 7, 'Ab': 8, 'G#': 8, 'A': 9, 'Bb': 10, 'A#': 10, 'B': 11
+    };
+    
+    const semitones = pcToSemitones[pitchClass] || 0;
+    const midiNote = (octave + 1) * 12 + semitones;
+    
+    // Convert MIDI note to frequency (A4 = 69, 440 Hz)
+    return 440 * Math.pow(2, (midiNote - 69) / 12);
+  }
+}
+
+// Initialize microphone access
+async function initMicrophone() {
+  if (micStream) return micStream;
+  
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ 
+      audio: {
+        sampleRate: 44100,
+        channelCount: 1,
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false
+      } 
+    });
+    return micStream;
+  } catch (error) {
+    console.error('Microphone access denied:', error);
+    throw new Error('Microphone access is required for pitch recall. Please allow microphone access and try again.');
+  }
+}
+
+// Clean up microphone resources
+function closeMicrophone() {
+  if (micStream) {
+    micStream.getTracks().forEach(track => track.stop());
+    micStream = null;
+  }
+  if (pitchDetector) {
+    pitchDetector = null;
+  }
+  recordingActive = false;
+}
+
+/* ------------------ RECALL SYSTEM ------------------ */
+
+// Get today's date key for recall storage
+function getTodayKey() {
+  const today = new Date();
+  return today.toISOString().split('T')[0]; // YYYY-MM-DD format
+}
+
+// Get trained pitch classes for current session
+function getTrainedPCs() {
+  const setSize = setFromIndex(state.levelIndex);
+  return trainedSet(setSize);
+}
+
+// Randomly select 2-3 notes from trained set (no repeats)
+function selectRecallNotes() {
+  const trained = getTrainedPCs();
+  const count = Math.min(3, Math.max(2, trained.length)); // 2-3 notes, but not more than available
+  
+  const selected = [];
+  const available = [...trained];
+  
+  for (let i = 0; i < count && available.length > 0; i++) {
+    const randomIndex = Math.floor(Math.random() * available.length);
+    selected.push(available.splice(randomIndex, 1)[0]);
+  }
+  
+  return selected;
+}
+
+// Analyze pitch recording and compute verdict
+function analyzeRecording(frequencies, targetNote) {
+  if (frequencies.length === 0) {
+    return {
+      medianHz: 0,
+      medianCents: 0,
+      sdCents: 0,
+      verdict: 'Off',
+      validSamples: 0
+    };
+  }
+  
+  // Filter out invalid frequencies (too low/high)
+  const validFreqs = frequencies.filter(f => f > 80 && f < 2000);
+  if (validFreqs.length === 0) {
+    return {
+      medianHz: 0,
+      medianCents: 0,
+      sdCents: 0,
+      verdict: 'Off',
+      validSamples: 0
+    };
+  }
+  
+  // Calculate median frequency
+  const sortedFreqs = [...validFreqs].sort((a, b) => a - b);
+  const medianHz = sortedFreqs.length % 2 === 0 
+    ? (sortedFreqs[sortedFreqs.length / 2 - 1] + sortedFreqs[sortedFreqs.length / 2]) / 2
+    : sortedFreqs[Math.floor(sortedFreqs.length / 2)];
+  
+  // Get target frequency
+  const targetHz = pitchDetector.noteToFrequency(targetNote + '4'); // Use octave 4 as reference
+  
+  // Convert frequencies to cents relative to target
+  const centsArray = validFreqs.map(f => pitchDetector.frequencyToCents(f, targetHz));
+  
+  // Calculate median and SD of cents
+  const sortedCents = [...centsArray].sort((a, b) => a - b);
+  const medianCents = sortedCents.length % 2 === 0 
+    ? (sortedCents[sortedCents.length / 2 - 1] + sortedCents[sortedCents.length / 2]) / 2
+    : sortedCents[Math.floor(sortedCents.length / 2)];
+    
+  const meanCents = centsArray.reduce((a, b) => a + b, 0) / centsArray.length;
+  const variance = centsArray.reduce((a, b) => a + Math.pow(b - meanCents, 2), 0) / centsArray.length;
+  const sdCents = Math.sqrt(variance);
+  
+  // Determine verdict based on thresholds
+  let verdict;
+  if (Math.abs(medianCents) <= 10 && sdCents <= 15) {
+    verdict = 'On target';
+  } else if (Math.abs(medianCents) <= 30) {
+    verdict = 'Close';
+  } else {
+    verdict = 'Off';
+  }
+  
+  return {
+    medianHz: Math.round(medianHz * 10) / 10,
+    medianCents: Math.round(medianCents),
+    sdCents: Math.round(sdCents * 10) / 10,
+    verdict,
+    validSamples: validFreqs.length
+  };
+}
+
+// Create a "Hold to Hum" button for recording
+function createHumButton(targetPc, onComplete) {
+  const container = document.createElement('div');
+  container.style.cssText = 'margin: 16px 0; text-align: center;';
+  
+  const noteLabel = document.createElement('h4');
+  noteLabel.textContent = PC_LABEL[targetPc] || targetPc;
+  noteLabel.style.cssText = 'margin: 8px 0; color: var(--accent); font-size: 18px;';
+  
+  const button = document.createElement('button');
+  button.textContent = '🎤 Hold to Hum';
+  button.style.cssText = `
+    padding: 16px 24px;
+    font-size: 16px;
+    background: var(--accent);
+    color: var(--bg);
+    border-radius: 12px;
+    border: none;
+    cursor: pointer;
+    margin: 8px;
+    min-width: 160px;
+    font-weight: 600;
+  `;
+  
+  const display = document.createElement('div');
+  display.style.cssText = 'margin: 8px 0; font-size: 14px; min-height: 40px;';
+  display.innerHTML = '<span style="opacity: 0.7;">Press and hold to record ~2 seconds</span>';
+  
+  const result = document.createElement('div');
+  result.style.cssText = 'margin: 8px 0; font-size: 14px; min-height: 30px;';
+  
+  let recording = false;
+  let recordingStart = 0;
+  let frequencies = [];
+  let audioContext = null;
+  let analyser = null;
+  let microphone = null;
+  
+  const startRecording = async () => {
+    if (recording) return;
+    
+    try {
+      recording = true;
+      frequencies = [];
+      recordingStart = performance.now();
+      
+      button.textContent = '🔴 Recording...';
+      button.style.background = 'var(--bad)';
+      display.innerHTML = '<span style="color: var(--accent); font-weight: 600;">Recording... keep humming</span>';
+      result.innerHTML = '';
+      
+      // Initialize audio context and microphone
+      const stream = await initMicrophone();
+      audioContext = getCtx();
+      analyser = audioContext.createAnalyser();
+      microphone = audioContext.createMediaStreamSource(stream);
+      
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = 0.3;
+      microphone.connect(analyser);
+      
+      if (!pitchDetector) {
+        pitchDetector = new YINPitchDetector(audioContext.sampleRate, analyser.fftSize);
+      }
+      
+      // Start pitch detection loop
+      const detectPitch = () => {
+        if (!recording) return;
+        
+        const bufferLength = analyser.fftSize;
+        const dataArray = new Float32Array(bufferLength);
+        analyser.getFloatTimeDomainData(dataArray);
+        
+        const frequency = pitchDetector.autocorrelate(dataArray);
+        const elapsed = performance.now() - recordingStart;
+        
+        if (frequency > 0) {
+          frequencies.push(frequency);
+          const targetHz = pitchDetector.noteToFrequency(targetPc + '4');
+          const cents = pitchDetector.frequencyToCents(frequency, targetHz);
+          display.innerHTML = `
+            <div style="color: var(--good);">
+              <strong>${Math.round(frequency)} Hz</strong> 
+              <span style="margin-left: 16px;">${cents > 0 ? '+' : ''}${cents}¢</span>
+            </div>
+          `;
+        }
+        
+        if (elapsed < 2500) { // Record for ~2.5 seconds max
+          requestAnimationFrame(detectPitch);
+        } else {
+          stopRecording();
+        }
+      };
+      
+      requestAnimationFrame(detectPitch);
+      
+    } catch (error) {
+      console.error('Recording failed:', error);
+      display.innerHTML = `<span style="color: var(--bad);">Error: ${error.message}</span>`;
+      recording = false;
+      button.textContent = '🎤 Hold to Hum';
+      button.style.background = 'var(--accent)';
+    }
+  };
+  
+  const stopRecording = () => {
+    if (!recording) return;
+    
+    recording = false;
+    
+    if (microphone) {
+      microphone.disconnect();
+      microphone = null;
+    }
+    
+    button.textContent = '🎤 Hold to Hum';
+    button.style.background = 'var(--muted)';
+    button.disabled = true;
+    
+    // Analyze recording
+    const analysis = analyzeRecording(frequencies, targetPc);
+    
+    // Display results
+    const verdictColor = 
+      analysis.verdict === 'On target' ? 'var(--good)' :
+      analysis.verdict === 'Close' ? 'var(--accent)' : 'var(--bad)';
+    
+    result.innerHTML = `
+      <div style="color: ${verdictColor}; font-weight: 600; font-size: 16px; margin-bottom: 4px;">
+        ${analysis.verdict}
+      </div>
+      <div style="opacity: 0.8; font-size: 13px;">
+        Median: ${analysis.medianCents}¢ off • SD: ${analysis.sdCents}¢ • ${analysis.validSamples} samples
+      </div>
+    `;
+    
+    display.innerHTML = `<span style="opacity: 0.7;">Recording complete</span>`;
+    
+    // Store result and callback
+    const recallData = {
+      pc: targetPc,
+      medianCents: analysis.medianCents,
+      sdCents: analysis.sdCents,
+      verdict: analysis.verdict,
+      timestamp: Date.now(),
+      validSamples: analysis.validSamples
+    };
+    
+    // Call completion callback after a short delay
+    setTimeout(() => onComplete(recallData), 1000);
+  };
+  
+  // Mouse/touch event handlers
+  button.addEventListener('mousedown', startRecording);
+  button.addEventListener('mouseup', stopRecording);
+  button.addEventListener('mouseleave', stopRecording);
+  
+  button.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    startRecording();
+  });
+  button.addEventListener('touchend', (e) => {
+    e.preventDefault();
+    stopRecording();
+  });
+  
+  container.appendChild(noteLabel);
+  container.appendChild(button);
+  container.appendChild(display);
+  container.appendChild(result);
+  
+  return container;
+}
+
+// Save recall data to state
+function saveRecallData(type, data) {
+  const todayKey = getTodayKey();
+  if (!state.recall[todayKey]) {
+    state.recall[todayKey] = { cold: [], warm: [] };
+  }
+  
+  state.recall[todayKey][type].push({
+    pc: data.pc,
+    median: data.medianCents,
+    sd: data.sdCents,
+    verdict: data.verdict,
+    timestamp: data.timestamp || Date.now()
+  });
+  
+  save();
+}
+
+// Show cold recall modal
+function showColdRecall() {
+  const modal = byId('coldRecallModal');
+  const notesContainer = byId('coldRecallNotes');
+  const completeButton = byId('btnColdRecallComplete');
+  
+  notesContainer.innerHTML = '';
+  completeButton.style.display = 'none';
+  
+  const selectedNotes = selectRecallNotes();
+  const results = [];
+  let completedCount = 0;
+  
+  selectedNotes.forEach((pc, index) => {
+    const humButton = createHumButton(pc, (data) => {
+      results.push(data);
+      saveRecallData('cold', data);
+      completedCount++;
+      
+      if (completedCount >= selectedNotes.length) {
+        completeButton.style.display = 'inline-block';
+        updateRecallDisplay();
+      }
+    });
+    notesContainer.appendChild(humButton);
+  });
+  
+  modal.style.display = 'flex';
+}
+
+// Show warm recall modal
+function showWarmRecall() {
+  const modal = byId('warmRecallModal');
+  const notesContainer = byId('warmRecallNotes');
+  const completeButton = byId('btnWarmRecallComplete');
+  
+  notesContainer.innerHTML = '';
+  completeButton.style.display = 'none';
+  
+  // Use same notes as cold recall if available, otherwise select new ones
+  const todayKey = getTodayKey();
+  let selectedNotes;
+  
+  if (state.recall[todayKey] && state.recall[todayKey].cold && state.recall[todayKey].cold.length > 0) {
+    selectedNotes = state.recall[todayKey].cold.map(r => r.pc);
+  } else {
+    selectedNotes = selectRecallNotes();
+  }
+  
+  const results = [];
+  let completedCount = 0;
+  
+  selectedNotes.forEach((pc, index) => {
+    const humButton = createHumButton(pc, (data) => {
+      results.push(data);
+      saveRecallData('warm', data);
+      completedCount++;
+      
+      if (completedCount >= selectedNotes.length) {
+        completeButton.style.display = 'inline-block';
+        updateRecallDisplay();
+      }
+    });
+    notesContainer.appendChild(humButton);
+  });
+  
+  modal.style.display = 'flex';
+}
+
+// Close recall modals
+function closeColdRecall() {
+  byId('coldRecallModal').style.display = 'none';
+  closeMicrophone();
+}
+
+function closeWarmRecall() {
+  byId('warmRecallModal').style.display = 'none';  
+  closeMicrophone();
+}
+
+// Update recall display in dashboard
+function updateRecallDisplay() {
+  const todayKey = getTodayKey();
+  const recallData = state.recall[todayKey];
+  const container = byId('recallHistoryToday');
+  const emptyMsg = byId('recallHistoryEmpty');
+  
+  if (!recallData || (recallData.cold.length === 0 && recallData.warm.length === 0)) {
+    if (emptyMsg) emptyMsg.style.display = 'block';
+    return;
+  }
+  
+  if (emptyMsg) emptyMsg.style.display = 'none';
+  
+  let html = '<div style="display: grid; gap: 12px;">';
+  
+  if (recallData.cold && recallData.cold.length > 0) {
+    html += '<div><h4 style="margin: 0 0 8px 0; color: var(--accent);">🧊 Cold Recall</h4>';
+    recallData.cold.forEach(r => {
+      const verdictColor = 
+        r.verdict === 'On target' ? 'var(--good)' :
+        r.verdict === 'Close' ? 'var(--accent)' : 'var(--bad)';
+      html += `
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 4px 8px; margin: 4px 0; background: var(--muted2); border-radius: 8px;">
+          <span style="font-weight: 600;">${PC_LABEL[r.pc] || r.pc}</span>
+          <span style="color: ${verdictColor};">${r.verdict}</span>
+          <span style="opacity: 0.7; font-size: 12px;">${r.median}¢</span>
+        </div>
+      `;
+    });
+    html += '</div>';
+  }
+  
+  if (recallData.warm && recallData.warm.length > 0) {
+    html += '<div><h4 style="margin: 0 0 8px 0; color: var(--accent);">🔥 Warm Recall</h4>';
+    recallData.warm.forEach(r => {
+      const verdictColor = 
+        r.verdict === 'On target' ? 'var(--good)' :
+        r.verdict === 'Close' ? 'var(--accent)' : 'var(--bad)';
+      html += `
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 4px 8px; margin: 4px 0; background: var(--muted2); border-radius: 8px;">
+          <span style="font-weight: 600;">${PC_LABEL[r.pc] || r.pc}</span>
+          <span style="color: ${verdictColor};">${r.verdict}</span>
+          <span style="opacity: 0.7; font-size: 12px;">${r.median}¢</span>
+        </div>
+      `;
+    });
+    html += '</div>';
+  }
+  
+  html += '</div>';
+  container.innerHTML = html;
+}
+
+// Export recall data as CSV
+function exportRecallCSV() {
+  const csvRows = ['date,type,pc,medianCents,sdCents,verdict'];
+  
+  Object.keys(state.recall).sort().forEach(date => {
+    const dayData = state.recall[date];
+    
+    if (dayData.cold) {
+      dayData.cold.forEach(r => {
+        csvRows.push(`${date},cold,${r.pc},${r.median},${r.sd},${r.verdict}`);
+      });
+    }
+    
+    if (dayData.warm) {
+      dayData.warm.forEach(r => {
+        csvRows.push(`${date},warm,${r.pc},${r.median},${r.sd},${r.verdict}`);
+      });
+    }
+  });
+  
+  if (csvRows.length <= 1) {
+    alert('No recall data to export.');
+    return;
+  }
+  
+  const csvContent = csvRows.join('\n');
+  const blob = new Blob([csvContent], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `pitch-recall-${getTodayKey()}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  
+  URL.revokeObjectURL(url);
 }
 
 /* ------------------ TRAINING FLOW ------------------ */
@@ -3178,7 +3818,7 @@ function advanceCheck(){
 }
 
 /* ------------------ SESSION ------------------ */
-function startSession(){
+function initiateTrainingSession(){
   stopAllTimers();
   sealDanglingSession();
   if(isLocked()){
@@ -3186,6 +3826,22 @@ function startSession(){
     alert(`Training is locked for ${fmtHMM(left)}.\nYou can still play Flappy from the menu, or Reset lockout/timer.`);
     showScreen('menuScreen'); return;
   }
+  
+  // Check if cold recall has been done today
+  const todayKey = getTodayKey();
+  const todayRecall = state.recall[todayKey];
+  
+  if (!todayRecall || !todayRecall.cold || todayRecall.cold.length === 0) {
+    // Show cold recall modal before starting training
+    showColdRecall();
+    return;
+  }
+  
+  // Cold recall already done, proceed with training
+  startTrainingAfterColdRecall();
+}
+
+function startTrainingAfterColdRecall(){
   showScreen('trainerScreen');
   if(!state.startDate) state.startDate=Date.now();
   ensureWeekRoll();
@@ -3219,7 +3875,7 @@ function startSession(){
       text('timerInfo', `Left: ${fmtMMSS(left)}`);
       
       if(left<=0){
-        endDayAndLockout();
+        endSessionWithWarmRecall();
       }
     }
     
@@ -3241,6 +3897,28 @@ function startSession(){
     updateCapsUI(); 
     try { drawChart(); } catch(_) {}
   },1000);
+}
+
+// Backwards compatibility wrapper
+function startSession(){
+  initiateTrainingSession();
+}
+
+function endSessionWithWarmRecall(){
+  if(!sessionActive) return;
+  
+  // Check if warm recall has been done today
+  const todayKey = getTodayKey();
+  const todayRecall = state.recall[todayKey];
+  
+  if (!todayRecall || !todayRecall.warm || todayRecall.warm.length === 0) {
+    // Show warm recall modal before ending session
+    showWarmRecall();
+    return;
+  }
+  
+  // Warm recall already done, proceed with normal session end
+  endDayAndLockout();
 }
 function endSession(auto){
   if(!sessionActive) return;
@@ -3916,6 +4594,19 @@ function wireOnce(){
 
   // Tracker screen
   safe('btnBackMenuTracker', el=> el.onclick=()=> { showScreen('menuScreen'); populatePitchSelect(); drawChart(); });
+
+  // Recall system buttons
+  safe('btnColdRecallComplete', el=> el.onclick=()=> {
+    closeColdRecall();
+    startTrainingAfterColdRecall();
+  });
+  
+  safe('btnWarmRecallComplete', el=> el.onclick=()=> {
+    closeWarmRecall();
+    endDayAndLockout();
+  });
+  
+  safe('btnExportRecall', el=> el.onclick=()=> exportRecallCSV());
 
   // Set selector
   safe('setSizeSelect', sel=>{
