@@ -638,6 +638,16 @@ const WEEKLY_TARGET_MS=2*3600*1000;
 const LOCKOUT_MS=60*60*1000;
 const LATENCY_CUSHION_MS=100;
 
+/* ------------------ DAILY SESSION CONSTANTS ------------------ */
+const DAILY_BLOCK_COUNT = 5;
+const DAILY_BLOCK_DURATION_MS = 6 * 60 * 1000; // 6 minutes
+const DAILY_BREAK_DURATION_MS = 60 * 1000; // 60 seconds
+const DAILY_SESSION_TOTAL_MS = DAILY_BLOCK_COUNT * DAILY_BLOCK_DURATION_MS; // 30 minutes
+
+// QA mode constants (when ?qa=1 in URL)
+const QA_BLOCK_DURATION_MS = 30 * 1000; // 30 seconds
+const QA_BREAK_DURATION_MS = 10 * 1000; // 10 seconds
+
 /* ------------------ JITTER SYSTEM CONSTANTS ------------------ */
 const JITTER_LEVELS = {
   0: { // JL0 (onboarding)
@@ -734,6 +744,19 @@ try{
     jitter: {
       levelByPc: {},
       statsByPc: {}
+    },
+    session: {
+      startedAt: null,        // timestamp when session started
+      elapsedMs: 0,          // total elapsed time in current session
+      blocksDone: 0,         // number of complete blocks (0..5)
+      blockElapsedMs: 0,     // elapsed time in current block (0..360000)
+      inBreak: false,        // currently in break mode
+      breakRemainingMs: 0    // time remaining in current break (0..60000)
+    },
+    daily: {
+      date: getTodayDateString(), // YYYY-MM-DD format
+      minutesCompleted: 0,        // total minutes completed today (0..30)
+      completedAt: null           // timestamp when 30 min reached, null if not complete
     }
   };
 } catch(e){
@@ -915,6 +938,47 @@ if (!state.counters) {
   save();
 }
 
+// Migration for new daily session system
+if (!state.session) {
+  state.session = {
+    startedAt: null,        // timestamp when session started
+    elapsedMs: 0,          // total elapsed time in current session
+    blocksDone: 0,         // number of complete blocks (0..5)
+    blockElapsedMs: 0,     // elapsed time in current block (0..360000)
+    inBreak: false,        // currently in break mode
+    breakRemainingMs: 0    // time remaining in current break (0..60000)
+  };
+  save();
+}
+
+if (!state.daily) {
+  state.daily = {
+    date: getTodayDateString(), // YYYY-MM-DD format
+    minutesCompleted: 0,        // total minutes completed today (0..30)
+    completedAt: null           // timestamp when 30 min reached, null if not complete
+  };
+  save();
+}
+
+// Reset daily progress if date has changed (date rollover)
+if (state.daily && state.daily.date !== getTodayDateString()) {
+  state.daily = {
+    date: getTodayDateString(),
+    minutesCompleted: 0,
+    completedAt: null
+  };
+  // Reset session state on date rollover
+  state.session = {
+    startedAt: null,
+    elapsedMs: 0,
+    blocksDone: 0,
+    blockElapsedMs: 0,
+    inBreak: false,
+    breakRemainingMs: 0
+  };
+  save();
+}
+
 // Apply theme on load
 applyTheme(state.theme);
 function save(){ try{ localStorage.setItem('apTrainer', JSON.stringify(state)); }catch(e){ report(e); } }
@@ -929,6 +993,363 @@ function todayKey(ts){ return dateAtMidnight(ts||Date.now()); }
 function weekIndex(ts){ const base=ts||Date.now(); if(!state.startDate) return 0; return Math.floor((base-state.startDate)/(7*24*60*60*1000)); }
 function currentWeekIdx(){ return weekIndex(Date.now()); }
 function weekStartTs(){ if(!state.startDate) return todayKey(Date.now()); const idx=currentWeekIdx(); const base=dateAtMidnight(state.startDate); return base + idx*7*86400000; }
+
+/* ------------------ DAILY SESSION HELPERS ------------------ */
+function isQAMode() {
+  return new URLSearchParams(window.location.search).get('qa') === '1';
+}
+
+function getCurrentBlockDuration() {
+  return isQAMode() ? QA_BLOCK_DURATION_MS : DAILY_BLOCK_DURATION_MS;
+}
+
+function getCurrentBreakDuration() {
+  return isQAMode() ? QA_BREAK_DURATION_MS : DAILY_BREAK_DURATION_MS;
+}
+
+function getTodayDateString() {
+  return new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD format in local time
+}
+
+/* ------------------ DAILY SESSION MANAGEMENT ------------------ */
+let sessionTimer = null;
+
+function isDailyLocked() {
+  const today = getTodayDateString();
+  return state.daily && state.daily.date === today && state.daily.completedAt !== null;
+}
+
+function startDailySession() {
+  // Check if already completed today
+  if (isDailyLocked()) {
+    alert('Training completed for today. Come back tomorrow!');
+    return false;
+  }
+  
+  // Reset session if starting fresh
+  if (!state.session.startedAt) {
+    state.session = {
+      startedAt: Date.now(),
+      elapsedMs: 0,
+      blocksDone: 0,
+      blockElapsedMs: 0,
+      inBreak: false,
+      breakRemainingMs: 0
+    };
+  }
+  
+  // Start the session timer
+  if (sessionTimer) clearInterval(sessionTimer);
+  sessionTimer = setInterval(updateDailySession, 100); // Update every 100ms
+  
+  save();
+  updateSessionUI();
+  return true;
+}
+
+function updateDailySession() {
+  if (!state.session.startedAt) return;
+  
+  const now = Date.now();
+  
+  if (state.session.inBreak) {
+    // Count down break time (continues even if paused)
+    if (state.session.breakRemainingMs > 0) {
+      state.session.breakRemainingMs = Math.max(0, state.session.breakRemainingMs - 100);
+      if (state.session.breakRemainingMs === 0) {
+        endDailyBreak();
+      } else {
+        // Update break message during countdown
+        updateDailyBreakMessage();
+      }
+    }
+  } else if (sessionActive && !paused) {
+    // Count up training time only when not paused and session is active
+    const blockDuration = getCurrentBlockDuration();
+    const elapsed = state.session.blockElapsedMs + 100;
+    
+    if (elapsed >= blockDuration) {
+      // Block completed
+      completeDailyBlock();
+    } else {
+      state.session.blockElapsedMs = elapsed;
+      state.session.elapsedMs += 100;
+    }
+  }
+  
+  updateSessionUI();
+}
+
+function completeDailyBlock() {
+  state.session.blocksDone++;
+  state.session.blockElapsedMs = 0;
+  
+  // Add to daily minutes completed (convert from ms)
+  const blockMinutes = getCurrentBlockDuration() / (60 * 1000);
+  state.daily.minutesCompleted = Math.min(30, (state.daily.minutesCompleted || 0) + blockMinutes);
+  
+  if (state.session.blocksDone >= DAILY_BLOCK_COUNT) {
+    // Session complete!
+    completeDailySession();
+  } else {
+    // Start break
+    startDailyBreak();
+  }
+  
+  save();
+}
+
+function startDailyBreak() {
+  state.session.inBreak = true;
+  state.session.breakRemainingMs = getCurrentBreakDuration();
+  
+  // Open flappy modal with countdown
+  openFlappyModalForDailyBreak();
+  
+  save();
+}
+
+function endDailyBreak() {
+  state.session.inBreak = false;
+  state.session.breakRemainingMs = 0;
+  
+  // Close flappy modal
+  closeDailyBreakModal();
+  
+  save();
+}
+
+function completeDailySession() {
+  // Session fully complete - 30 minutes done
+  state.daily.completedAt = Date.now();
+  state.daily.minutesCompleted = 30;
+  
+  // Stop session timer
+  if (sessionTimer) {
+    clearInterval(sessionTimer);
+    sessionTimer = null;
+  }
+  
+  // Show congratulations
+  showDailyCompleteBanner();
+  
+  save();
+}
+
+function stopDailySession() {
+  if (sessionTimer) {
+    clearInterval(sessionTimer);
+    sessionTimer = null;
+  }
+}
+
+function resetDailySession() {
+  stopDailySession();
+  
+  state.session = {
+    startedAt: null,
+    elapsedMs: 0,
+    blocksDone: 0,
+    blockElapsedMs: 0,
+    inBreak: false,
+    breakRemainingMs: 0
+  };
+  
+  save();
+  updateSessionUI();
+}
+
+/* ------------------ DAILY SESSION UI ------------------ */
+function updateSessionUI() {
+  // Update timer display in trainer header
+  updateTrainerSessionDisplay();
+  
+  // Update menu display
+  updateMenuSessionDisplay();
+  
+  // Update lockout status
+  updateLockoutUI();
+}
+
+function updateTrainerSessionDisplay() {
+  // Update the blockTimeInfo pill to show session progress
+  const blockTimeInfo = byId('blockTimeInfo');
+  if (!blockTimeInfo) return;
+  
+  if (!state.session.startedAt) {
+    blockTimeInfo.textContent = 'Press Play to start session';
+    return;
+  }
+  
+  const blockNum = state.session.blocksDone + 1;
+  const blockTime = fmtMMSS(state.session.blockElapsedMs);
+  const blockTarget = fmtMMSS(getCurrentBlockDuration());
+  
+  if (state.session.inBreak) {
+    const breakTime = fmtMMSS(state.session.breakRemainingMs);
+    blockTimeInfo.textContent = `Block ${blockNum}/5 - Break: ${breakTime}`;
+  } else {
+    blockTimeInfo.textContent = `Block ${blockNum}/5 ${blockTime}/${blockTarget}`;
+  }
+}
+
+function updateMenuSessionDisplay() {
+  // Update the capInfo pill to show daily progress
+  const capInfo = byId('capInfo');
+  if (!capInfo) return;
+  
+  if (isDailyLocked()) {
+    capInfo.textContent = '🎉 Daily goal achieved!';
+    capInfo.style.background = 'var(--good)';
+  } else {
+    const completed = state.daily.minutesCompleted || 0;
+    const remaining = Math.max(0, 30 - completed);
+    capInfo.textContent = `Left: ${remaining}:00 of 30:00`;
+    capInfo.style.background = '';
+  }
+}
+
+function updateLockoutUI() {
+  const lockoutPill = byId('lockoutPill');
+  const menuStart = byId('menuStart');
+  
+  if (isDailyLocked()) {
+    // Show lockout status
+    if (lockoutPill) {
+      lockoutPill.textContent = 'Come back tomorrow';
+      lockoutPill.style.display = 'inline-flex';
+    }
+    
+    // Disable training button
+    if (menuStart) {
+      menuStart.disabled = true;
+      menuStart.textContent = '🔒 Training Complete';
+    }
+  } else {
+    // Hide lockout status
+    if (lockoutPill) {
+      lockoutPill.style.display = 'none';
+    }
+    
+    // Enable training button
+    if (menuStart) {
+      menuStart.disabled = false;
+      menuStart.textContent = '▶ Start Training';
+    }
+  }
+}
+
+/* ------------------ DAILY SESSION MODALS ------------------ */
+function openFlappyModalForDailyBreak() {
+  // Reuse existing flappy modal but add daily break messaging
+  openFlappyModal();
+  
+  // Add break countdown message
+  const flappyModal = byId('flappyModal');
+  if (flappyModal) {
+    let breakMessage = flappyModal.querySelector('#dailyBreakMessage');
+    if (!breakMessage) {
+      breakMessage = document.createElement('p');
+      breakMessage.id = 'dailyBreakMessage';
+      breakMessage.style.cssText = 'margin: 8px 0; font-weight: 600; color: var(--accent);';
+      const flappyCard = flappyModal.querySelector('.card');
+      if (flappyCard) {
+        flappyCard.insertBefore(breakMessage, flappyCard.querySelector('canvas'));
+      }
+    }
+    
+    // Disable manual close during break
+    const closeBtn = byId('flappyClose');
+    if (closeBtn) {
+      closeBtn.style.display = 'none';
+    }
+    
+    // Update message with remaining time (this will be called repeatedly by updateDailySession)
+    updateDailyBreakMessage();
+  }
+}
+
+function updateDailyBreakMessage() {
+  const breakMessage = byId('dailyBreakMessage');
+  if (breakMessage && state.session.inBreak) {
+    const remaining = fmtMMSS(state.session.breakRemainingMs);
+    const blockNum = state.session.blocksDone + 1;
+    breakMessage.textContent = `Block ${state.session.blocksDone} complete! Break: ${remaining} remaining`;
+  }
+}
+
+function closeDailyBreakModal() {
+  const flappyModal = byId('flappyModal');
+  if (flappyModal && flappyModal.style.display === 'flex') {
+    closeFlappy();
+  }
+  
+  // Remove break message
+  const breakMessage = byId('dailyBreakMessage');
+  if (breakMessage) {
+    breakMessage.remove();
+  }
+  
+  // Re-enable close button
+  const closeBtn = byId('flappyClose');
+  if (closeBtn) {
+    closeBtn.style.display = 'inline-block';
+  }
+}
+
+function showDailyCompleteBanner() {
+  // Create and show congratulations banner
+  let banner = byId('dailyCompleteBanner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'dailyCompleteBanner';
+    banner.style.cssText = `
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: var(--good);
+      color: white;
+      padding: 24px 32px;
+      border-radius: 16px;
+      text-align: center;
+      font-size: 18px;
+      font-weight: 600;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+      z-index: 1000;
+      animation: bounceIn 0.6s ease-out;
+    `;
+    
+    banner.innerHTML = `
+      <div style="font-size: 48px; margin-bottom: 16px;">🎉</div>
+      <div style="font-size: 24px; margin-bottom: 8px;">Congratulations!</div>
+      <div style="margin-bottom: 16px;">30 minutes completed — see you tomorrow!</div>
+      <button id="dismissBanner" style="
+        background: rgba(255,255,255,0.2);
+        color: white;
+        border: none;
+        padding: 8px 16px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-weight: 600;
+      ">Continue</button>
+    `;
+    
+    document.body.appendChild(banner);
+    
+    // Add click handler for dismiss button
+    const dismissBtn = byId('dismissBanner');
+    if (dismissBtn) {
+      dismissBtn.onclick = () => {
+        banner.remove();
+        showScreen('menuScreen');
+        updateSessionUI();
+      };
+    }
+  }
+  
+  banner.style.display = 'block';
+}
 
 /* ------------------ DURATION ------------------ */
 function activeDuration(session){
@@ -1296,8 +1717,17 @@ function ensureWeekRoll(){ const wi=currentWeekIdx(); if(state.thisWeekIdx!==wi)
 function isLocked(){ return state.lockoutUntil && Date.now() < state.lockoutUntil; }
 function updateCapsUI(){
   ensureWeekRoll();
+  
+  // Update daily session UI (new system)
+  updateSessionUI();
+  
+  // Legacy system (keep for compatibility)
   const left = Math.max(0, SESS_DAILY_MS - msUsedQuota());
-  text('capInfo', `Left: ${fmtMMSS(left)}`);
+  // Don't override capInfo if daily session system is active
+  if (!state.session || !state.session.startedAt) {
+    text('capInfo', `Left: ${fmtMMSS(left)}`);
+  }
+  
   const usedW = state.thisWeekMs || 0;
   const wp = byId('weekPill');
   if(wp){
@@ -1309,13 +1739,16 @@ function updateCapsUI(){
     wp.style.color = color;
     wp.title = `Target: ${fmtHMM(WEEKLY_TARGET_MS)}`;
   }
+  
+  // Legacy lockout (keep for compatibility)
   const locked = isLocked();
   const lp = byId('lockoutPill');
-  if(lp){
+  if(lp && !isDailyLocked()){
     if(locked){ lp.style.display='inline-flex'; lp.textContent = `🔒 Locked (${fmtHMM(state.lockoutUntil - Date.now())} left)`; }
     else lp.style.display='none';
   }
-  const pf = byId('playFlappy'); if(pf) pf.disabled = !locked;
+  
+  const pf = byId('playFlappy'); if(pf) pf.disabled = !(locked || isDailyLocked());
   
   // Update recall display when in menu screen
   try { updateRecallDisplay(); } catch(_) {}
@@ -3821,6 +4254,15 @@ function advanceCheck(){
 function initiateTrainingSession(){
   stopAllTimers();
   sealDanglingSession();
+  
+  // Check daily lockout first (new system)
+  if(isDailyLocked()){
+    alert('Training completed for today. Come back tomorrow!\nYou can still play Flappy from the menu.');
+    showScreen('menuScreen'); 
+    return;
+  }
+  
+  // Legacy lockout check (fallback)
   if(isLocked()){
     const left = state.lockoutUntil - Date.now();
     alert(`Training is locked for ${fmtHMM(left)}.\nYou can still play Flappy from the menu, or Reset lockout/timer.`);
@@ -3848,13 +4290,18 @@ function startTrainingAfterColdRecall(){
   sessionActive=true; paused=false;
   (state.sessions||[]).push({start:Date.now(),end:null,pauses:[],completed:false}); 
   
-  // C) On entering Trainer screen: do NOT reset activeMs; if running, resume from startedAt; otherwise show the current elapsed.
+  // Start the new daily session system
+  if (!startDailySession()) {
+    // Failed to start daily session (probably already completed)
+    showScreen('menuScreen');
+    return;
+  }
+  
+  // Keep legacy timeblock system for compatibility (but daily system takes precedence)
   if (!state.timeblock.breakActive) {
     if (state.timeblock.running) {
-      // Resume from where we left off
       state.timeblock.startedAt = performance.now();
     }
-    // Do not reset activeMs - it persists across navigation
     startTimeBlockTimer();
   }
   
@@ -3936,18 +4383,31 @@ function pauseStart(reason){
   rec.pauses=rec.pauses||[]; const last=rec.pauses[rec.pauses.length-1];
   if(!(last && !last.end)) rec.pauses.push({start:Date.now(), end:null, reason});
   paused=true;
-  // Pause TimeBlock timer when training pauses (but don't reset activeMs)
+  
+  // Pause daily session timer (new system)
+  // Don't pause during breaks as the break timer should continue
+  if (reason !== 'timeblock-break' && !state.session.inBreak) {
+    // The daily session timer continues running but this allows other systems to pause
+    // The daily session manages its own pause state via inBreak flag
+  }
+  
+  // Pause TimeBlock timer when training pauses (legacy system)
   if (reason !== 'timeblock-break') {
     pauseTimeBlockTimer();
   }
+  
   if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
   if(autoTimer){ clearTimeout(autoTimer); autoTimer=null; }
 }
+
 function pauseEnd(){
   const rec=state.sessions[state.sessions.length-1]; if(!rec||!rec.pauses||!rec.pauses.length) return;
   const last=rec.pauses[rec.pauses.length-1]; if(last && !last.end) last.end=Date.now();
   paused=false;
-  // Resume TimeBlock timer when training resumes
+  
+  // Resume daily session - handled by updateDailySession timer
+  
+  // Resume TimeBlock timer when training resumes (legacy system)
   if (!state.timeblock.breakActive) {
     startTimeBlockTimer();
   }
