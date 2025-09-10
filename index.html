@@ -1178,6 +1178,21 @@ if (!state.counters) {
   save();
 }
 
+// Migration for octave policy system
+if (!state.oct) {
+  state.oct = {
+    allowed: [3,4,5],
+    center: 4,
+    baselineMix: {3:0.05, 4:0.90, 5:0.05},   // default start = 90/10 (5%+5%)
+    currentMix:  {3:0.05, 4:0.90, 5:0.05},
+    setCounter:  0,                           // how many 24-in-bounds "sets" we've completed
+    inBoundsSinceSetStart: [],                // array of in-bounds trials since current set start
+    history: [],                              // log of decisions
+    perNoteOverrides: {}                      // per-note octave overrides for weak pitches
+  };
+  save();
+}
+
 // Migration for new daily session system
 if (!state.session) {
   state.session = {
@@ -4492,6 +4507,314 @@ function selectOobOctaveWithParity(trainedSet) {
   return octaves[Math.floor(Math.random() * octaves.length)];
 }
 
+/* ------------------ OCTAVE MIX HYBRID GATED POLICY ------------------ */
+
+// Select octave for in-bounds trials using current mix + per-note overrides
+function selectOctaveForInBounds(pc) {
+  if (!state.oct) {
+    return rand(currentOctaves());
+  }
+  
+  const mix = state.oct.currentMix;
+  const overrides = state.oct.perNoteOverrides[pc] || {};
+  
+  // Apply per-note override if active (bias toward center octave by 20%)
+  let adjustedMix = {...mix};
+  if (overrides.active) {
+    const centerOct = state.oct.center;
+    const biasAmount = 0.20;
+    
+    // Reduce all octaves proportionally and add bias to center
+    const scaleFactor = 1 - biasAmount;
+    for (const oct of state.oct.allowed) {
+      adjustedMix[oct] *= scaleFactor;
+    }
+    adjustedMix[centerOct] += biasAmount;
+    console.log(`🎵 Octave override for ${pc}: biasing toward center (${centerOct})`, adjustedMix);
+  }
+  
+  // Sample from the adjusted mix
+  const rand = Math.random();
+  let cumulative = 0;
+  
+  for (const oct of state.oct.allowed) {
+    cumulative += adjustedMix[oct] || 0;
+    if (rand <= cumulative) {
+      console.log(`🎵 Selected octave ${oct} for in-bounds ${pc} (rand=${rand.toFixed(3)}, mix=${JSON.stringify(adjustedMix)})`);
+      return oct;
+    }
+  }
+  
+  // Fallback to center octave
+  console.log(`🎵 Fallback to center octave ${state.oct.center} for ${pc}`);
+  return state.oct.center;
+}
+
+// Select octave for OOB trials (mirrors in-bounds currentMix)
+function selectOctaveForOOB(pc) {
+  if (!state.oct) {
+    return selectOobOctaveWithParity(trainedSet(setFromIndex(state.levelIndex)));
+  }
+  
+  // Mirror the in-bounds currentMix proportions
+  const mix = state.oct.currentMix;
+  const rand = Math.random();
+  let cumulative = 0;
+  
+  for (const oct of state.oct.allowed) {
+    cumulative += mix[oct] || 0;
+    if (rand <= cumulative) {
+      console.log(`🎵 OOB octave ${oct} for ${pc} (rand=${rand.toFixed(3)}, mirroring mix=${JSON.stringify(mix)})`);
+      return oct;
+    }
+  }
+  
+  // Fallback
+  console.log(`🎵 OOB fallback to center octave ${state.oct.center} for ${pc}`);
+  return state.oct.center;
+}
+
+// Called when an in-bounds trial is graded
+function onInBoundsGraded(trial) {
+  if (!state.oct || trial.oob) return;
+  
+  // Add trial to current set tracking
+  state.oct.inBoundsSinceSetStart.push(trial);
+  
+  const inBoundsCount = state.oct.inBoundsSinceSetStart.length;
+  console.log(`🎯 In-bounds trial ${inBoundsCount} completed (set ${state.oct.setCounter + 1})`);
+  
+  // Check window thresholds
+  if (inBoundsCount === 12 || inBoundsCount === 16 || inBoundsCount === 20 || inBoundsCount === 24) {
+    console.log(`🎯 Window threshold reached: ${inBoundsCount} trials, evaluating performance...`);
+    evaluateWindowsAndMaybeStep();
+  }
+}
+
+// Evaluate performance windows and update octave mix
+function evaluateWindowsAndMaybeStep() {
+  if (!state.oct) return;
+  
+  const trials = state.oct.inBoundsSinceSetStart;
+  const count = trials.length;
+  
+  let windowStart, windowEnd, windowName, accThreshold, medianThreshold, sdThreshold;
+  let isEndOfSet = false;
+  
+  // Determine which window we're evaluating
+  if (count === 12) {
+    // Early window: evaluate trials 8-12 (indices 7-11)
+    windowStart = 7; windowEnd = 11; windowName = '8-12';
+    accThreshold = 0.80; medianThreshold = 15;
+  } else if (count === 16) {
+    // Mid window: evaluate trials 12-16 (indices 11-15) - only if we didn't switch already
+    if (JSON.stringify(state.oct.currentMix) === JSON.stringify({3:0.05, 4:0.90, 5:0.05})) {
+      windowStart = 11; windowEnd = 15; windowName = '12-16';
+      accThreshold = 0.80; medianThreshold = 15;
+    } else {
+      return; // Already switched, skip mid window
+    }
+  } else if (count === 20) {
+    // Late window: evaluate trials 16-20 (indices 15-19)
+    windowStart = 15; windowEnd = 19; windowName = '16-20';
+    accThreshold = 0.85; medianThreshold = 12;
+  } else if (count === 24) {
+    // End-of-set: evaluate all 24 trials (indices 0-23)
+    windowStart = 0; windowEnd = 23; windowName = '20-24';
+    accThreshold = 0.90; medianThreshold = 10; sdThreshold = 15;
+    isEndOfSet = true;
+  } else {
+    return;
+  }
+  
+  // Extract window trials
+  const windowTrials = trials.slice(windowStart, windowEnd + 1);
+  
+  // Calculate statistics
+  const stats = calculateWindowStats(windowTrials);
+  
+  // Store current mix for logging
+  const fromMix = {...state.oct.currentMix};
+  let toMix = null;
+  let eventType = isEndOfSet ? 'end' : (windowName === '8-12' ? 'early' : windowName === '12-16' ? 'mid' : 'late');
+  
+  // Apply decision rules
+  if (isEndOfSet) {
+    // End-of-set decision affects next set's baseline
+    if (stats.acc >= 0.90 && stats.median <= 10 && stats.sd <= 15) {
+      state.oct.baselineMix = {3:0.25, 4:0.50, 5:0.25}; // 50/50 center/neighbors
+    } else if (stats.acc >= 0.85 && stats.median <= 12) {
+      state.oct.baselineMix = {3:0.20, 4:0.60, 5:0.20}; // 60/40
+    } else if (stats.acc < 0.80) {
+      state.oct.baselineMix = {3:0.15, 4:0.70, 5:0.15}; // 70/30 (or fallback 90/10 if struggling)
+      if (stats.acc < 0.60) {
+        state.oct.baselineMix = {3:0.05, 4:0.90, 5:0.05}; // 90/10 fallback
+      }
+    }
+    
+    // Reset for next set
+    state.oct.setCounter++;
+    state.oct.inBoundsSinceSetStart = [];
+    state.oct.currentMix = {...state.oct.baselineMix};
+    toMix = {...state.oct.currentMix};
+  } else {
+    // Within-set decision affects current mix
+    if (windowName === '16-20') {
+      // Late window: higher thresholds
+      if (stats.acc >= accThreshold && stats.median <= medianThreshold) {
+        state.oct.currentMix = {3:0.20, 4:0.60, 5:0.20}; // 60/40
+        toMix = {...state.oct.currentMix};
+      }
+    } else {
+      // Early/mid window: standard thresholds
+      if (stats.acc >= accThreshold && stats.median <= medianThreshold) {
+        state.oct.currentMix = {3:0.15, 4:0.70, 5:0.15}; // 70/30
+        toMix = {...state.oct.currentMix};
+      }
+    }
+  }
+  
+  // Log the decision
+  if (toMix || isEndOfSet) {
+    const logEntry = {
+      ts: Date.now(),
+      set: state.oct.setCounter,
+      event: eventType,
+      win: windowName,
+      acc: stats.acc,
+      median: stats.median,
+      sd: stats.sd,
+      from: fromMix,
+      to: toMix || fromMix
+    };
+    state.oct.history.push(logEntry);
+    
+    console.log(`🏆 Octave policy decision:`, logEntry);
+    if (toMix && JSON.stringify(fromMix) !== JSON.stringify(toMix)) {
+      console.log(`🎯 Mix changed from ${JSON.stringify(fromMix)} to ${JSON.stringify(toMix)}`);
+    }
+  }
+  
+  // Update per-note overrides based on rolling performance
+  updatePerNoteOverrides();
+}
+
+// Calculate statistics for a window of trials
+function calculateWindowStats(trials) {
+  if (trials.length === 0) {
+    return { acc: 0, median: 0, sd: 0 };
+  }
+  
+  // Accuracy
+  const correctCount = trials.filter(t => t.correct).length;
+  const acc = correctCount / trials.length;
+  
+  // Cents errors (use signed error if available, otherwise compute from guess vs true)
+  const centsErrors = [];
+  for (const trial of trials) {
+    // For now, we don't have cents error field, so skip cents calculation
+    // In a real implementation, this would extract signed cents error from detune info
+    if (typeof trial.centsError === 'number') {
+      centsErrors.push(trial.centsError);
+    }
+  }
+  
+  let median = 0, sd = 0;
+  if (centsErrors.length > 0) {
+    centsErrors.sort((a, b) => a - b);
+    const mid = Math.floor(centsErrors.length / 2);
+    median = centsErrors.length % 2 === 0 
+      ? (centsErrors[mid - 1] + centsErrors[mid]) / 2 
+      : centsErrors[mid];
+    
+    const mean = centsErrors.reduce((sum, err) => sum + err, 0) / centsErrors.length;
+    const variance = centsErrors.reduce((sum, err) => sum + Math.pow(err - mean, 2), 0) / centsErrors.length;
+    sd = Math.sqrt(variance);
+  }
+  
+  return { acc, median: Math.abs(median), sd };
+}
+
+// Update per-note override flags based on rolling last-40 performance
+function updatePerNoteOverrides() {
+  if (!state.oct || !state.trials) return;
+  
+  // Get last 40 in-bounds trials per pitch class
+  const recentTrials = state.trials
+    .filter(t => !t.oob && t.truePc)
+    .slice(-200); // Look at more trials to get enough per PC
+  
+  // Group by pitch class
+  const byPc = {};
+  for (const trial of recentTrials) {
+    const pc = trial.truePc;
+    if (!byPc[pc]) byPc[pc] = [];
+    byPc[pc].push(trial);
+  }
+  
+  // Evaluate each pitch class
+  for (const pc of PC) {
+    const pcTrials = (byPc[pc] || []).slice(-40); // Last 40 for this PC
+    
+    if (pcTrials.length >= 10) { // Need at least 10 trials to evaluate
+      const correctCount = pcTrials.filter(t => t.correct).length;
+      const acc = correctCount / pcTrials.length;
+      
+      // Check if this PC is weak (acc < 75% or median > 25¢)
+      // For now, only use accuracy threshold since we don't have cents errors
+      const isWeak = acc < 0.75;
+      
+      if (!state.oct.perNoteOverrides[pc]) {
+        state.oct.perNoteOverrides[pc] = { active: false, lastEvaluated: 0 };
+      }
+      
+      state.oct.perNoteOverrides[pc].active = isWeak;
+      state.oct.perNoteOverrides[pc].lastEvaluated = Date.now();
+    }
+  }
+}
+
+/* ------------------ OCTAVE POLICY DEBUG HELPERS ------------------ */
+
+// Debug helper function - expose to global scope for console access
+window.debugOctavePolicy = function() {
+  if (!state.oct) {
+    console.log('❌ Octave policy not initialized');
+    return;
+  }
+  
+  const trials = state.oct.inBoundsSinceSetStart;
+  const octaveCount = {3: 0, 4: 0, 5: 0};
+  trials.forEach(trial => {
+    const octave = trial.targetOctave || parseInt(trial.note?.slice(-1));
+    if (octave >= 3 && octave <= 5) {
+      octaveCount[octave]++;
+    }
+  });
+  
+  console.log('🎵 Octave Policy Debug Info:');
+  console.log('📊 Current state:', {
+    setCounter: state.oct.setCounter,
+    trialsInCurrentSet: trials.length,
+    currentMix: state.oct.currentMix,
+    baselineMix: state.oct.baselineMix
+  });
+  console.log('📈 Octave distribution:', octaveCount);
+  console.log('📝 Recent history:', state.oct.history.slice(-3));
+  console.log('⚠️ Per-note overrides:', state.oct.perNoteOverrides);
+  
+  // Calculate expected vs actual distribution
+  const total = trials.length;
+  if (total > 0) {
+    const expectedDist = {
+      3: Math.round(state.oct.currentMix[3] * total),
+      4: Math.round(state.oct.currentMix[4] * total), 
+      5: Math.round(state.oct.currentMix[5] * total)
+    };
+    console.log('🎯 Expected vs Actual:', {expected: expectedDist, actual: octaveCount});
+  }
+};
+
 function getOobCandidatesWithMirroring(set) {
   const baseOobs = currentOOBs(set);
   if (baseOobs.length === 0) return [];
@@ -5105,7 +5428,7 @@ async function nextTrial(forceNew=false){
         jlLevel = null;
         
         // Use octave parity mirroring for OOB trials
-        chosenOctave = selectOobOctaveWithParity(trained);
+        chosenOctave = selectOctaveForOOB(truePc);
         currentNote = `${truePc}${chosenOctave}`;
       } else {
         // in-bounds: call chooseDetuneMode(truePc) and assign cents/mode/jlLevel
@@ -5114,7 +5437,7 @@ async function nextTrial(forceNew=false){
         detuneMode = detuneInfo.mode;
         jlLevel = detuneInfo.jlLevel;
         
-        chosenOctave = rand(currentOctaves());
+        chosenOctave = selectOctaveForInBounds(truePc);
         currentNote = `${truePc}${chosenOctave}`;
       }
       
@@ -5335,6 +5658,11 @@ function recordTrialStats(trial) {
   
   // Update scheduler block system (NEW)
   onTrialGraded();
+  
+  // Update octave policy for in-bounds trials
+  if (!trial.oob) {
+    onInBoundsGraded(trial);
+  }
   
   // Check for OOB adaptation at block boundaries
   checkOobAdaptation();
