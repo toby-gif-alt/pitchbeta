@@ -2263,16 +2263,16 @@ function paintNotes(){
     b.dataset.pc=pc;  // pc is already canonical from PC array
     b.className='note';
     b.type='button';
-    // B) In click handler, read canonical pc and call gradeGuess
+    // B) In click handler, pass structured input to finalizeGrade
     b.addEventListener('click', (e)=> {
-      const guessPc = normalizePc(e.target.dataset.pc || e.target.textContent);
-      gradeGuess(guessPc);
+      const pc = normalizePc(e.target.dataset.pc || e.target.textContent);
+      finalizeGrade({ pc: pc, isOOB: false });
     });
     pad.appendChild(b);
   }
   safe('btnOOB', el=> {
     el.style.display = set>=12 ? 'none' : 'block';
-    el.onclick = ()=> gradeGuess('OOB');
+    el.onclick = ()=> finalizeGrade({ pc: null, isOOB: true });
   });
 }
 
@@ -2801,21 +2801,39 @@ async function nextTrial(forceNew=false){
 
 /* ------------------ ATOMIC GRADING SYSTEM ------------------ */
 
-function finalizeGrade(guessPcRaw) {
+function finalizeGrade(args) {
   const cur = state.current;
   if (!cur || state.grade.inProgress) return;
   state.grade.inProgress = true;
 
-  const guessPc = normalizePc(guessPcRaw);
-  const correct = !!(guessPc && cur.truePc && guessPc === cur.truePc);
-  const isTimeout = guessPc === null;
+  // A) Handle both old and new calling conventions for compatibility
+  if (typeof args === 'string' || args === null) {
+    // Legacy call: finalizeGrade(guessPcRaw) - convert to structured format
+    const guessPcRaw = args;
+    args = { 
+      pc: guessPcRaw === 'OOB' ? null : guessPcRaw, 
+      isOOB: guessPcRaw === 'OOB' 
+    };
+  }
+  
+  // B) Compute correctness with OOB-aware rule
+  const truePc = cur.truePc;
+  const isOobTrial = !!cur.oob;
+  const isOobGuess = !!args.isOOB;
+  const guessPc = normalizePc(args.pc);
+  
+  const correct = isOobTrial ? isOobGuess : (guessPc !== null && guessPc === truePc);
+  const isTimeout = args.pc === null && !args.isOOB;
 
+  // C) Store trials consistently with new fields
   const t = {
     time: Date.now(),
     trialId: cur.trialId,
     note: cur.truePc + String(cur.octave ?? ''),
+    // New structured fields
     truePc: cur.truePc,
-    guessPc,
+    guessPc: guessPc,
+    guessIsOOB: isOobGuess,
     correct,
     timeout: isTimeout,
     oob: !!cur.oob,
@@ -2824,9 +2842,9 @@ function finalizeGrade(guessPcRaw) {
     detuneMode: cur.detuneMode || (cur.oob ? 'oob' : 'anchor'),
     jlLevel: cur.jlLevel ?? null,
     timbreUsed: cur.timbre || state.audioType || 'sine',
-    // legacy fields for any old readers:
+    // Legacy fields for compatibility with old readers:
     pc: cur.truePc,
-    guess: guessPc
+    guess: isOobGuess ? 'OOB' : guessPc
   };
   
   state.trials.push(t);
@@ -2861,18 +2879,43 @@ function gradeGuess(guessPcRaw) {
   if(!sessionActive || paused || shepRunning || special) return;
   if(!state.trialOpen) return; // Input locking - ignore late clicks
   
-  finalizeGrade(guessPcRaw);
+  // Convert legacy calls to structured format
+  finalizeGrade({ pc: guessPcRaw === 'OOB' ? null : guessPcRaw, isOOB: guessPcRaw === 'OOB' });
 }
 
-// E) Make the feedback UI null-safe
+// E) Make the feedback UI null-safe and OOB-aware
 function renderFeedback(trial) {
-  const correctPc = trial.truePc || '(unknown)';
+  const fb = blockHasFeedback(blockFromIndex(state.levelIndex));
+  if (!fb && !special?.withFeedback) return;
+  
+  const box = byId('feedbackBox');
+  const overlay = byId('feedbackOverlay');
+  if (!box || !overlay) return;
+  
+  box.style.background = trial.correct ? 'var(--good)' : 'var(--bad)';
+  
   if (trial.correct) {
-    feedback(true);
+    if (trial.oob) {
+      box.textContent = 'Correct — that was out of bounds.';
+    } else {
+      box.textContent = 'Correct!';
+    }
   } else {
-    const safeLabel = trial.truePc ? pcLabel(trial.truePc) : '(unknown)';
-    feedback(false, `Incorrect — it was ${safeLabel}`);
+    if (trial.oob) {
+      const safeLabel = trial.truePc ? pcLabel(trial.truePc) : '(unknown)';
+      box.textContent = `Incorrect — that was out of bounds (it was ${safeLabel}).`;
+    } else {
+      const safeLabel = trial.truePc ? pcLabel(trial.truePc) : '(unknown)';
+      box.textContent = `Incorrect — it was ${safeLabel}`;
+    }
   }
+  
+  overlay.style.display = 'flex';
+  requestAnimationFrame(() => overlay.classList.add('show'));
+  setTimeout(() => {
+    overlay.classList.remove('show');
+    overlay.style.display = 'none';
+  }, 1000);
 }
 
 // Helper to show toast messages
@@ -2935,7 +2978,7 @@ function handleTimeout(){
   if(!sessionActive || paused || special) return;
   if(!state.trialOpen) return;
   
-  finalizeGrade(null); // Call finalizeGrade once with null guess
+  finalizeGrade({ pc: null, isOOB: false }); // E) Timeout path with structured input
 }
 
 /* Suggestion banner */
