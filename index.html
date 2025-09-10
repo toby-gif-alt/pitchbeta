@@ -1378,7 +1378,11 @@ function resolvePianoUrl(pc, octave) {
 // Piano sample initialization and validation
 async function initializePianoSamples() {
   const canonicalPCs = ["A","Bb","B","C","Db","D","Eb","E","F","Gb","G","Ab"];
-  const octaves = TIMBRE_RANGE.piano; // [3, 4, 5]
+  const [minOctave, maxOctave] = TIMBRE_RANGE.piano; // [3, 5]
+  const octaves = [];
+  for (let o = minOctave; o <= maxOctave; o++) {
+    octaves.push(o);
+  } // Now octaves = [3, 4, 5]
   
   // Initialize sample map structure
   for (const pc of canonicalPCs) {
