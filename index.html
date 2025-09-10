@@ -857,6 +857,15 @@ if (!state.conf) {
   save();
 }
 
+// Initialize counters for block system
+if (!state.counters) {
+  state.counters = {
+    trialInBlock: 0,            // 0-19, current trial position in block
+    blockIndex: 0               // Incrementing block counter
+  };
+  save();
+}
+
 // Apply theme on load
 applyTheme(state.theme);
 function save(){ try{ localStorage.setItem('apTrainer', JSON.stringify(state)); }catch(e){ report(e); } }
@@ -2032,38 +2041,8 @@ function choosePcWithAntiStreak(weights) {
 
 // Confusion-aware note selection for in-bounds trials with guardrails
 function selectInBoundsNoteConfusionAware(usable) {
-  // H) Guardrails: Get trained PCs and handle edge cases
-  const trained = getTrainedPCs();
-  
-  if (!trained || trained.length === 0) {
-    console.warn('selectInBoundsNoteConfusionAware: No trained PCs, skipping Step 4');
-    // Fallback to uniform over last known trained set if available
-    return usable && usable.length > 0 ? usable[Math.floor(Math.random() * usable.length)] : null;
-  }
-  
-  if (trained.length === 1) {
-    // H) If only one trained PC, weights = {trained[0]: 1} and anti-streak is moot
-    state.conf.blockWeights = { [trained[0]]: 1.0 };
-    state.conf.topPairAtBlockStart = null;
-    state.conf.prevPc = trained[0];
-    state.conf.runLen = (state.conf.runLen || 0) + 1;
-    save();
-    return trained[0];
-  }
-  
-  initializeConfusionTracking();
-  
-  // Check if we need to compute weights at the start of a new 20-trial TrainingBlock
-  // Fixed condition: check for start of block (every 20 trials) OR missing weights
-  const isBlockStart = (state.trainingBlockTrials % 20) === 0;
-  const hasNoWeights = !state.conf.blockWeights || Object.keys(state.conf.blockWeights).length === 0;
-  
-  if (isBlockStart || hasNoWeights) {
-    computeBlockWeightsAtStart();
-  }
-  
-  // Use frozen block weights with anti-streak rule
-  return choosePcWithAntiStreak(state.conf.blockWeights);
+  // Use the new scheduler system
+  return getScheduledPc();
 }
 
 // G) Log confusion series data for completed training blocks (once per block)
@@ -3044,6 +3023,9 @@ function recordTrialStats(trial) {
   // Update OOB controller
   updateTrainingBlockOobController(trial);
   
+  // Update scheduler block system (NEW)
+  onTrialGraded();
+  
   save(); 
   updateLevelUI(); 
   try{ drawChart(); }catch(_){}; 
@@ -3274,7 +3256,263 @@ function pauseResume(){
 function quotaStart(){ if(state.capResetAt && Date.now() >= state.capResetAt) return state.capResetAt; const d = new Date(); d.setHours(0,0,0,0); return d.getTime(); }
 function msUsedQuota(){ const start = quotaStart(); return (state.sessions || []).filter(s => s.start >= start).reduce((a, s) => a + activeDuration(s), 0); }
 
-/* ------------------ JITTER SYSTEM ------------------ */
+/* ------------------ SCHEDULER WEIGHT SYSTEM ------------------ */
+
+// 1) Trained set detection (single source of truth)
+function getTrainedPCs() {
+  // Preferred explicit state
+  if (Array.isArray(state?.training?.activeSet) && state.training.activeSet.length) {
+    return [...new Set(state.training.activeSet)];
+  }
+  
+  // Fallback: enabled note buttons with data-pc
+  const els = Array.from(document.querySelectorAll('.note-btn:not([aria-disabled="true"])'));
+  if (els.length > 0) {
+    const pcs = els.map(el => el.dataset.pc || el.textContent?.trim()).filter(Boolean);
+    const normalizedPcs = pcs.map(pc => normalizePc(pc)).filter(Boolean);
+    if (normalizedPcs.length > 0) {
+      return [...new Set(normalizedPcs)];
+    }
+  }
+  
+  // Final fallback: use trainedSet based on current level
+  const currentSet = setFromIndex(state.levelIndex);
+  return trainedSet(currentSet);
+}
+
+// 2) Begin-of-block freeze (call at the START of each 20-trial block)
+function freezeBlockWeights() {
+  const trained = getTrainedPCs();
+  if (trained.length === 0) {
+    console.warn('No trained PCs found, skipping weight freeze');
+    return;
+  }
+  
+  // Get in-bounds trials (truePc in trained set)
+  const IN = state.trials.filter(t => 
+    !t.oob && t.truePc && trained.includes(t.truePc)
+  );
+  
+  // Performance window (last-40 in-bounds per trained pc)
+  const perf = {};
+  for (const pc of trained) {
+    const pcTrials = IN.filter(t => t.truePc === pc).slice(-40);
+    perf[pc] = {
+      last40N: pcTrials.length,
+      last40Acc: pcTrials.length > 0 ? pcTrials.filter(t => t.correct).length / pcTrials.length : 0
+    };
+  }
+  
+  // Confusion window (last-200 in-bounds among trained)
+  const last200 = IN.slice(-200);
+  let topPair = null;
+  let maxOffDiagCount = 0;
+  let totalOffDiagCount = 0;
+  
+  // Count confusions in last-200 trials (only wrong guesses between trained PCs)
+  const confCounts = {};
+  for (const truePc of trained) {
+    confCounts[truePc] = {};
+    for (const wrongPc of trained) {
+      confCounts[truePc][wrongPc] = 0;
+    }
+  }
+  
+  for (const t of last200) {
+    if (trained.includes(t.truePc) && trained.includes(t.guessPc) && !t.correct) {
+      if (!confCounts[t.truePc]) confCounts[t.truePc] = {};
+      confCounts[t.truePc][t.guessPc] = (confCounts[t.truePc][t.guessPc] || 0) + 1;
+      totalOffDiagCount++;
+      
+      // Track top confusion pair (true != wrong)
+      if (t.truePc !== t.guessPc) {
+        const count = confCounts[t.truePc][t.guessPc];
+        if (count > maxOffDiagCount) {
+          maxOffDiagCount = count;
+          topPair = { true: t.truePc, wrong: t.guessPc };
+        }
+      }
+    }
+  }
+  
+  // Only apply confusion boost if total off-diagonal counts >= 10
+  if (totalOffDiagCount < 10) {
+    topPair = null;
+  }
+  
+  // Raw weights (per trained pc)
+  const weights = {};
+  for (const pc of trained) {
+    let w = 1.0;
+    
+    // Weakness boost: if last40N >= 8 and last40Acc < 0.80
+    if (perf[pc].last40N >= 8 && perf[pc].last40Acc < 0.80) {
+      w += 0.5;
+    }
+    
+    // Confusion boost: if this pc is the 'true' part of top confusion pair
+    if (topPair && topPair.true === pc) {
+      w += 0.5;
+    }
+    
+    // Clamp minimum weight
+    w = Math.max(w, 0.5);
+    weights[pc] = w;
+  }
+  
+  // Normalize weights across trained set only
+  const totalWeight = Object.values(weights).reduce((sum, w) => sum + w, 0);
+  const normalizedWeights = {};
+  for (const pc of trained) {
+    normalizedWeights[pc] = weights[pc] / totalWeight;
+  }
+  
+  // Store frozen weights
+  state.conf.blockWeights = normalizedWeights;
+  
+  // Log for visibility
+  window.qa = window.qa || {};
+  qa.confSeries = qa.confSeries || [];
+  qa.confSeries.push({
+    blockIndex: state.counters?.blockIndex ?? 0,
+    trained: [...trained],
+    weights: { ...normalizedWeights },
+    topConfusion: topPair ? { ...topPair } : null
+  });
+  
+  console.log('Block weights frozen:', {
+    blockIndex: state.counters?.blockIndex ?? 0,
+    trained,
+    weights: normalizedWeights,
+    topConfusion: topPair,
+    perfStats: perf
+  });
+}
+
+// 3) Anti-streak sampling with weights
+function choosePcWithAntiStreak(weights) {
+  state.conf = state.conf || {};
+  
+  let pc = weightedSample(weights);
+  
+  // Anti-streak logic: if same as previous AND run length >= 2, try to avoid
+  if (pc === state.conf.prevPc && (state.conf.runLen || 0) >= 2) {
+    pc = weightedSampleExcluding(weights, state.conf.prevPc) || pc;
+  }
+  
+  // Update run length tracking
+  if (pc === state.conf.prevPc) {
+    state.conf.runLen = (state.conf.runLen || 0) + 1;
+  } else {
+    state.conf.prevPc = pc;
+    state.conf.runLen = 1;
+  }
+  
+  return pc;
+}
+
+// Helper: weighted random sampling
+function weightedSample(weights) {
+  const pcs = Object.keys(weights);
+  if (pcs.length === 0) return null;
+  if (pcs.length === 1) return pcs[0];
+  
+  const rand = Math.random();
+  let cumulative = 0;
+  
+  for (const pc of pcs) {
+    cumulative += weights[pc];
+    if (rand <= cumulative) {
+      return pc;
+    }
+  }
+  
+  // Fallback to last PC if rounding errors
+  return pcs[pcs.length - 1];
+}
+
+// Helper: weighted sampling excluding a specific PC
+function weightedSampleExcluding(weights, excludePc) {
+  const availableWeights = {};
+  let totalWeight = 0;
+  
+  for (const [pc, weight] of Object.entries(weights)) {
+    if (pc !== excludePc) {
+      availableWeights[pc] = weight;
+      totalWeight += weight;
+    }
+  }
+  
+  if (totalWeight === 0) return null;
+  
+  // Renormalize available weights
+  const normalizedWeights = {};
+  for (const [pc, weight] of Object.entries(availableWeights)) {
+    normalizedWeights[pc] = weight / totalWeight;
+  }
+  
+  return weightedSample(normalizedWeights);
+}
+
+// 4) Block progression logic
+function onTrialGraded() {
+  // Initialize counters if needed
+  state.counters = state.counters || { trialInBlock: 0, blockIndex: 0 };
+  
+  // If trialInBlock is 0, this means we're at the start of a new block
+  if (state.counters.trialInBlock === 0) {
+    freezeBlockWeights();
+  }
+  
+  // Increment trial counter
+  state.counters.trialInBlock++;
+  
+  // If we've completed 20 trials, reset counter and increment block
+  if (state.counters.trialInBlock >= 20) {
+    state.counters.trialInBlock = 0;
+    state.counters.blockIndex++;
+  }
+  
+  save();
+}
+
+// 5) Get current pitch class for trial using scheduler
+function getScheduledPc() {
+  const trained = getTrainedPCs();
+  
+  // Edge cases
+  if (trained.length === 0) {
+    console.warn('No trained PCs available for scheduling');
+    return null;
+  }
+  
+  if (trained.length === 1) {
+    // Single PC case - anti-streak is moot
+    state.conf.blockWeights = { [trained[0]]: 1 };
+    return trained[0];
+  }
+  
+  // Use frozen weights if available, otherwise create uniform weights
+  let weights = state.conf.blockWeights || {};
+  
+  // Verify weights match current trained set
+  const weightsKeys = Object.keys(weights);
+  const weightsMatch = weightsKeys.length === trained.length && 
+                      weightsKeys.every(pc => trained.includes(pc));
+  
+  if (!weightsMatch) {
+    console.warn('Block weights do not match trained set, using uniform weights');
+    weights = {};
+    for (const pc of trained) {
+      weights[pc] = 1 / trained.length;
+    }
+    state.conf.blockWeights = weights;
+  }
+  
+  return choosePcWithAntiStreak(weights);
+}
+
+/* ------------------ END SCHEDULER WEIGHT SYSTEM ------------------ */
 
 // Initialize jitter level for a pitch class if not exists
 function initJitterForPc(pc) {
