@@ -117,7 +117,7 @@
           <h3>🎹 Octaves (per study)</h3>
           <ul>
             <li>Training tones span <strong>three octaves</strong> and are randomized within blocks.</li>
-            <li><strong>Piano/Sine:</strong> C4–B6 • <strong>Guitar:</strong> C3–B5</li>
+            <li><strong>Piano/Sine:</strong> C3–B5 • <strong>Guitar:</strong> C3–B5</li>
             <li>This encourages learning the <em>chroma</em> (pitch class), not just pitch height.</li>
             <li>Tone length: <strong>800 ms</strong>.</li>
           </ul>
@@ -188,8 +188,8 @@
       <div class="scopeWrap">
         <span style="opacity:.9">Audio type:</span>
         <select id="audioTypeSelect" class="scopeSelect">
-          <option value="piano">Piano (C4-B6)</option>
-          <option value="sine">Sine Wave (C4-B6)</option>
+          <option value="piano">Piano (C3-B5)</option>
+          <option value="sine">Sine Wave (C3-B5)</option>
           <option value="guitar">Guitar (C3-B5)</option>
         </select>
         <button id="applyAudioBtn" class="scopeBtn">Change</button>
@@ -315,7 +315,7 @@
       <button class="note" id="btnOther" type="button">Other (OOB)</button>
     </div>
 
-    <p style="opacity:.75;margin-top:8px">800 ms tone • RT limit adapts with set size • 24 blocks per set • Octaves randomized (C4–B6)</p>
+    <p style="opacity:.75;margin-top:8px">800 ms tone • RT limit adapts with set size • 24 blocks per set • Octaves randomized (C3–B5)</p>
   </div>
 
   <!-- Assessment Screen -->
@@ -3607,8 +3607,8 @@ function wireOnce(){
     state.audioType = newType;
     save();
     const labels = {
-      [AUDIO_TYPES.PIANO]: 'Piano (C4-B6)',
-      [AUDIO_TYPES.SINE]: 'Sine Wave (C4-B6)', 
+      [AUDIO_TYPES.PIANO]: 'Piano (C3-B5)',
+      [AUDIO_TYPES.SINE]: 'Sine Wave (C3-B5)', 
       [AUDIO_TYPES.GUITAR]: 'Guitar (C3-B5)'
     };
     alert(`Audio changed to ${labels[newType] || 'Piano'}`);
