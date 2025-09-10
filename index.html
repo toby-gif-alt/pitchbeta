@@ -484,6 +484,13 @@ const AUDIO_PIANO='./audio';
 const AUDIO_GUITAR='./Guitar';
 const AUDIO_TYPES = {PIANO: 'piano', SINE: 'sine', GUITAR: 'guitar'};
 
+/* ------------------ RECALL CONSTANTS ------------------ */
+// MIDI pitch class base values (octave 4)
+const MIDI_PC_BASE = {
+  A: 69, Bb: 70, B: 71, C: 72, Db: 73, D: 74, 
+  Eb: 75, E: 76, F: 77, Gb: 78, G: 79, Ab: 80
+};
+
 // Timbre ranges for direct sample usage (no octave remapping)
 const TIMBRE_RANGE = {
   sine: [3, 5],    // synth
@@ -688,7 +695,202 @@ function applyTheme(themeName) {
   root.style.setProperty('--neutral', theme.neutral);
 }
 
-/* ------------------ SAFE HELPERS + STATE ------------------ */
+/* ------------------ AUDIO RECORDING AND PITCH DETECTION ------------------ */
+let recallAudioContext = null;
+let recallAnalyser = null;
+let recallMicrophone = null;
+let recallDataArray = null;
+
+// Initialize audio recording system
+async function initRecallAudio() {
+  try {
+    // Request microphone access
+    const stream = await navigator.mediaDevices.getUserMedia({ 
+      audio: { 
+        sampleRate: RECALL_SAMPLE_RATE,
+        channelCount: 1,
+        echoCancellation: false,
+        noiseSuppression: false 
+      } 
+    });
+    
+    // Create audio context and analyser
+    recallAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+    recallAnalyser = recallAudioContext.createAnalyser();
+    recallMicrophone = recallAudioContext.createMediaStreamSource(stream);
+    
+    // Configure analyser for pitch detection
+    recallAnalyser.fftSize = 4096;
+    recallAnalyser.smoothingTimeConstant = 0.8;
+    recallMicrophone.connect(recallAnalyser);
+    
+    // Create data array for frequency analysis
+    recallDataArray = new Uint8Array(recallAnalyser.frequencyBinCount);
+    
+    return true;
+  } catch (error) {
+    console.error('Failed to initialize recall audio:', error);
+    return false;
+  }
+}
+
+// Convert Hz to MIDI number
+function hzToMidi(hz) {
+  return 69 + 12 * Math.log2(hz / 440);
+}
+
+// Get fundamental frequency using autocorrelation
+function getFundamentalFrequency() {
+  if (!recallAnalyser || !recallDataArray) return null;
+  
+  // Get time domain data for autocorrelation
+  const bufferSize = recallAnalyser.fftSize;
+  const timeData = new Float32Array(bufferSize);
+  recallAnalyser.getFloatTimeDomainData(timeData);
+  
+  // Simple autocorrelation-based pitch detection
+  const sampleRate = recallAudioContext.sampleRate;
+  const minPeriod = Math.floor(sampleRate / 800); // ~800 Hz max
+  const maxPeriod = Math.floor(sampleRate / 80);  // ~80 Hz min
+  
+  let bestPeriod = 0;
+  let bestCorrelation = 0;
+  
+  // Find the period with highest autocorrelation
+  for (let period = minPeriod; period <= maxPeriod; period++) {
+    let correlation = 0;
+    for (let i = 0; i < bufferSize - period; i++) {
+      correlation += timeData[i] * timeData[i + period];
+    }
+    
+    if (correlation > bestCorrelation) {
+      bestCorrelation = correlation;
+      bestPeriod = period;
+    }
+  }
+  
+  // Return frequency if correlation is strong enough
+  if (bestCorrelation > 0.01 && bestPeriod > 0) {
+    return sampleRate / bestPeriod;
+  }
+  
+  return null;
+}
+
+// Record audio for specified duration and collect pitch data
+async function recordPitchData(durationMs) {
+  if (!recallAudioContext || !recallAnalyser) {
+    throw new Error('Audio system not initialized');
+  }
+  
+  const frames = [];
+  const startTime = Date.now();
+  const endTime = startTime + durationMs;
+  
+  return new Promise((resolve) => {
+    function collectFrame() {
+      const now = Date.now();
+      if (now >= endTime) {
+        resolve(frames);
+        return;
+      }
+      
+      const hz = getFundamentalFrequency();
+      if (hz && hz > 80 && hz < 800) { // Valid vocal range
+        frames.push({
+          t: now - startTime,
+          hz: hz
+        });
+      }
+      
+      // Continue collecting at ~60fps
+      setTimeout(collectFrame, 16);
+    }
+    
+    collectFrame();
+  });
+}
+
+// Calculate nearest MIDI number for a given pitch class
+function getNearestMidiForPC(midiValue, pitchClass) {
+  const baseMidi = MIDI_PC_BASE[pitchClass];
+  if (!baseMidi) return null;
+  
+  // Find the nearest octave for this pitch class
+  const octaveOffset = Math.round((midiValue - baseMidi) / 12) * 12;
+  return baseMidi + octaveOffset;
+}
+
+// Analyze recorded frames and compute statistics
+function analyzeRecallTake(frames, targetPC) {
+  if (!frames || frames.length === 0) {
+    return {
+      medianCents: null,
+      sdCents: null,
+      verdict: 'no-signal',
+      nearestMidi: null,
+      framesCount: 0
+    };
+  }
+  
+  // Convert Hz to MIDI and calculate cents offset from nearest target
+  const centsList = [];
+  let nearestMidi = null;
+  
+  for (const frame of frames) {
+    const midiValue = hzToMidi(frame.hz);
+    const targetMidi = getNearestMidiForPC(midiValue, targetPC);
+    
+    if (targetMidi !== null) {
+      const cents = 100 * (midiValue - targetMidi);
+      centsList.push(cents);
+      
+      if (nearestMidi === null) {
+        nearestMidi = targetMidi;
+      }
+    }
+  }
+  
+  if (centsList.length === 0) {
+    return {
+      medianCents: null,
+      sdCents: null,
+      verdict: 'no-signal',
+      nearestMidi: null,
+      framesCount: frames.length
+    };
+  }
+  
+  // Calculate median
+  const sorted = [...centsList].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const medianCents = sorted.length % 2 === 0 
+    ? (sorted[mid - 1] + sorted[mid]) / 2 
+    : sorted[mid];
+  
+  // Calculate standard deviation
+  const mean = centsList.reduce((sum, c) => sum + c, 0) / centsList.length;
+  const variance = centsList.reduce((sum, c) => sum + Math.pow(c - mean, 2), 0) / centsList.length;
+  const sdCents = Math.sqrt(variance);
+  
+  // Determine verdict
+  let verdict;
+  if (Math.abs(medianCents) <= 10 && sdCents <= 15) {
+    verdict = 'on-target';
+  } else if (Math.abs(medianCents) <= 30) {
+    verdict = 'close';
+  } else {
+    verdict = 'off';
+  }
+  
+  return {
+    medianCents: Math.round(medianCents * 10) / 10, // Round to 1 decimal
+    sdCents: Math.round(sdCents * 10) / 10,
+    verdict,
+    nearestMidi,
+    framesCount: frames.length
+  };
+}
 function byId(id){ return document.getElementById(id); }
 function safe(id, fn){ const el=byId(id); if(el) try{ fn(el); }catch(e){report(e);} }
 function showFlex(id){ safe(id, el=> el.style.display='flex'); }
@@ -2291,7 +2493,8 @@ function analyzeRecording(frequencies, targetNote) {
       medianCents: 0,
       sdCents: 0,
       verdict: 'Off',
-      validSamples: 0
+      validSamples: 0,
+      nearestMidi: null
     };
   }
   
@@ -2303,7 +2506,8 @@ function analyzeRecording(frequencies, targetNote) {
       medianCents: 0,
       sdCents: 0,
       verdict: 'Off',
-      validSamples: 0
+      validSamples: 0,
+      nearestMidi: null
     };
   }
   
@@ -2313,11 +2517,32 @@ function analyzeRecording(frequencies, targetNote) {
     ? (sortedFreqs[sortedFreqs.length / 2 - 1] + sortedFreqs[sortedFreqs.length / 2]) / 2
     : sortedFreqs[Math.floor(sortedFreqs.length / 2)];
   
-  // Get target frequency
-  const targetHz = pitchDetector.noteToFrequency(targetNote + '4'); // Use octave 4 as reference
+  // Convert to MIDI for nearest octave calculation
+  const medianMidi = hzToMidi(medianHz);
   
-  // Convert frequencies to cents relative to target
-  const centsArray = validFreqs.map(f => pitchDetector.frequencyToCents(f, targetHz));
+  // Find nearest target pitch class across all octaves
+  const baseMidi = MIDI_PC_BASE[targetNote];
+  if (!baseMidi) {
+    console.error('Unknown pitch class:', targetNote);
+    return {
+      medianHz: Math.round(medianHz * 10) / 10,
+      medianCents: 0,
+      sdCents: 0,
+      verdict: 'Off',
+      validSamples: validFreqs.length,
+      nearestMidi: null
+    };
+  }
+  
+  // Calculate nearest target MIDI number for this pitch class
+  const nearestMidi = baseMidi + 12 * Math.round((medianMidi - baseMidi) / 12);
+  
+  // Convert all frequencies to cents relative to nearest target
+  const centsArray = validFreqs.map(f => {
+    const midiValue = hzToMidi(f);
+    const nearestTarget = baseMidi + 12 * Math.round((midiValue - baseMidi) / 12);
+    return 100 * (midiValue - nearestTarget);
+  });
   
   // Calculate median and SD of cents
   const sortedCents = [...centsArray].sort((a, b) => a - b);
@@ -2329,7 +2554,7 @@ function analyzeRecording(frequencies, targetNote) {
   const variance = centsArray.reduce((a, b) => a + Math.pow(b - meanCents, 2), 0) / centsArray.length;
   const sdCents = Math.sqrt(variance);
   
-  // Determine verdict based on thresholds
+  // Determine verdict based on thresholds (as per requirements)
   let verdict;
   if (Math.abs(medianCents) <= 10 && sdCents <= 15) {
     verdict = 'On target';
@@ -2341,10 +2566,11 @@ function analyzeRecording(frequencies, targetNote) {
   
   return {
     medianHz: Math.round(medianHz * 10) / 10,
-    medianCents: Math.round(medianCents),
+    medianCents: Math.round(medianCents * 10) / 10,
     sdCents: Math.round(sdCents * 10) / 10,
     verdict,
-    validSamples: validFreqs.length
+    validSamples: validFreqs.length,
+    nearestMidi: nearestMidi
   };
 }
 
@@ -2523,7 +2749,26 @@ function createHumButton(targetPc, onComplete) {
   return container;
 }
 
-// Save recall data to state
+// Enhanced recall session system for sequential capture -> review flow
+let currentRecallSession = null;
+
+// Initialize a new recall session
+function initializeRecallSession(type) {
+  const selectedNotes = selectRecallNotes();
+  
+  currentRecallSession = {
+    type: type, // 'cold' or 'warm'
+    date: getTodayKey(),
+    prompts: selectedNotes.map(pc => ({ pc })),
+    takes: [], // Will store completed recordings
+    currentIndex: 0, // Current prompt index
+    phase: 'capture' // 'capture' or 'review'
+  };
+  
+  return currentRecallSession;
+}
+
+// Save recall data to state (updated for new format)
 function saveRecallData(type, data) {
   const todayKey = getTodayKey();
   if (!state.recall[todayKey]) {
@@ -2532,93 +2777,380 @@ function saveRecallData(type, data) {
   
   state.recall[todayKey][type].push({
     pc: data.pc,
-    median: data.medianCents,
-    sd: data.sdCents,
-    verdict: data.verdict,
+    targetMidi: MIDI_PC_BASE[data.pc],
+    nearestOct: data.nearestMidi,
+    medianCents: data.medianCents,
+    sdCents: data.sdCents,
+    verdict: data.verdict.toLowerCase().replace(/\s+/g, '-'), // 'on-target', 'close', 'off'
+    framesCount: data.validSamples,
     timestamp: data.timestamp || Date.now()
   });
   
   save();
 }
 
-// Show cold recall modal
+// Show cold recall modal with sequential flow
 function showColdRecall() {
+  initializeRecallSession('cold');
   const modal = byId('coldRecallModal');
-  const notesContainer = byId('coldRecallNotes');
-  const completeButton = byId('btnColdRecallComplete');
-  
-  notesContainer.innerHTML = '';
-  completeButton.style.display = 'none';
-  
-  const selectedNotes = selectRecallNotes();
-  const results = [];
-  let completedCount = 0;
-  
-  selectedNotes.forEach((pc, index) => {
-    const humButton = createHumButton(pc, (data) => {
-      results.push(data);
-      saveRecallData('cold', data);
-      completedCount++;
-      
-      if (completedCount >= selectedNotes.length) {
-        completeButton.style.display = 'inline-block';
-        updateRecallDisplay();
-      }
-    });
-    notesContainer.appendChild(humButton);
-  });
-  
   modal.style.display = 'flex';
+  renderRecallCapturePhase();
 }
 
-// Show warm recall modal
+// Show warm recall modal with sequential flow  
 function showWarmRecall() {
+  initializeRecallSession('warm');
   const modal = byId('warmRecallModal');
-  const notesContainer = byId('warmRecallNotes');
-  const completeButton = byId('btnWarmRecallComplete');
+  modal.style.display = 'flex';
+  renderRecallCapturePhase();
+}
+
+// Render the capture phase UI
+function renderRecallCapturePhase() {
+  if (!currentRecallSession) return;
   
+  const modalId = currentRecallSession.type === 'cold' ? 'coldRecallModal' : 'warmRecallModal';
+  const modal = byId(modalId);
+  const notesContainer = byId(currentRecallSession.type + 'RecallNotes');
+  const completeButton = byId(currentRecallSession.type === 'cold' ? 'btnColdRecallComplete' : 'btnWarmRecallComplete');
+  
+  if (!notesContainer || !completeButton) return;
+  
+  // Clear container
   notesContainer.innerHTML = '';
   completeButton.style.display = 'none';
   
-  // Use same notes as cold recall if available, otherwise select new ones
-  const todayKey = getTodayKey();
-  let selectedNotes;
-  
-  if (state.recall[todayKey] && state.recall[todayKey].cold && state.recall[todayKey].cold.length > 0) {
-    selectedNotes = state.recall[todayKey].cold.map(r => r.pc);
-  } else {
-    selectedNotes = selectRecallNotes();
-  }
-  
-  const results = [];
-  let completedCount = 0;
-  
-  selectedNotes.forEach((pc, index) => {
-    const humButton = createHumButton(pc, (data) => {
-      results.push(data);
-      saveRecallData('warm', data);
-      completedCount++;
-      
-      if (completedCount >= selectedNotes.length) {
-        completeButton.style.display = 'inline-block';
-        updateRecallDisplay();
-      }
-    });
-    notesContainer.appendChild(humButton);
+  // Create capture UI for each prompt
+  currentRecallSession.prompts.forEach((prompt, index) => {
+    const isActive = index === currentRecallSession.currentIndex;
+    const isCompleted = index < currentRecallSession.currentIndex;
+    
+    const noteDiv = document.createElement('div');
+    noteDiv.style.cssText = `
+      margin: 12px 0;
+      padding: 16px;
+      border: 2px solid var(--muted);
+      border-radius: 12px;
+      text-align: center;
+      background: var(--card);
+      ${isCompleted ? 'border-color: var(--good); opacity: 0.8;' : ''}
+      ${isActive ? 'border-color: var(--accent); background: var(--accent); color: var(--bg);' : ''}
+    `;
+    
+    const titleEl = document.createElement('h3');
+    titleEl.style.margin = '0 0 12px 0';
+    titleEl.textContent = `Hum ${pcLabel(prompt.pc)}`;
+    
+    if (isCompleted) {
+      const checkEl = document.createElement('div');
+      checkEl.textContent = '✓ Recorded';
+      checkEl.style.cssText = 'font-weight: 600; color: var(--good);';
+      noteDiv.appendChild(titleEl);
+      noteDiv.appendChild(checkEl);
+    } else if (isActive) {
+      const humButton = createSequentialHumButton(prompt.pc, index);
+      noteDiv.appendChild(titleEl);
+      noteDiv.appendChild(humButton);
+    } else {
+      const waitEl = document.createElement('div');
+      waitEl.textContent = 'Wait...';
+      waitEl.style.cssText = 'opacity: 0.6; font-style: italic;';
+      noteDiv.appendChild(titleEl);
+      noteDiv.appendChild(waitEl);
+    }
+    
+    notesContainer.appendChild(noteDiv);
   });
   
-  modal.style.display = 'flex';
+  // Show review button if all captures complete
+  if (currentRecallSession.currentIndex >= currentRecallSession.prompts.length) {
+    completeButton.style.display = 'inline-block';
+    completeButton.textContent = 'Review Results';
+  }
+}
+
+// Create a hum button for sequential capture
+function createSequentialHumButton(targetPc, index) {
+  const button = document.createElement('button');
+  button.textContent = 'Hold to Hum';
+  button.style.cssText = `
+    padding: 12px 24px;
+    font-size: 16px;
+    background: var(--bg);
+    color: var(--accent);
+    border-radius: 12px;
+    border: none;
+    cursor: pointer;
+    font-weight: 600;
+    min-width: 140px;
+  `;
+  
+  let recording = false;
+  let frequencies = [];
+  let audioContext = null;
+  let analyser = null;
+  let microphone = null;
+  
+  const startRecording = async () => {
+    if (recording) return;
+    
+    recording = true;
+    frequencies = [];
+    
+    button.textContent = 'Recording...';
+    button.style.background = 'var(--bad)';
+    
+    try {
+      const stream = await initMicrophone();
+      audioContext = getCtx();
+      analyser = audioContext.createAnalyser();
+      microphone = audioContext.createMediaStreamSource(stream);
+      
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = 0.3;
+      microphone.connect(analyser);
+      
+      if (!pitchDetector) {
+        pitchDetector = new YINPitchDetector(audioContext.sampleRate, analyser.fftSize);
+      }
+      
+      const recordingStart = Date.now();
+      
+      const detectPitch = () => {
+        if (!recording) return;
+        
+        const bufferLength = analyser.fftSize;
+        const dataArray = new Float32Array(bufferLength);
+        analyser.getFloatTimeDomainData(dataArray);
+        
+        const frequency = pitchDetector.getPitch(dataArray);
+        const elapsed = Date.now() - recordingStart;
+        
+        if (frequency > 0 && frequency > 80 && frequency < 800) {
+          frequencies.push(frequency);
+        }
+        
+        if (elapsed < 2000) { // Record for 2 seconds
+          requestAnimationFrame(detectPitch);
+        } else {
+          stopRecording();
+        }
+      };
+      
+      requestAnimationFrame(detectPitch);
+      
+    } catch (error) {
+      console.error('Recording failed:', error);
+      button.textContent = 'Error - Try Again';
+      button.style.background = 'var(--bad)';
+      recording = false;
+    }
+  };
+  
+  const stopRecording = () => {
+    if (!recording) return;
+    
+    recording = false;
+    
+    if (microphone) {
+      microphone.disconnect();
+      microphone = null;
+    }
+    
+    // Analyze recording
+    const analysis = analyzeRecording(frequencies, targetPc);
+    
+    // Store the take
+    currentRecallSession.takes.push({
+      pc: targetPc,
+      medianHz: analysis.medianHz,
+      medianCents: analysis.medianCents,
+      sdCents: analysis.sdCents,
+      verdict: analysis.verdict,
+      nearestMidi: analysis.nearestMidi,
+      validSamples: analysis.validSamples,
+      timestamp: Date.now()
+    });
+    
+    // Move to next prompt
+    currentRecallSession.currentIndex++;
+    
+    // Re-render UI
+    renderRecallCapturePhase();
+  };
+  
+  button.onmousedown = startRecording;
+  button.onmouseup = stopRecording;
+  button.onmouseleave = stopRecording;
+  button.ontouchstart = (e) => { e.preventDefault(); startRecording(); };
+  button.ontouchend = (e) => { e.preventDefault(); stopRecording(); };
+  
+  return button;
+}
+
+// Start the review phase
+function startRecallReview() {
+  if (!currentRecallSession || currentRecallSession.takes.length === 0) return;
+  
+  currentRecallSession.phase = 'review';
+  currentRecallSession.reviewIndex = 0;
+  
+  // Save all results to state
+  for (const take of currentRecallSession.takes) {
+    saveRecallData(currentRecallSession.type, take);
+  }
+  
+  renderRecallReviewPhase();
+}
+
+// Render the review phase carousel
+function renderRecallReviewPhase() {
+  if (!currentRecallSession || currentRecallSession.phase !== 'review') return;
+  
+  const modalId = currentRecallSession.type === 'cold' ? 'coldRecallModal' : 'warmRecallModal';
+  const modal = byId(modalId);
+  
+  if (!modal) return;
+  
+  const currentTake = currentRecallSession.takes[currentRecallSession.reviewIndex];
+  if (!currentTake) return;
+  
+  // Generate review content
+  const reviewContent = generateRecallReviewContent(currentTake);
+  
+  // Replace modal content with review UI
+  modal.innerHTML = `
+    <div class="card" style="max-width:600px;margin:20px;text-align:center">
+      <h2>${currentRecallSession.type === 'cold' ? '🧊 Cold' : '🔥 Warm'} Recall - Review</h2>
+      <div style="margin:20px 0">
+        <div class="pill" style="margin-bottom:16px">
+          Result ${currentRecallSession.reviewIndex + 1} of ${currentRecallSession.takes.length}
+        </div>
+        <div style="background:var(--muted2);border-radius:12px;padding:20px;margin:16px 0">
+          ${reviewContent}
+        </div>
+      </div>
+      <div style="display:flex;justify-content:space-between;gap:12px">
+        <button id="btnRecallPrev" style="background:var(--muted)" 
+          ${currentRecallSession.reviewIndex === 0 ? 'disabled' : ''}>◀ Back</button>
+        <div style="flex:1"></div>
+        <button id="btnRecallNext" style="background:var(--good)">
+          ${currentRecallSession.reviewIndex < currentRecallSession.takes.length - 1 ? 'Next ▶' : 'Done'}
+        </button>
+      </div>
+    </div>
+  `;
+  
+  // Wire up navigation
+  safe('btnRecallPrev', el => el.onclick = () => {
+    if (currentRecallSession.reviewIndex > 0) {
+      currentRecallSession.reviewIndex--;
+      renderRecallReviewPhase();
+    }
+  });
+  
+  safe('btnRecallNext', el => el.onclick = () => {
+    if (currentRecallSession.reviewIndex < currentRecallSession.takes.length - 1) {
+      currentRecallSession.reviewIndex++;
+      renderRecallReviewPhase();
+    } else {
+      finishRecallReview();
+    }
+  });
+}
+
+// Generate review content with needle gauge
+function generateRecallReviewContent(take) {
+  if (!take.nearestMidi || take.medianCents === null) {
+    return `
+      <h3>Target: ${pcLabel(take.pc)}</h3>
+      <p style="color:var(--bad)">No clear pitch detected</p>
+      <p style="opacity:0.7">${take.validSamples} audio samples recorded</p>
+    `;
+  }
+  
+  // Get the two adjacent semitones for the gauge
+  const mLo = Math.floor(take.nearestMidi);
+  const mHi = mLo + 1;
+  
+  // Convert MIDI to note labels with octaves
+  const loNote = midiToNoteLabel(mLo);
+  const hiNote = midiToNoteLabel(mHi);
+  
+  // Calculate gauge position (0-100 between mLo and mHi)
+  const mMed = take.nearestMidi + (take.medianCents / 100);
+  const gaugePos = Math.max(0, Math.min(100, (mMed - mLo) * 100));
+  
+  // Format cents with sign
+  const centsStr = take.medianCents > 0 ? `+${take.medianCents}¢` : `${take.medianCents}¢`;
+  const sharpFlat = take.medianCents > 0 ? '(sharp)' : take.medianCents < 0 ? '(flat)' : '(on pitch)';
+  
+  // Verdict color
+  const verdictColors = {
+    'On target': 'var(--good)',
+    'Close': 'var(--accent)', 
+    'Off': 'var(--bad)'
+  };
+  const verdictColor = verdictColors[take.verdict] || 'var(--neutral)';
+  
+  return `
+    <h3>Target: ${pcLabel(take.pc)} (nearest ${midiToNoteLabel(take.nearestMidi)})</h3>
+    <div style="margin:20px 0">
+      <div style="display:flex;justify-content:space-between;margin-bottom:8px;font-size:14px;font-weight:600">
+        <span>${loNote}</span>
+        <span>${hiNote}</span>
+      </div>
+      <div style="position:relative;height:20px;background:var(--muted);border-radius:10px;overflow:hidden">
+        <div style="position:absolute;left:${gaugePos}%;top:0;bottom:0;width:4px;background:${verdictColor};transform:translateX(-50%)"></div>
+      </div>
+    </div>
+    <div style="margin:16px 0">
+      <div style="font-size:18px;font-weight:600;color:${verdictColor}">${centsStr} ${sharpFlat}</div>
+      <div style="opacity:0.7;margin-top:4px">Stability: ${take.sdCents}¢ SD • ${take.validSamples} samples</div>
+    </div>
+  `;
+}
+
+// Convert MIDI number to note label with octave
+function midiToNoteLabel(midi) {
+  const noteNames = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B'];
+  const octave = Math.floor(midi / 12) - 1;
+  const noteIndex = Math.round(midi) % 12;
+  return `${noteNames[noteIndex]}${octave}`;
+}
+
+// Finish recall review and continue workflow
+function finishRecallReview() {
+  if (!currentRecallSession) return;
+  
+  // Update display
+  updateRecallDisplay();
+  
+  // Close modal and continue
+  if (currentRecallSession.type === 'cold') {
+    closeColdRecall();
+    // After cold recall, continue to training
+    showScreen('trainerScreen');
+  } else {
+    closeWarmRecall();  
+    // After warm recall, end day
+    endDayAndLockout();
+  }
+  
+  currentRecallSession = null;
 }
 
 // Close recall modals
 function closeColdRecall() {
   byId('coldRecallModal').style.display = 'none';
   closeMicrophone();
+  currentRecallSession = null;
 }
 
 function closeWarmRecall() {
   byId('warmRecallModal').style.display = 'none';  
   closeMicrophone();
+  currentRecallSession = null;
 }
 
 // Update recall display in dashboard
@@ -2640,14 +3172,15 @@ function updateRecallDisplay() {
   if (recallData.cold && recallData.cold.length > 0) {
     html += '<div><h4 style="margin: 0 0 8px 0; color: var(--accent);">🧊 Cold Recall</h4>';
     recallData.cold.forEach(r => {
-      const verdictColor = 
-        r.verdict === 'On target' ? 'var(--good)' :
-        r.verdict === 'Close' ? 'var(--accent)' : 'var(--bad)';
+      const verdictColor = getVerdictColor(r.verdict);
+      const centsStr = r.medianCents !== null && r.medianCents !== undefined ? 
+        (r.medianCents > 0 ? `+${r.medianCents}¢` : `${r.medianCents}¢`) : 'N/A';
+      
       html += `
         <div style="display: flex; justify-content: space-between; align-items: center; padding: 4px 8px; margin: 4px 0; background: var(--muted2); border-radius: 8px;">
-          <span style="font-weight: 600;">${PC_LABEL[r.pc] || r.pc}</span>
-          <span style="color: ${verdictColor};">${r.verdict}</span>
-          <span style="opacity: 0.7; font-size: 12px;">${r.median}¢</span>
+          <span style="font-weight: 600;">${pcLabel(r.pc)}</span>
+          <span style="color: ${verdictColor};">${formatVerdict(r.verdict)}</span>
+          <span style="opacity: 0.7; font-size: 12px;">${centsStr}</span>
         </div>
       `;
     });
@@ -2657,14 +3190,15 @@ function updateRecallDisplay() {
   if (recallData.warm && recallData.warm.length > 0) {
     html += '<div><h4 style="margin: 0 0 8px 0; color: var(--accent);">🔥 Warm Recall</h4>';
     recallData.warm.forEach(r => {
-      const verdictColor = 
-        r.verdict === 'On target' ? 'var(--good)' :
-        r.verdict === 'Close' ? 'var(--accent)' : 'var(--bad)';
+      const verdictColor = getVerdictColor(r.verdict);
+      const centsStr = r.medianCents !== null && r.medianCents !== undefined ? 
+        (r.medianCents > 0 ? `+${r.medianCents}¢` : `${r.medianCents}¢`) : 'N/A';
+      
       html += `
         <div style="display: flex; justify-content: space-between; align-items: center; padding: 4px 8px; margin: 4px 0; background: var(--muted2); border-radius: 8px;">
-          <span style="font-weight: 600;">${PC_LABEL[r.pc] || r.pc}</span>
-          <span style="color: ${verdictColor};">${r.verdict}</span>
-          <span style="opacity: 0.7; font-size: 12px;">${r.median}¢</span>
+          <span style="font-weight: 600;">${pcLabel(r.pc)}</span>
+          <span style="color: ${verdictColor};">${formatVerdict(r.verdict)}</span>
+          <span style="opacity: 0.7; font-size: 12px;">${centsStr}</span>
         </div>
       `;
     });
@@ -2675,22 +3209,44 @@ function updateRecallDisplay() {
   container.innerHTML = html;
 }
 
-// Export recall data as CSV
+// Helper function to get verdict color
+function getVerdictColor(verdict) {
+  const normalized = formatVerdict(verdict);
+  return normalized === 'On Target' ? 'var(--good)' :
+         normalized === 'Close' ? 'var(--accent)' : 'var(--bad)';
+}
+
+// Helper function to format verdict text
+function formatVerdict(verdict) {
+  if (!verdict) return 'Unknown';
+  // Convert from stored format (on-target, close, off) to display format
+  const verdictMap = {
+    'on-target': 'On Target',
+    'close': 'Close', 
+    'off': 'Off',
+    'On target': 'On Target', // Handle existing format
+    'Close': 'Close',
+    'Off': 'Off'
+  };
+  return verdictMap[verdict] || verdict;
+}
+
+// Export recall data as CSV (updated for new format)
 function exportRecallCSV() {
-  const csvRows = ['date,type,pc,medianCents,sdCents,verdict'];
+  const csvRows = ['date,type,pc,targetMidi,nearestOct,medianCents,sdCents,verdict,framesCount'];
   
   Object.keys(state.recall).sort().forEach(date => {
     const dayData = state.recall[date];
     
     if (dayData.cold) {
       dayData.cold.forEach(r => {
-        csvRows.push(`${date},cold,${r.pc},${r.median},${r.sd},${r.verdict}`);
+        csvRows.push(`${date},cold,${r.pc},${r.targetMidi || ''},${r.nearestOct || ''},${r.medianCents || ''},${r.sdCents || ''},${r.verdict || ''},${r.framesCount || ''}`);
       });
     }
     
     if (dayData.warm) {
       dayData.warm.forEach(r => {
-        csvRows.push(`${date},warm,${r.pc},${r.median},${r.sd},${r.verdict}`);
+        csvRows.push(`${date},warm,${r.pc},${r.targetMidi || ''},${r.nearestOct || ''},${r.medianCents || ''},${r.sdCents || ''},${r.verdict || ''},${r.framesCount || ''}`);
       });
     }
   });
@@ -5057,13 +5613,11 @@ function wireOnce(){
 
   // Recall system buttons
   safe('btnColdRecallComplete', el=> el.onclick=()=> {
-    closeColdRecall();
-    startTrainingAfterColdRecall();
+    startRecallReview();
   });
   
   safe('btnWarmRecallComplete', el=> el.onclick=()=> {
-    closeWarmRecall();
-    endDayAndLockout();
+    startRecallReview();
   });
   
   safe('btnExportRecall', el=> el.onclick=()=> exportRecallCSV());
