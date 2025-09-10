@@ -478,6 +478,7 @@
 
   <div id="bootError"></div>
 
+<script src="./detectors/pitch.js"></script>
 <script>
 /* ------------------ CONSTANTS ------------------ */
 const AUDIO_PIANO='./audio';
@@ -2625,41 +2626,57 @@ function createHumButton(targetPc, onComplete) {
       display.innerHTML = '<span style="color: var(--accent); font-weight: 600;">Recording... keep humming</span>';
       result.innerHTML = '';
       
-      // Initialize audio context and microphone
-      const stream = await initMicrophone();
-      audioContext = getCtx();
-      analyser = audioContext.createAnalyser();
-      microphone = audioContext.createMediaStreamSource(stream);
-      
-      analyser.fftSize = 2048;
-      analyser.smoothingTimeConstant = 0.3;
-      microphone.connect(analyser);
-      
-      if (!pitchDetector) {
-        pitchDetector = new YINPitchDetector(audioContext.sampleRate, analyser.fftSize);
-      }
+      // Hardened mic pipeline for Recall
+      const ctx = (window.audioCtx ||= new (window.AudioContext||window.webkitAudioContext)());
+      await ctx.resume(); // must be after a user gesture
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+          channelCount: 1
+        }
+      });
+      const source = ctx.createMediaStreamSource(stream);
+
+      // Use ScriptProcessor or AudioWorklet. ScriptProcessor is OK here:
+      const N = 2048;
+      const proc = ctx.createScriptProcessor(N, 1, 1);
+      source.connect(proc);
+      const sink = ctx.createGain(); sink.gain.value = 0; proc.connect(sink); sink.connect(ctx.destination);
+
+      // Create detector once per session
+      state.recall = state.recall || {};
+      state.recall.detector = window.detectors.createPitchDetector({ method:'yin', sampleRate: ctx.sampleRate });
+
+      // Capture frames during a 2s take
+      let frames = [];
+      proc.onaudioprocess = (e) => {
+        if (!recording) return;
+        const ch0 = e.inputBuffer.getChannelData(0);
+        // copy to avoid ring buffer reuse
+        frames.push(new Float32Array(ch0));
+      };
       
       // Start pitch detection loop
       const detectPitch = () => {
         if (!recording) return;
         
-        const bufferLength = analyser.fftSize;
-        const dataArray = new Float32Array(bufferLength);
-        analyser.getFloatTimeDomainData(dataArray);
-        
-        const frequency = pitchDetector.autocorrelate(dataArray);
         const elapsed = performance.now() - recordingStart;
         
-        if (frequency > 0) {
-          frequencies.push(frequency);
-          const targetHz = pitchDetector.noteToFrequency(targetPc + '4');
-          const cents = pitchDetector.frequencyToCents(frequency, targetHz);
-          display.innerHTML = `
-            <div style="color: var(--good);">
-              <strong>${Math.round(frequency)} Hz</strong> 
-              <span style="margin-left: 16px;">${cents > 0 ? '+' : ''}${cents}¢</span>
-            </div>
-          `;
+        if (frames.length > 0) {
+          const latestFrame = frames[frames.length - 1];
+          const hz = state?.recall?.detector?.getPitch(latestFrame) || null;
+          
+          if (hz && hz > 80 && hz < 800) {
+            frequencies.push(hz);
+            const targetHz = pitchDetector.noteToFrequency(targetPc + '4');
+            const cents = pitchDetector.frequencyToCents(hz, targetHz);
+            display.innerHTML = `
+              <div style="color: var(--good);">
+                <strong>${Math.round(hz)} Hz</strong> 
+                <span style="margin-left: 16px;">${cents > 0 ? '+' : ''}${cents}¢</span>
+              </div>
+            `;
+          }
         }
         
         if (elapsed < 2500) { // Record for ~2.5 seconds max
@@ -2901,33 +2918,50 @@ function createSequentialHumButton(targetPc, index) {
     button.style.background = 'var(--bad)';
     
     try {
-      const stream = await initMicrophone();
-      audioContext = getCtx();
-      analyser = audioContext.createAnalyser();
-      microphone = audioContext.createMediaStreamSource(stream);
-      
-      analyser.fftSize = 2048;
-      analyser.smoothingTimeConstant = 0.3;
-      microphone.connect(analyser);
-      
-      if (!pitchDetector) {
-        pitchDetector = new YINPitchDetector(audioContext.sampleRate, analyser.fftSize);
-      }
+      // Hardened mic pipeline for Recall
+      const ctx = (window.audioCtx ||= new (window.AudioContext||window.webkitAudioContext)());
+      await ctx.resume(); // must be after a user gesture
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+          channelCount: 1
+        }
+      });
+      const source = ctx.createMediaStreamSource(stream);
+
+      // Use ScriptProcessor or AudioWorklet. ScriptProcessor is OK here:
+      const N = 2048;
+      const proc = ctx.createScriptProcessor(N, 1, 1);
+      source.connect(proc);
+      const sink = ctx.createGain(); sink.gain.value = 0; proc.connect(sink); sink.connect(ctx.destination);
+
+      // Create detector once per session
+      state.recall = state.recall || {};
+      state.recall.detector = window.detectors.createPitchDetector({ method:'yin', sampleRate: ctx.sampleRate });
+
+      // Capture frames during a 2s take
+      let frames = [];
+      proc.onaudioprocess = (e) => {
+        if (!recording) return;
+        const ch0 = e.inputBuffer.getChannelData(0);
+        // copy to avoid ring buffer reuse
+        frames.push(new Float32Array(ch0));
+      };
       
       const recordingStart = Date.now();
       
       const detectPitch = () => {
         if (!recording) return;
         
-        const bufferLength = analyser.fftSize;
-        const dataArray = new Float32Array(bufferLength);
-        analyser.getFloatTimeDomainData(dataArray);
-        
-        const frequency = pitchDetector.getPitch(dataArray);
         const elapsed = Date.now() - recordingStart;
         
-        if (frequency > 0 && frequency > 80 && frequency < 800) {
-          frequencies.push(frequency);
+        if (frames.length > 0) {
+          const latestFrame = frames[frames.length - 1];
+          const hz = state?.recall?.detector?.getPitch(latestFrame) || null;
+          
+          if (hz && hz > 80 && hz < 800) {
+            frequencies.push(hz);
+          }
         }
         
         if (elapsed < 2000) { // Record for 2 seconds
