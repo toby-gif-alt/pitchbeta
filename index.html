@@ -173,7 +173,7 @@
   <div class="card screen" id="menuScreen">
     <h1 id="greeting">Absolute Pitch Trainer</h1>
     <div class="row">
-      <span class="pill" id="capInfo">Left: 30:00</span>
+      <span class="pill" id="capInfo">Training not started yet</span>
       <span class="pill" id="weekPill">This week: 0 hrs 0 mins</span>
       <span class="pill" id="lockoutPill" style="display:none">🔒 Locked</span>
     </div>
@@ -1963,18 +1963,22 @@ function updateMenuSessionDisplay() {
   if (!capInfo) return;
   
   if (isDailyLocked()) {
-    capInfo.textContent = '🎉 Daily goal achieved!';
+    capInfo.textContent = 'Training finished for today';
     capInfo.style.background = 'var(--good)';
   } else {
-    // Include current session elapsed time like updateMenuTimer() does
-    const minutesCompleted = state.daily.minutesCompleted || 0;
-    const currentElapsedMs = (state.session && state.session.startedAt) ? state.session.elapsedMs : 0;
-    const currentMinutes = Math.floor(currentElapsedMs / 60000);
-    const totalMinutes = minutesCompleted + currentMinutes;
-    const remaining = Math.max(0, 30 - totalMinutes);
+    // Check if training has started today
+    const hasStartedToday = state.session && state.session.startedAt && 
+                           state.daily && state.daily.date === getTodayDateString();
     
-    capInfo.textContent = `Left: ${remaining}:00 of 30:00`;
-    capInfo.style.background = '';
+    if (!hasStartedToday) {
+      capInfo.textContent = 'Training not started yet';
+      capInfo.style.background = '';
+    } else {
+      // Show completed blocks instead of time countdown
+      const blocksCompleted = state.timeblock?.breaksCompletedToday || 0;
+      capInfo.textContent = `Training blocks: ${blocksCompleted}/5 completed`;
+      capInfo.style.background = '';
+    }
   }
 }
 
@@ -2530,12 +2534,12 @@ function updateCapsUI(){
   // Update daily session UI (new system)
   updateSessionUI();
   
-  // Legacy system (keep for compatibility)
-  const left = Math.max(0, SESS_DAILY_MS - msUsedQuota());
+  // Legacy system (disabled - now using block-based system)
+  // const left = Math.max(0, SESS_DAILY_MS - msUsedQuota());
   // Don't override capInfo if daily session system is active
-  if (!state.session || !state.session.startedAt) {
-    text('capInfo', `Left: ${fmtMMSS(left)}`);
-  }
+  // if (!state.session || !state.session.startedAt) {
+  //   text('capInfo', `Left: ${fmtMMSS(left)}`);
+  // }
   
   const usedW = state.thisWeekMs || 0;
   const wp = byId('weekPill');
@@ -6444,11 +6448,12 @@ function startTrainingAfterColdRecall(){
     }
     
     if(sessionActive && !paused){
-      // Update total time display  
-      const left = Math.max(0, SESS_DAILY_MS - msUsedQuota());
-      text('timerInfo', `Left: ${fmtMMSS(left)}`);
+      // Update block progress display instead of 30-minute countdown
+      updateTrainerTimer();  // This now shows "Block X/5" instead of time remaining
       
-      if(left<=0){
+      // Check if all 5 blocks are complete
+      const blocksCompleted = state.timeblock?.breaksCompletedToday || 0;
+      if(blocksCompleted >= 5){
         endSessionWithWarmRecall();
       }
     }
