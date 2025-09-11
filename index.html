@@ -7032,12 +7032,16 @@ function wireOnce(){
     const newMode = byId('varietyModeSelect')?.value || 'single';
     
     // Check if user is enabling variety mode before Week 3
-    const showTip = newMode === 'variety' && state.timbre?.recommendFromDate;
-    if (showTip) {
-      const today = new Date(getTodayDateString());
-      const recommendDate = new Date(state.timbre.recommendFromDate);
-      if (today < recommendDate) {
-        alert('Tip: We recommend turning this on after ~2 weeks of training for best early stability. You can still keep it on now.');
+    if (newMode === 'variety') {
+      // Initialize timbre system if not done yet
+      initTimbreVarietySystem();
+      
+      if (state.timbre?.recommendFromDate) {
+        const today = new Date(getTodayDateString());
+        const recommendDate = new Date(state.timbre.recommendFromDate);
+        if (today < recommendDate) {
+          alert('Tip: We recommend turning this on after ~2 weeks of training for best early stability. You can still keep it on now.');
+        }
       }
     }
     
