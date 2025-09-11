@@ -196,11 +196,15 @@
       </div>
     </div>
     
-    <!-- Variety Mode Status -->
+    <!-- Variety Mode Toggle -->
     <div class="row" style="margin-top:8px;gap:12px">
       <div class="scopeWrap">
-        <span style="opacity:.9">Variety Mode (Week 3+):</span>
-        <span id="varietyModeStatus" class="scopeSelect" style="padding:8px 12px;background:var(--muted2);border:1px solid var(--muted);cursor:default">Off (Week 1-2)</span>
+        <span style="opacity:.9">Variety Mode (80/20 timbre mix):</span>
+        <select id="varietyModeSelect" class="scopeSelect">
+          <option value="single">Off (Single Timbre)</option>
+          <option value="variety">On (80/20 Mix)</option>
+        </select>
+        <button id="applyVarietyModeBtn" class="scopeBtn">Change</button>
         <button id="varietyModeHelp" class="scopeBtn" style="background:var(--muted);font-size:12px;padding:6px 8px">?</button>
       </div>
     </div>
@@ -318,7 +322,7 @@
     </div>
 
     <div id="barStatus">
-      <span class="pill" id="promptPill">Press Play to start</span>
+      <span class="pill" id="blockHUD">0/20</span>
       <span class="pill" id="setInfo">Set 1 / 12</span>
       <span class="pill" id="blockInfo">Block 1 / 24</span>
       <span class="pill" id="accInfo">Acc 0% (req 20%)</span>
@@ -986,14 +990,12 @@ try{
       completedAt: null           // timestamp when 30 min reached, null if not complete
     },
     timbre: {
-      chosen: AUDIO_TYPES.PIANO,  // user selection from main menu
-      enabled: true,              // always true; variety is gated by week
-      mode: 'single',             // 'single' | 'variety', computed from gating
-      varietyStartDate: null,     // date of first training day + 14 days (YYYY-MM-DD)
-      today: getTodayDateString(), // current date (YYYY-MM-DD)
-      rotationIndex: 0,           // cycles alternates daily when in variety
-      currentProportions: { chosen: 1.0, alt: 0.0 }, // becomes {0.8, 0.2} in variety
-      altPool: [AUDIO_TYPES.SINE, AUDIO_TYPES.GUITAR], // excludes chosen; rotate daily
+      chosen: AUDIO_TYPES.PIANO,  // 'piano' | 'guitar' | 'sine' - from main menu
+      mode: 'single',             // 'single' | 'variety' - user-controlled; default 'single' on fresh install
+      recommendFromDate: null,    // set on first training day = date + 14 days (YYYY-MM-DD)
+      currentProportions: { chosen: 1.0, alt: 0.0 }, // single: {1,0}; variety: {0.8,0.2}
+      altPool: [AUDIO_TYPES.SINE, AUDIO_TYPES.GUITAR], // excludes chosen
+      rotationIndex: 0,           // advances daily; altOfDay = altPool[rotationIndex % altPool.length]
       perPcStats: {},             // [pc]: { [timbre]: { last40:[], acc:0..1, medianCents, sdCents } }
       rescue: {},                 // [pc]: { [timbre]: { active:boolean, untilBlock:number } }
       history: []                 // log decisions & rescues
@@ -1253,17 +1255,36 @@ if (!state.daily) {
 if (!state.timbre) {
   state.timbre = {
     chosen: state.audioType || AUDIO_TYPES.PIANO, // migrate existing audioType
-    enabled: true,
     mode: 'single',
-    varietyStartDate: null,
-    today: getTodayDateString(),
-    rotationIndex: 0,
+    recommendFromDate: null,    // set on first training day = date + 14 days
     currentProportions: { chosen: 1.0, alt: 0.0 },
     altPool: [AUDIO_TYPES.SINE, AUDIO_TYPES.GUITAR].filter(t => t !== (state.audioType || AUDIO_TYPES.PIANO)),
+    rotationIndex: 0,
     perPcStats: {},
     rescue: {},
     history: []
   };
+  save();
+}
+
+// Migrate old structure to new structure
+if (state.timbre && !state.timbre.hasOwnProperty('recommendFromDate')) {
+  // Update existing timbre state to match new requirements
+  const oldVarietyStartDate = state.timbre.varietyStartDate;
+  state.timbre.recommendFromDate = oldVarietyStartDate; // migrate old field
+  
+  // Remove old fields
+  delete state.timbre.enabled;
+  delete state.timbre.varietyStartDate; 
+  delete state.timbre.today;
+  
+  // Ensure current proportions are correct
+  if (state.timbre.mode === 'variety') {
+    state.timbre.currentProportions = { chosen: 0.8, alt: 0.2 };
+  } else {
+    state.timbre.currentProportions = { chosen: 1.0, alt: 0.0 };
+  }
+  
   save();
 }
 
@@ -1314,43 +1335,40 @@ function weekStartTs(){ if(!state.startDate) return todayKey(Date.now()); const 
 function initTimbreVarietySystem() {
   if (!state.startDate) return; // No training started yet
   
-  // Set variety start date if not already set (first training day + 14 days)
-  if (!state.timbre.varietyStartDate) {
+  // Set recommend date if not already set (first training day + 14 days)
+  if (!state.timbre.recommendFromDate) {
     const startDate = new Date(state.startDate);
     startDate.setDate(startDate.getDate() + 14);
-    state.timbre.varietyStartDate = startDate.toISOString().split('T')[0]; // YYYY-MM-DD format
+    state.timbre.recommendFromDate = startDate.toISOString().split('T')[0]; // YYYY-MM-DD format
     save();
   }
   
-  // Update mode based on current date
+  // Update rotation index based on days since recommend date
+  updateTimbreRotation();
+  
+  // Update mode based on user setting and current proportions
   updateTimbreMode();
   
   // Update alt pool when chosen timbre changes
   updateAltPool();
 }
 
-function updateTimbreMode() {
-  if (!state.timbre.varietyStartDate && !state.timbre.forceVariety) {
-    state.timbre.mode = 'single';
-    state.timbre.currentProportions = { chosen: 1.0, alt: 0.0 };
-    return;
-  }
-  
-  // Check dev override first
-  if (state.timbre.forceVariety) {
-    state.timbre.mode = 'variety';
-    state.timbre.currentProportions = { chosen: 0.8, alt: 0.2 };
-    return;
-  }
+function updateTimbreRotation() {
+  if (!state.timbre.recommendFromDate) return;
   
   const today = new Date(getTodayDateString());
-  const varietyStart = new Date(state.timbre.varietyStartDate);
+  const recommendDate = new Date(state.timbre.recommendFromDate);
+  const daysDiff = Math.max(0, Math.floor((today - recommendDate) / (24 * 60 * 60 * 1000)));
   
-  if (today >= varietyStart) {
-    state.timbre.mode = 'variety';
+  // Update rotation index based on day difference
+  state.timbre.rotationIndex = daysDiff;
+}
+
+function updateTimbreMode() {
+  // Set proportions based on current mode (user-controlled)
+  if (state.timbre.mode === 'variety') {
     state.timbre.currentProportions = { chosen: 0.8, alt: 0.2 };
   } else {
-    state.timbre.mode = 'single';
     state.timbre.currentProportions = { chosen: 1.0, alt: 0.0 };
   }
 }
@@ -1358,39 +1376,37 @@ function updateTimbreMode() {
 function updateAltPool() {
   const allTypes = [AUDIO_TYPES.PIANO, AUDIO_TYPES.SINE, AUDIO_TYPES.GUITAR];
   state.timbre.altPool = allTypes.filter(t => t !== state.timbre.chosen);
-  // Reset rotation index when pool changes
-  state.timbre.rotationIndex = 0;
+  
+  // If empty pool, rebuild from all types excluding chosen
+  if (state.timbre.altPool.length === 0) {
+    state.timbre.altPool = ['sine', 'piano', 'guitar'].filter(t => t !== state.timbre.chosen);
+  }
 }
 
 function selectTimbreForTrial(pc) {
   // Initialize if needed
   initTimbreVarietySystem();
   
-  // Always use chosen timbre in single mode
+  const chosen = state.timbre.chosen;
+  
+  // Calculate altOfDay using rotation index
+  const altOfDay = state.timbre.altPool.length > 0 ? 
+    state.timbre.altPool[state.timbre.rotationIndex % state.timbre.altPool.length] : 
+    chosen; // fallback if no alt pool
+  
+  // If mode === 'single' → return chosen
   if (state.timbre.mode === 'single') {
-    return state.timbre.chosen;
+    return chosen;
   }
   
-  // Check for active rescue for this pc
-  const rescue = state.timbre.rescue[pc];
-  if (rescue) {
-    for (const timbre in rescue) {
-      if (rescue[timbre].active && rescue[timbre].untilBlock >= (state.currentBlock || 1)) {
-        // Rescue active: use 50% chosen, 50% weak timbre
-        const useWeakTimbre = Math.random() < 0.5;
-        return useWeakTimbre ? timbre : state.timbre.chosen;
-      }
-    }
+  // If mode === 'variety' → sample from { chosen:0.8, alt:0.2 }
+  if (state.timbre.mode === 'variety') {
+    const useAlt = Math.random() < state.timbre.currentProportions.alt;
+    return useAlt ? altOfDay : chosen;
   }
   
-  // Normal variety mode: 80% chosen, 20% alternate
-  const useAlt = Math.random() < state.timbre.currentProportions.alt;
-  if (useAlt && state.timbre.altPool.length > 0) {
-    const altIndex = state.timbre.rotationIndex % state.timbre.altPool.length;
-    return state.timbre.altPool[altIndex];
-  }
-  
-  return state.timbre.chosen;
+  // Fallback to chosen
+  return chosen;
 }
 
 function updateTimbreStats(pc, timbre, correct, detuneCents) {
@@ -1500,44 +1516,18 @@ function logTimbreBlockEnd() {
 }
 
 function updateVarietyModeUI() {
-  const statusEl = byId('varietyModeStatus');
+  const selectEl = byId('varietyModeSelect');
   const devRowEl = byId('devVarietyRow');
   
-  if (!statusEl) return;
-  
-  initTimbreVarietySystem(); // Ensure system is initialized
-  
-  if (state.timbre.mode === 'variety') {
-    if (state.timbre.forceVariety) {
-      statusEl.textContent = 'On (Dev Override)';
-      statusEl.style.background = 'var(--accent)';
-      statusEl.style.color = 'var(--bg)';
-    } else {
-      statusEl.textContent = 'On (80/20)';
-      statusEl.style.background = 'var(--good)';
-      statusEl.style.color = 'var(--text)';
-    }
-  } else {
-    if (state.timbre.varietyStartDate) {
-      const today = new Date(getTodayDateString());
-      const varietyStart = new Date(state.timbre.varietyStartDate);
-      const daysLeft = Math.ceil((varietyStart - today) / (24 * 60 * 60 * 1000));
-      
-      if (daysLeft > 0) {
-        statusEl.textContent = `Off (${daysLeft} days left)`;
-      } else {
-        statusEl.textContent = 'Off (Week 1-2)';
-      }
-    } else {
-      statusEl.textContent = 'Off (Week 1-2)';
-    }
-    statusEl.style.background = 'var(--muted2)';
-    statusEl.style.color = 'var(--text)';
+  if (selectEl) {
+    selectEl.value = state.timbre?.mode || 'single';
   }
   
   // Show dev row if needed (for testing)
-  if (devRowEl && state.timbre.forceVariety) {
+  if (devRowEl && state.timbre?.forceVariety) {
     devRowEl.style.display = 'flex';
+  } else if (devRowEl) {
+    devRowEl.style.display = 'none';
   }
 }
 
@@ -2746,7 +2736,15 @@ async function playSample(note, detuneCents = 0, timbreOverride = null){
         const t = ctx.currentTime;
         src.start(t); src.stop(t + TONE_MS/1000 / pitchRatio);
         return;
-      }catch(_e){}
+      }catch(e){
+        // Log missing file warning once per file
+        const logKey = `missing_${timbre}_${note}`;
+        if (!window.missingFileWarnings) window.missingFileWarnings = new Set();
+        if (!window.missingFileWarnings.has(logKey)) {
+          console.warn(`Missing ${timbre} file for ${note}, falling back to sine`);
+          window.missingFileWarnings.add(logKey);
+        }
+      }
     } else if (timbre === AUDIO_TYPES.SINE) {
       // Skip to sine wave generation
     } else {
@@ -2769,7 +2767,15 @@ async function playSample(note, detuneCents = 0, timbreOverride = null){
         const t = ctx.currentTime;
         src.start(t); src.stop(t + TONE_MS/1000);
         return;
-      }catch(_e){}
+      }catch(e){
+        // Log missing file warning once per file
+        const logKey = `missing_${timbre}_${note}`;
+        if (!window.missingFileWarnings) window.missingFileWarnings = new Set();
+        if (!window.missingFileWarnings.has(logKey)) {
+          console.warn(`Missing ${timbre} file for ${note}, falling back to sine`);
+          window.missingFileWarnings.add(logKey);
+        }
+      }
     }
     
     // Fallback to sine wave
@@ -5775,12 +5781,8 @@ async function nextTrial(forceNew=false){
     firstRtBonusMs = 0;
     rtTimer = setTimeout(()=>handleTimeout(), rtms);
     
-    // Update prompt pill with jitter level indicator (debug only)
-    let promptText = 'Listening… choose the pitch';
-    if (!isOOBTrial && currentJlLevel !== null) {
-      promptText += ` JL${currentJlLevel}`;
-    }
-    text('promptPill', promptText);
+    // Trial is now open, block HUD shows current progress
+    updateBlockHUD();
   }catch(e){ report(e); }
   finally{ inFlightTrial=false; }
 }
@@ -5999,7 +6001,7 @@ function restartCurrentSet(){
   state.shepardDoneFor = -1; state.testFailStreak = 0;
   state.suggestShownSet = null; save();
   updateLevelUI(); paintNotes();
-  text('promptPill', `Restarted Set ${set}. Press Play to begin.`);
+  updateBlockHUD(); // Show current block progress
   hideSuggestBanner();
 }
 function maybeSuggestRestart(){
@@ -6161,7 +6163,7 @@ function startTrainingAfterColdRecall(){
   
   state.lastSeen = Date.now(); save();
   updateCapsUI(); updateLevelUI(); paintNotes();
-  text('promptPill','Press Play to start');
+  updateBlockHUD(); // Show current block progress instead of "Press Play"
   stopAllTimers();
   tickId=setInterval(()=>{
     ensureWeekRoll();
@@ -6489,11 +6491,66 @@ function onTrialGraded() {
   
   // If we've completed 20 trials, reset counter and increment block
   if (state.counters.trialInBlock >= 20) {
+    // Log block completion for QA tracking
+    logTimbreBlockData();
+    
     state.counters.trialInBlock = 0;
     state.counters.blockIndex++;
   }
   
   save();
+  
+  // Update the block HUD display
+  updateBlockHUD();
+}
+
+// Update Block HUD display
+function updateBlockHUD() {
+  state.counters = state.counters || { trialInBlock: 0, blockIndex: 0 };
+  const current = state.counters.trialInBlock;
+  const hudText = `${current}/20`;
+  
+  const hudEl = byId('blockHUD');
+  if (hudEl) {
+    hudEl.textContent = hudText;
+    
+    // Gray out during breaks
+    if (state.inBreak || paused) {
+      hudEl.style.opacity = '0.5';
+    } else {
+      hudEl.style.opacity = '1.0';
+    }
+  }
+}
+
+// Log timbre block data for QA tracking
+function logTimbreBlockData() {
+  window.qa = window.qa || {};
+  qa.timbreSeries = qa.timbreSeries || [];
+  
+  // Count timbre usage in recent trials
+  const recentTrials = (state.trials || []).slice(-20); // Last 20 trials
+  const chosenCount = recentTrials.filter(t => t.timbreUsed === state.timbre?.chosen).length;
+  const altCount = recentTrials.length - chosenCount;
+  
+  const altOfDay = state.timbre?.altPool?.length > 0 ? 
+    state.timbre.altPool[state.timbre.rotationIndex % state.timbre.altPool.length] : 
+    null;
+  
+  qa.timbreSeries.push({
+    blockIndex: state.counters?.blockIndex || 0,
+    mode: state.timbre?.mode || 'single',
+    chosen: state.timbre?.chosen || 'piano',
+    altOfDay: altOfDay,
+    proportions: { 
+      chosen: state.timbre?.currentProportions?.chosen || 1.0, 
+      alt: state.timbre?.currentProportions?.alt || 0.0 
+    },
+    counts: { 
+      chosenTrials: chosenCount, 
+      altTrials: altCount 
+    }
+  });
 }
 
 // 5) Get current pitch class for trial using scheduler
@@ -6965,6 +7022,37 @@ function wireOnce(){
     };
     alert(`Audio changed to ${labels[newType] || 'Piano'}`);
     updateVarietyModeUI(); // Update variety mode status
+  });
+
+  // Variety Mode Toggle
+  safe('varietyModeSelect', el=> {
+    el.value = state.timbre?.mode || 'single';
+  });
+  safe('applyVarietyModeBtn', el=> el.onclick=()=>{
+    const newMode = byId('varietyModeSelect')?.value || 'single';
+    
+    // Check if user is enabling variety mode before Week 3
+    if (newMode === 'variety') {
+      // Initialize timbre system if not done yet
+      initTimbreVarietySystem();
+      
+      if (state.timbre?.recommendFromDate) {
+        const today = new Date(getTodayDateString());
+        const recommendDate = new Date(state.timbre.recommendFromDate);
+        if (today < recommendDate) {
+          alert('Tip: We recommend turning this on after ~2 weeks of training for best early stability. You can still keep it on now.');
+        }
+      }
+    }
+    
+    if (state.timbre) {
+      state.timbre.mode = newMode;
+      updateTimbreMode(); // Update proportions
+    }
+    
+    save();
+    alert(`Variety Mode ${newMode === 'variety' ? 'enabled' : 'disabled'}`);
+    updateVarietyModeUI(); // Update UI
   });
 
   // Variety Mode Help
