@@ -3481,50 +3481,75 @@ function renderRecallCapturePhase() {
   
   if (!notesContainer || !completeButton) return;
   
-  // Clear container
-  notesContainer.innerHTML = '';
+  // Clear container only if needed (prevents unnecessary flashing)
+  if (notesContainer.children.length !== currentRecallSession.prompts.length) {
+    notesContainer.innerHTML = '';
+  }
+  
   completeButton.style.display = 'none';
   
   // Create capture UI for each prompt
   currentRecallSession.prompts.forEach((prompt, index) => {
     const isActive = index === currentRecallSession.currentIndex;
     const isCompleted = index < currentRecallSession.currentIndex;
+    const isFuture = index > currentRecallSession.currentIndex;
     
-    const noteDiv = document.createElement('div');
-    noteDiv.style.cssText = `
-      margin: 12px 0;
-      padding: 16px;
-      border: 2px solid var(--muted);
-      border-radius: 12px;
-      text-align: center;
-      background: var(--card);
-      ${isCompleted ? 'border-color: var(--good); opacity: 0.8;' : ''}
-      ${isActive ? 'border-color: var(--accent); background: var(--accent); color: var(--bg);' : ''}
-    `;
+    // Find existing div or create new one
+    let noteDiv = notesContainer.children[index];
+    if (!noteDiv) {
+      noteDiv = document.createElement('div');
+      noteDiv.style.cssText = `
+        margin: 12px 0;
+        padding: 16px;
+        border: 2px solid var(--muted);
+        border-radius: 12px;
+        text-align: center;
+        background: var(--card);
+        transition: all 0.3s ease;
+      `;
+      notesContainer.appendChild(noteDiv);
+    }
+    
+    // Update styling based on state
+    if (isCompleted) {
+      noteDiv.style.borderColor = 'var(--good)';
+      noteDiv.style.opacity = '0.8';
+      noteDiv.style.background = 'var(--card)';
+      noteDiv.style.color = 'var(--text)';
+    } else if (isActive) {
+      noteDiv.style.borderColor = 'var(--accent)';
+      noteDiv.style.background = 'var(--accent)';
+      noteDiv.style.color = 'var(--bg)';
+      noteDiv.style.opacity = '1';
+    } else {
+      noteDiv.style.borderColor = 'var(--muted)';
+      noteDiv.style.background = 'var(--card)';
+      noteDiv.style.color = 'var(--text)';
+      noteDiv.style.opacity = '0.6';
+    }
+    
+    // Clear and populate content
+    noteDiv.innerHTML = '';
     
     const titleEl = document.createElement('h3');
     titleEl.style.margin = '0 0 12px 0';
     titleEl.textContent = `Hum ${pcLabel(prompt.pc)}`;
+    noteDiv.appendChild(titleEl);
     
     if (isCompleted) {
       const checkEl = document.createElement('div');
       checkEl.textContent = '✓ Recorded';
       checkEl.style.cssText = 'font-weight: 600; color: var(--good);';
-      noteDiv.appendChild(titleEl);
       noteDiv.appendChild(checkEl);
     } else if (isActive) {
       const humButton = createSequentialHumButton(prompt.pc, index);
-      noteDiv.appendChild(titleEl);
       noteDiv.appendChild(humButton);
     } else {
       const waitEl = document.createElement('div');
       waitEl.textContent = 'Wait...';
       waitEl.style.cssText = 'opacity: 0.6; font-style: italic;';
-      noteDiv.appendChild(titleEl);
       noteDiv.appendChild(waitEl);
     }
-    
-    notesContainer.appendChild(noteDiv);
   });
   
   // Show review button if all captures complete
@@ -3669,6 +3694,11 @@ function createSequentialHumButton(targetPc, index) {
     
     recording = false;
     
+    // Show "Processing..." feedback immediately
+    button.textContent = 'Processing...';
+    button.style.background = 'var(--muted)';
+    button.disabled = true;
+    
     // Stop capture per prompt: stop
     state.recall.capturing = false; 
     const frames = (state.recall && state.recall.frames) ? state.recall.frames.slice() : [];
@@ -3693,18 +3723,40 @@ function createSequentialHumButton(targetPc, index) {
       timestamp: Date.now()
     });
     
-    // Move to next prompt
-    currentRecallSession.currentIndex++;
+    // Show completion feedback for a moment before transitioning
+    button.textContent = '✓ Recorded';
+    button.style.background = 'var(--good)';
     
-    // Re-render UI
-    renderRecallCapturePhase();
+    // Smooth transition to next prompt after brief delay
+    setTimeout(() => {
+      // Move to next prompt
+      currentRecallSession.currentIndex++;
+      
+      // Re-render UI
+      renderRecallCapturePhase();
+    }, 800); // 800ms delay to show completion feedback
   };
   
-  button.onmousedown = startRecording;
-  button.onmouseup = stopRecording;
-  button.onmouseleave = stopRecording;
-  button.ontouchstart = (e) => { e.preventDefault(); startRecording(); };
-  button.ontouchend = (e) => { e.preventDefault(); stopRecording(); };
+  button.onmousedown = (e) => {
+    e.preventDefault();
+    if (!button.disabled) startRecording();
+  };
+  button.onmouseup = (e) => {
+    e.preventDefault();
+    if (recording) stopRecording();
+  };
+  button.onmouseleave = (e) => {
+    e.preventDefault();
+    if (recording) stopRecording();
+  };
+  button.ontouchstart = (e) => { 
+    e.preventDefault(); 
+    if (!button.disabled) startRecording(); 
+  };
+  button.ontouchend = (e) => { 
+    e.preventDefault(); 
+    if (recording) stopRecording(); 
+  };
   
   return button;
 }
