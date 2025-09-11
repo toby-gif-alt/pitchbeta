@@ -2427,9 +2427,6 @@ function updateTimeBlockBreakUI() {
     }
   }
 }
-    }
-  }
-}
 
 // C) Header display (do not reset on menu)
 function renderTrainerHeaderTimeBlock() {
@@ -3206,20 +3203,11 @@ function getTrainedPCs() {
   return trainedSet(setSize);
 }
 
-// Randomly select 2-3 notes from trained set (no repeats)
+// Select notes for recall - use all 12 pitches for comprehensive testing
 function selectRecallNotes() {
-  const trained = getTrainedPCs();
-  const count = Math.min(3, Math.max(2, trained.length)); // 2-3 notes, but not more than available
-  
-  const selected = [];
-  const available = [...trained];
-  
-  for (let i = 0; i < count && available.length > 0; i++) {
-    const randomIndex = Math.floor(Math.random() * available.length);
-    selected.push(available.splice(randomIndex, 1)[0]);
-  }
-  
-  return selected;
+  // Return all 12 chromatic pitch classes for recall testing
+  // This matches the tutorial description: "sing the 12 pitches (C, C#, D, D#, E, F, F#, G, G#, A, A#, B)"
+  return ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B'];
 }
 
 // Analyze pitch recording and compute verdict
