@@ -989,7 +989,8 @@ try{
       perPcStats: {},             // [pc]: { [timbre]: { last40:[], acc:0..1, medianCents, sdCents } }
       rescue: {},                 // [pc]: { [timbre]: { active:boolean, untilBlock:number } }
       history: []                 // log decisions & rescues
-    }
+    },
+    warmRecallPending: false      // flag to show warm recall when returning to menu after 30min completion
   };
 } catch(e){
   state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, shepardDoneFor:-1, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO, currentBlock: 1, blockStartTime: null, inBreak: false, breakStartTime: null, totalBlocks: 25, timeblock: { activeMs: 0, running: false, startedAt: null, breaksCompletedToday: 0, breakActive: false, breakEndsAt: null }, oobController: { targetOobPct: 15, lastAdaptTimeBlock: 0, last60InBounds: [], recentOobTrials: [], healthCheckActive: false, healthCheckEndTimeBlock: 0, globalTimeBlockIndex: 0, oobSeries: [] }, inBoundsLast60: [], trainingBlockIndex: 1, trainingBlockTrials: 0, currentBlockOctaveCount: {3: 0, 4: 0, 5: 0}, oobHealthCheckActive: false, oobHealthCheckEndBlock: 0, oob: { targetPct: 0.15, streak: 0, blockTarget: 0, plan: [], planOctaveMix: [], currentBlockIndex: 0, currentTrialInBlock: 0 }, trialOpen: false, toneStartMs: null };
@@ -1275,6 +1276,12 @@ if (state.timbre && !state.timbre.hasOwnProperty('recommendFromDate')) {
     state.timbre.currentProportions = { chosen: 1.0, alt: 0.0 };
   }
   
+  save();
+}
+
+// Migration for warmRecallPending flag
+if (typeof state.warmRecallPending === 'undefined') {
+  state.warmRecallPending = false;
   save();
 }
 
@@ -1756,14 +1763,16 @@ function updateMenuTimer() {
     capInfo.textContent = '🎉 Daily goal achieved!';
     capInfo.style.background = 'var(--good)';
   } else {
-    // Menu timer must reflect remaining time = 30 - (minutesCompleted + elapsedMs/60000)
+    // Menu timer must use same calculation as trainer timer for consistency
     const minutesCompleted = state.daily.minutesCompleted || 0;
     const currentElapsedMs = (state.session && state.session.startedAt) ? state.session.elapsedMs : 0;
-    const currentMinutes = Math.floor(currentElapsedMs / 60000);
-    const totalMinutes = minutesCompleted + currentMinutes;
-    const remaining = Math.max(0, 30 - totalMinutes);
     
-    capInfo.textContent = `Left: ${remaining}:00 of 30:00`;
+    // Calculate total remaining time in milliseconds (same method as updateTrainerTimer)
+    const totalRemainingMs = Math.max(0, 30 * 60 * 1000 - (minutesCompleted * 60 * 1000 + currentElapsedMs));
+    const remainingMinutes = Math.floor(totalRemainingMs / 60000);
+    const remainingSeconds = Math.floor((totalRemainingMs % 60000) / 1000);
+    
+    capInfo.textContent = `Left: ${remainingMinutes}:${remainingSeconds.toString().padStart(2, '0')} of 30:00`;
     capInfo.style.background = '';
   }
 }
@@ -2267,6 +2276,27 @@ function endDayAndLockout() {
   endSession(true);
 }
 
+function completeDayWithoutLockout() {
+  // Mark daily session as complete without triggering lockout
+  // This allows user to return to menu and see completion status
+  if (!state.daily.completedAt) {
+    state.daily.completedAt = Date.now();
+  }
+  
+  // Reset TimeBlock system for next day  
+  state.timeblock = {
+    activeMs: 0,
+    running: false,
+    startedAt: null,
+    breaksCompletedToday: 0,
+    breakActive: false,
+    breakEndsAt: null
+  };
+  
+  save();
+  endSession(false); // false = don't show lockout alert
+}
+
 function openFlappyModalForTimeBlockBreak() {
   openFlappyModal();
   updateTimeBlockBreakUI();
@@ -2461,6 +2491,9 @@ function showScreen(id){
     pauseTimeBlockTimer();
     stopAllTimers(); sealDanglingSession(); updateCapsUI();
     try{ populatePitchSelect(); drawChart(); }catch(_){}
+    
+    // Check if warm recall should be shown automatically
+    checkAndShowWarmRecall();
   } else if(id !== 'trainerScreen'){
     if(sessionActive && !paused){ 
       pauseStart('nav-away'); 
@@ -3462,6 +3495,45 @@ function showColdRecall() {
   renderRecallCapturePhase();
 }
 
+// Check if warm recall should be shown automatically when returning to menu
+function checkAndShowWarmRecall() {
+  // Only show warm recall automatically in specific conditions:
+  // 1. After completing 30min training (warmRecallPending flag is set)
+  // 2. Or at start of session (if warm recall not done today and no active session)
+  
+  const todayKey = getTodayKey();
+  const todayRecall = state.recall[todayKey];
+  const warmRecallNotDone = !todayRecall || !todayRecall.warm || todayRecall.warm.length === 0;
+  
+  // Condition 1: After 30min completion (warmRecallPending flag)
+  if (state.warmRecallPending && warmRecallNotDone) {
+    state.warmRecallPending = false; // Clear the flag
+    save();
+    // Small delay to let menu render first
+    setTimeout(() => {
+      showWarmRecall();
+    }, 100);
+    return;
+  }
+  
+  // Condition 2: At start of session (if it's a new day and warm recall not done)
+  // Only trigger this if no daily session is active and it's been more than a few hours since last session
+  if (warmRecallNotDone && !state.session?.startedAt) {
+    const lastSessionEnd = state.sessions && state.sessions.length > 0 ? 
+      state.sessions[state.sessions.length - 1]?.end : null;
+    
+    // Only show at start of session if it's been at least 4 hours since last session
+    // This prevents showing every time user briefly returns to menu
+    if (!lastSessionEnd || (Date.now() - lastSessionEnd) > (4 * 60 * 60 * 1000)) {
+      // Small delay to let menu render first
+      setTimeout(() => {
+        showWarmRecall();
+      }, 100);
+      return;
+    }
+  }
+}
+
 // Show warm recall modal with sequential flow  
 function showWarmRecall() {
   initializeRecallSession('warm');
@@ -3980,8 +4052,9 @@ function finishRecallReview() {
     startTraining();
   } else {
     closeWarmRecall();  
-    // After warm recall, end day
-    endDayAndLockout();
+    // After warm recall, complete day without lockout and return to menu
+    completeDayWithoutLockout();
+    showScreen('menuScreen');
   }
   
   currentRecallSession = null;
@@ -6384,8 +6457,11 @@ function endSessionWithWarmRecall(){
   const todayRecall = state.recall[todayKey];
   
   if (!todayRecall || !todayRecall.warm || todayRecall.warm.length === 0) {
-    // Show warm recall modal before ending session
-    showWarmRecall();
+    // Mark that warm recall should be shown when user returns to menu
+    state.warmRecallPending = true;
+    // Complete day without lockout and return to menu
+    completeDayWithoutLockout();
+    showScreen('menuScreen');
     return;
   }
   
