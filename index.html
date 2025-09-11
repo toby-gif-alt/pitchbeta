@@ -3918,14 +3918,12 @@ function renderRecallReviewPhase() {
     </div>
   `;
   
-  // 4) Wire Next/Back buttons to increment/decrement reviewIndex and call updateRecallReviewUI
+  // 4) Wire Next/Back buttons to increment/decrement reviewIndex and call renderRecallReviewPhase to update the full UI
   safe('btnRecallPrev', el => el.onclick = () => {
     if (state.recall.reviewIndex > 0) {
       state.recall.reviewIndex--;
       currentRecallSession.reviewIndex = state.recall.reviewIndex; // Keep in sync
-      const item = reviewItems[state.recall.reviewIndex];
-      updateRecallReviewUI(item, state.recall.reviewIndex, reviewItems.length);
-      renderRecallReviewPhase(); // Re-render for complete update
+      renderRecallReviewPhase(); // Re-render to update UI and reattach event handlers
     }
   });
   
@@ -3933,9 +3931,7 @@ function renderRecallReviewPhase() {
     if (state.recall.reviewIndex < reviewItems.length - 1) {
       state.recall.reviewIndex++;
       currentRecallSession.reviewIndex = state.recall.reviewIndex; // Keep in sync
-      const item = reviewItems[state.recall.reviewIndex];
-      updateRecallReviewUI(item, state.recall.reviewIndex, reviewItems.length);
-      renderRecallReviewPhase(); // Re-render for complete update
+      renderRecallReviewPhase(); // Re-render to update UI and reattach event handlers
     } else {
       finishRecallReview();
     }
