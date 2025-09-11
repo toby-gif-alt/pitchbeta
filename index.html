@@ -133,7 +133,7 @@
         <div class="tPage" id="tPage5">
           <h3>🐤 Flappy breaks</h3>
           <ul>
-            <li>Reward mini-game; every flap plays a random pitch.</li>
+            <li>Break mini-game; each flap makes a flappy sound during breaks.</li>
             <li>Timer stays paused until you press <strong>Play</strong> again.</li>
           </ul>
         </div>
@@ -169,6 +169,7 @@
       <button id="menuStart">▶ Start Training</button>
       <button id="startAssessment">📊 Assessment Test</button>
       <button id="viewTracker">📊 Track</button>
+      <button id="startWarmRecall">🔥 Warm Recall</button>
       <button id="playFlappy">🐤 Flappy (lockout only)</button>
       <button id="resetLockout">⚡ Reset lockout/timer</button>
       <button id="menuReset">⟲ Reset (factory)</button>
@@ -404,7 +405,7 @@
         <button id="flappyClose">Close</button>
       </div>
       <p id="flappyScore">Score: 0 • Best: 0</p>
-      <p style="opacity:.8;font-size:12px">Tap/click (or Space) to flap. First tap starts — each flap plays a random pitch.</p>
+      <p style="opacity:.8;font-size:12px">Tap/click (or Space) to flap. First tap starts — each flap makes a flappy sound during breaks or plays a pitch during rewards.</p>
     </div>
   </div>
 
@@ -2258,8 +2259,13 @@ function endTimeBlockBreak() {
 }
 
 function endDayAndLockout() {
-  const now = Date.now();
-  state.lockoutUntil = now + 60 * 60 * 1000; // 1 hour lockout
+  // Set lockout until next calendar day (midnight)
+  const now = new Date();
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  tomorrow.setHours(0, 0, 0, 0); // Set to midnight
+  
+  state.lockoutUntil = tomorrow.getTime();
   state.capResetAt = state.lockoutUntil;
   
   // Reset TimeBlock system for next day
@@ -2542,6 +2548,24 @@ function updateCapsUI(){
   }
   
   const pf = byId('playFlappy'); if(pf) pf.disabled = !(locked || isDailyLocked());
+  
+  // Update warm recall button state
+  const wr = byId('startWarmRecall'); 
+  if(wr) {
+    const hasCompleted30Min = state.daily && state.daily.completedAt;
+    const todayKey = getTodayDateString();
+    const hasWarmRecallToday = state.recall && state.recall[todayKey] && state.recall[todayKey].warm && state.recall[todayKey].warm.length > 0;
+    
+    wr.disabled = !hasCompleted30Min || hasWarmRecallToday;
+    
+    if (!hasCompleted30Min) {
+      wr.title = 'Complete a 30-minute training session first';
+    } else if (hasWarmRecallToday) {
+      wr.title = 'Already completed warm recall for today';
+    } else {
+      wr.title = 'Test your pitch recognition after training';
+    }
+  }
   
   // Update recall display when in menu screen
   try { updateRecallDisplay(); } catch(_) {}
@@ -3529,6 +3553,25 @@ function showWarmRecall() {
   const modal = byId('warmRecallModal');
   modal.style.display = 'flex';
   renderRecallCapturePhase();
+}
+
+// Start warm recall from menu button - check if allowed
+function startWarmRecallFromMenu() {
+  // Check if user has completed 30 minutes today
+  if (!state.daily || !state.daily.completedAt) {
+    alert('Warm recall is only available after completing a 30-minute training session.');
+    return;
+  }
+  
+  // Check if warm recall has already been done today
+  const todayKey = getTodayDateString();
+  if (state.recall && state.recall[todayKey] && state.recall[todayKey].warm && state.recall[todayKey].warm.length > 0) {
+    alert('You have already completed warm recall for today.');
+    return;
+  }
+  
+  // All checks passed, show warm recall
+  showWarmRecall();
 }
 
 // Render the capture phase UI
@@ -7191,6 +7234,7 @@ function wireOnce(){
   safe('menuStart',   el=> el.onclick=()=> startSession());
   safe('startAssessment', el=> el.onclick=()=> startAssessment());
   safe('viewTracker', el=> el.onclick=()=> showTracker());
+  safe('startWarmRecall', el=> el.onclick=()=> startWarmRecallFromMenu());
   safe('playFlappy',  el=> el.onclick=()=> openFlappyFromMenu());
   safe('resetLockout',el=> el.onclick=()=>{
     if(!confirm('Reset lockout/timer now? This starts a fresh 30-minute window immediately.')) return;
