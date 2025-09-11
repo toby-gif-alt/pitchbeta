@@ -3907,13 +3907,15 @@ function renderRecallReviewPhase() {
           ${reviewContent}
         </div>
       </div>
-      <div style="display:flex;justify-content:space-between;gap:12px">
+      <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap">
         <button id="btnRecallPrev" style="background:var(--muted)" 
           ${reviewIndex === 0 ? 'disabled' : ''}>◀ Back</button>
         <div style="flex:1"></div>
-        <button id="btnRecallNext" style="background:var(--good)">
-          ${reviewIndex < reviewItems.length - 1 ? 'Next ▶' : 'Done'}
-        </button>
+        ${reviewIndex < reviewItems.length - 1 ? 
+          `<button id="btnRecallNext" style="background:var(--good)">Next ▶</button>` :
+          `<button id="btnRecallNext" style="background:var(--good)">Done</button>
+           <button id="btnReturnToMenu" style="background:var(--muted);margin-left:8px">Return to Menu</button>`
+        }
       </div>
     </div>
   `;
@@ -3939,6 +3941,11 @@ function renderRecallReviewPhase() {
     } else {
       finishRecallReview();
     }
+  });
+  
+  // Add handler for Return to Menu button (only appears on last page)
+  safe('btnReturnToMenu', el => el.onclick = () => {
+    finishRecallReview();
   });
 }
 
