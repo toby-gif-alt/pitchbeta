@@ -3497,15 +3497,14 @@ function showColdRecall() {
 
 // Check if warm recall should be shown automatically when returning to menu
 function checkAndShowWarmRecall() {
-  // Only show warm recall automatically in specific conditions:
-  // 1. After completing 30min training (warmRecallPending flag is set)
-  // 2. Or at start of session (if warm recall not done today and no active session)
+  // Only show warm recall automatically after completing a 30min training session
+  // (when warmRecallPending flag is set)
   
   const todayKey = getTodayKey();
   const todayRecall = state.recall[todayKey];
   const warmRecallNotDone = !todayRecall || !todayRecall.warm || todayRecall.warm.length === 0;
   
-  // Condition 1: After 30min completion (warmRecallPending flag)
+  // Only condition: After 30min completion (warmRecallPending flag)
   if (state.warmRecallPending && warmRecallNotDone) {
     state.warmRecallPending = false; // Clear the flag
     save();
@@ -3516,22 +3515,8 @@ function checkAndShowWarmRecall() {
     return;
   }
   
-  // Condition 2: At start of session (if it's a new day and warm recall not done)
-  // Only trigger this if no daily session is active and it's been more than a few hours since last session
-  if (warmRecallNotDone && !state.session?.startedAt) {
-    const lastSessionEnd = state.sessions && state.sessions.length > 0 ? 
-      state.sessions[state.sessions.length - 1]?.end : null;
-    
-    // Only show at start of session if it's been at least 4 hours since last session
-    // This prevents showing every time user briefly returns to menu
-    if (!lastSessionEnd || (Date.now() - lastSessionEnd) > (4 * 60 * 60 * 1000)) {
-      // Small delay to let menu render first
-      setTimeout(() => {
-        showWarmRecall();
-      }, 100);
-      return;
-    }
-  }
+  // Note: Removed automatic warm recall at session start to prevent
+  // unwanted triggers when accessing main menu without training
 }
 
 // Show warm recall modal with sequential flow  
