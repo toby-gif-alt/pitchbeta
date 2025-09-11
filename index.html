@@ -238,17 +238,7 @@
       </div>
     </div>
 
-    <!-- Flappy Settings -->
-    <div class="row" style="margin-top:8px;gap:12px">
-      <div class="scopeWrap">
-        <span style="opacity:.9">Flappy sound:</span>
-        <select id="flappySoundSelect" class="scopeSelect">
-          <option value="enabled">Enabled</option>
-          <option value="muted">Muted</option>
-        </select>
-        <button id="applyFlappySoundBtn" class="scopeBtn">Change</button>
-      </div>
-    </div>
+
 
     <!-- Recall History -->
     <div class="card" id="recallCard" style="margin-top:14px">
@@ -7175,11 +7165,18 @@ function wireOnce(){
       // Initialize timbre system if not done yet
       initTimbreVarietySystem();
       
-      if (state.timbre?.recommendFromDate) {
-        const today = new Date(getTodayDateString());
-        const recommendDate = new Date(state.timbre.recommendFromDate);
-        if (today < recommendDate) {
-          alert('Tip: We recommend turning this on after ~2 weeks of training for best early stability. You can still keep it on now.');
+      // Check if user is new (no start date) or before Week 3
+      const shouldShowWarning = !state.startDate || 
+        (state.timbre?.recommendFromDate && 
+         new Date(getTodayDateString()) < new Date(state.timbre.recommendFromDate));
+      
+      if (shouldShowWarning) {
+        alert('Variety Mode is suggested for Week 3 onwards. You are currently not at Week 3 yet, but you can still enable it if desired.');
+        // Ask user if they want to continue
+        if (!confirm('Do you want to enable Variety Mode now?')) {
+          // User chose not to enable it, revert the selection
+          byId('varietyModeSelect').value = 'single';
+          return;
         }
       }
     }
@@ -7231,16 +7228,7 @@ function wireOnce(){
     alert(`Theme changed to ${themeName}`);
   });
 
-  // Flappy sound selection
-  safe('flappySoundSelect', el=> {
-    el.value = state.flappyMuted ? 'muted' : 'enabled';
-  });
-  safe('applyFlappySoundBtn', el=> el.onclick=()=>{
-    const newSetting = byId('flappySoundSelect')?.value || 'enabled';
-    state.flappyMuted = (newSetting === 'muted');
-    save();
-    alert(`Flappy sound ${state.flappyMuted ? 'muted' : 'enabled'}`);
-  });
+
 
   // Trainer controls
   safe('btnPlay',        el=> el.onclick=async()=>{ firstRtBonusMs=2000; await resumeCtx(); if(paused){ pauseEnd(); } safe('btnPause', b=> b.textContent='⏸ Pause'); if(special) nextSpecialTrial(); else nextTrial(true); });
