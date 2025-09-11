@@ -2177,7 +2177,15 @@ function tickTimeBlock(now = performance.now()) {
     const dt = Math.max(0, now - tb.startedAt);
     tb.activeMs += dt;
     tb.startedAt = now;
-    if (tb.activeMs >= 6*60*1000) beginTimeBlockBreak();
+    if (tb.activeMs >= 6*60*1000) {
+      // Don't start flappy break if training is already complete (5/5 blocks done)
+      if (tb.breaksCompletedToday >= 5) {
+        // Training already complete - just end the day
+        endDayAndLockout();
+      } else {
+        beginTimeBlockBreak();
+      }
+    }
   }
   renderTrainerHeaderTimeBlock(); // uses tb.activeMs
   requestAnimationFrame(tickTimeBlock);
@@ -2322,6 +2330,32 @@ function openFlappyModalForTimeBlockBreak() {
   updateTimeBlockBreakUI();
 }
 
+function restoreFlappyModalOriginalState() {
+  // Restore original flappy modal state after TimeBlock break
+  const flappyModal = byId('flappyModal');
+  if (!flappyModal) return;
+  
+  // Restore the main heading
+  const mainHeading = flappyModal.querySelector('h3');
+  if (mainHeading) {
+    mainHeading.textContent = '🐤 Flappy Break';
+    mainHeading.style.cssText = '';
+  }
+  
+  // Restore hidden elements (sound toggle was never hidden, so no need to restore)
+  const closeBtn = flappyModal.querySelector('#flappyClose');
+  const scoreDisplay = flappyModal.querySelector('#flappyScore');
+  const instructions = flappyModal.querySelector('p[style*="opacity:.8"]');
+  
+  if (closeBtn) closeBtn.style.display = '';
+  if (scoreDisplay) scoreDisplay.style.display = '';
+  if (instructions) instructions.style.display = '';
+  
+  // Remove play again button if it exists
+  const playAgainBtn = flappyModal.querySelector('#playAgainBtn');
+  if (playAgainBtn) playAgainBtn.remove();
+}
+
 function updateTimeBlockBreakUI() {
   if (!state.timeblock.breakActive || !state.timeblock.breakEndsAt) return;
   
@@ -2343,17 +2377,21 @@ function updateTimeBlockBreakUI() {
   // If the player loses early, the modal STAYS open with the countdown still visible
   const flappyModal = byId('flappyModal');
   if (flappyModal && flappyModal.style.display === 'flex') {
-    let breakMessage = flappyModal.querySelector('#timeBlockBreakMessage');
-    if (!breakMessage) {
-      breakMessage = document.createElement('p');
-      breakMessage.id = 'timeBlockBreakMessage';
-      breakMessage.style.cssText = 'margin: 8px 0; font-weight: 600; color: var(--accent);';
-      const flappyCard = flappyModal.querySelector('.card');
-      if (flappyCard) {
-        flappyCard.insertBefore(breakMessage, flappyCard.querySelector('canvas'));
-      }
+    // Replace the main heading with countdown timer
+    const mainHeading = flappyModal.querySelector('h3');
+    if (mainHeading) {
+      mainHeading.textContent = fmtMMSS(remaining);
+      mainHeading.style.cssText = 'margin: 8px 0; font-weight: 600; color: var(--accent); font-size: 24px;';
     }
-    breakMessage.textContent = `TimeBlock break: ${fmtMMSS(remaining)} remaining`;
+    
+    // Hide some elements during TimeBlock break, but keep sound toggle visible
+    const closeBtn = flappyModal.querySelector('#flappyClose');
+    const scoreDisplay = flappyModal.querySelector('#flappyScore');
+    const instructions = flappyModal.querySelector('p[style*="opacity:.8"]');
+    
+    if (closeBtn) closeBtn.style.display = 'none';
+    if (scoreDisplay) scoreDisplay.style.display = 'none';
+    if (instructions) instructions.style.display = 'none';
     
     // Show "Play again" option if game is not running and no crash overlay is shown
     const crashOverlay = flappyModal.querySelector('#flappyCrashOverlay');
@@ -2363,10 +2401,10 @@ function updateTimeBlockBreakUI() {
         playAgainBtn = document.createElement('button');
         playAgainBtn.id = 'playAgainBtn';
         playAgainBtn.textContent = 'Play again';
-        playAgainBtn.style.cssText = 'margin-right: 8px;';
-        const closeBtn = flappyModal.querySelector('#flappyClose');
-        if (closeBtn && closeBtn.parentNode) {
-          closeBtn.parentNode.insertBefore(playAgainBtn, closeBtn);
+        playAgainBtn.style.cssText = 'margin: 8px; padding: 10px 16px; border-radius: 12px; border: none; cursor: pointer; font-size: 14px; background: var(--accent); color: var(--bg); font-weight: 600;';
+        const buttonContainer = flappyModal.querySelector('div[style*="margin-top:8px"]');
+        if (buttonContainer) {
+          buttonContainer.appendChild(playAgainBtn);
         }
         playAgainBtn.onclick = () => {
           running = true;
@@ -2476,6 +2514,9 @@ function closeFlappyModal() {
     state.flappyHighScore = score; 
     save(); 
   }
+  
+  // Restore original modal state if we were in a TimeBlock break
+  restoreFlappyModalOriginalState();
   
   // Remove break message if it exists
   const breakMessage = byId('timeBlockBreakMessage');
@@ -3964,7 +4005,8 @@ function renderRecallReviewPhase() {
       currentRecallSession.reviewIndex = state.recall.reviewIndex; // Keep in sync
       const item = reviewItems[state.recall.reviewIndex];
       updateRecallReviewUI(item, state.recall.reviewIndex, reviewItems.length);
-      renderRecallReviewPhase(); // Re-render for complete update
+      // Don't call renderRecallReviewPhase() here - just update content and button states
+      updateRecallReviewContent();
     }
   });
   
@@ -3974,11 +4016,52 @@ function renderRecallReviewPhase() {
       currentRecallSession.reviewIndex = state.recall.reviewIndex; // Keep in sync
       const item = reviewItems[state.recall.reviewIndex];
       updateRecallReviewUI(item, state.recall.reviewIndex, reviewItems.length);
-      renderRecallReviewPhase(); // Re-render for complete update
+      // Don't call renderRecallReviewPhase() here - just update content and button states
+      updateRecallReviewContent();
     } else {
       finishRecallReview();
     }
   });
+}
+
+// Update only the content and button states without recreating the DOM
+function updateRecallReviewContent() {
+  if (!currentRecallSession || currentRecallSession.phase !== 'review') return;
+  
+  const modalId = currentRecallSession.type === 'cold' ? 'coldRecallModal' : 'warmRecallModal';
+  const modal = byId(modalId);
+  if (!modal) return;
+  
+  // Use persistent state for navigation
+  const reviewItems = state.recall.review || currentRecallSession.takes;
+  const reviewIndex = state.recall.reviewIndex !== undefined ? state.recall.reviewIndex : currentRecallSession.reviewIndex;
+  const currentTake = reviewItems[reviewIndex];
+  
+  if (!currentTake) return;
+  
+  // Update position indicator
+  const positionEl = modal.querySelector('.recall-review-position');
+  if (positionEl) {
+    positionEl.textContent = `Result ${reviewIndex + 1} of ${reviewItems.length}`;
+  }
+  
+  // Update review content
+  const contentEl = modal.querySelector('.recall-review-content');
+  if (contentEl) {
+    contentEl.innerHTML = generateRecallReviewContent(currentTake);
+  }
+  
+  // Update button states and text
+  const prevBtn = byId('btnRecallPrev');
+  const nextBtn = byId('btnRecallNext');
+  
+  if (prevBtn) {
+    prevBtn.disabled = reviewIndex === 0;
+  }
+  
+  if (nextBtn) {
+    nextBtn.textContent = reviewIndex < reviewItems.length - 1 ? 'Next ▶' : 'Done';
+  }
 }
 
 // Generate review content with three-note gauge
