@@ -108,8 +108,10 @@
         <div class="tPage" id="tPage2">
           <h3>⏱ Daily session</h3>
           <ul>
-            <li>Train for <strong>30 minutes</strong> (timer runs only while actively training).</li>
-            <li>Menus, Flappy, and the 20-s <strong>Shepard tone</strong> don’t count.</li>
+            <li>Train for <strong>five 6-minute blocks</strong> with 1-minute breaks between each block.</li>
+            <li>Do this <strong>once a day, about 5-6 times a week</strong> for best results.</li>
+            <li>Complete all <strong>five blocks in one go</strong> - don't split throughout the day.</li>
+            <li>Menus, Flappy, and the 20-s <strong>Shepard tone</strong> don’t count toward training time.</li>
             <li>Blocks <strong>1–20</strong> with feedback; <strong>21–24</strong> are tests (no feedback).</li>
           </ul>
         </div>
@@ -138,6 +140,16 @@
           </ul>
         </div>
         <div class="tPage" id="tPage6">
+          <h3>🎤 Cold and Warm Recall</h3>
+          <ul>
+            <li><strong>Cold recall:</strong> Before starting training, sing the 12 pitches (C, C#, D, D#, E, F, F#, G, G#, A, A#, B) to test your memory.</li>
+            <li><strong>Warm recall:</strong> After completing training, sing the same 12 pitches again to compare improvement.</li>
+            <li>Both use your voice input - no need for perfect pitch, just sing what you think each note sounds like.</li>
+            <li>Cold recall is <strong>required before training</strong> - warm recall is <strong>optional after completion</strong> via the menu button.</li>
+            <li>These help track your progress and reinforce learning through vocal memory.</li>
+          </ul>
+        </div>
+        <div class="tPage" id="tPage7">
           <h3>📊 Assessment Test</h3>
           <ul>
             <li><strong>Purpose:</strong> Measure your absolute pitch ability with 20 random pitches across different audio types.</li>
@@ -161,7 +173,7 @@
   <div class="card screen" id="menuScreen">
     <h1 id="greeting">Absolute Pitch Trainer</h1>
     <div class="row">
-      <span class="pill" id="capInfo">Left: 30:00</span>
+      <span class="pill" id="capInfo">Training not started yet</span>
       <span class="pill" id="weekPill">This week: 0 hrs 0 mins</span>
       <span class="pill" id="lockoutPill" style="display:none">🔒 Locked</span>
     </div>
@@ -320,7 +332,7 @@
       <span class="pill" id="autoInfo">Auto-next: Off</span>
       <span class="pill" id="delayInfo">RT limit: 1183ms • Delay: 1000ms</span>
       <span class="pill" id="blockTimeInfo">TimeBlock 1/5 00:00/06:00</span>
-      <span class="pill" id="timerInfo">Time left: 30:00</span>
+      <span class="pill" id="timerInfo">Block 1/5</span>
       <span class="pill" id="oobStatusPill">OOB 15%</span>
     </div>
     <div id="barControls">
@@ -1761,20 +1773,22 @@ function updateMenuTimer() {
   if (!capInfo) return;
   
   if (isDailyLocked()) {
-    capInfo.textContent = '🎉 Daily goal achieved!';
+    capInfo.textContent = 'Training finished for today';
     capInfo.style.background = 'var(--good)';
   } else {
-    // Menu timer must use same calculation as trainer timer for consistency
-    const minutesCompleted = state.daily.minutesCompleted || 0;
-    const currentElapsedMs = (state.session && state.session.startedAt) ? state.session.elapsedMs : 0;
+    // Check if training has started today
+    const hasStartedToday = state.session && state.session.startedAt && 
+                           state.daily && state.daily.date === getTodayDateString();
     
-    // Calculate total remaining time in milliseconds (same method as updateTrainerTimer)
-    const totalRemainingMs = Math.max(0, 30 * 60 * 1000 - (minutesCompleted * 60 * 1000 + currentElapsedMs));
-    const remainingMinutes = Math.floor(totalRemainingMs / 60000);
-    const remainingSeconds = Math.floor((totalRemainingMs % 60000) / 1000);
-    
-    capInfo.textContent = `Left: ${remainingMinutes}:${remainingSeconds.toString().padStart(2, '0')} of 30:00`;
-    capInfo.style.background = '';
+    if (!hasStartedToday) {
+      capInfo.textContent = 'Training not started yet';
+      capInfo.style.background = '';
+    } else {
+      // Show completed blocks instead of time countdown
+      const blocksCompleted = state.timeblock?.breaksCompletedToday || 0;
+      capInfo.textContent = `Training blocks: ${blocksCompleted}/5 completed`;
+      capInfo.style.background = '';
+    }
   }
 }
 
@@ -1783,20 +1797,16 @@ function updateTrainerTimer() {
   
   const timerInfo = byId('timerInfo');
   if (timerInfo) {
-    const minutesCompleted = state.daily.minutesCompleted || 0;
-    const currentElapsedMs = state.session.elapsedMs || 0;
+    // Show only block progress, no 30-minute countdown
+    const blocksCompleted = state.timeblock?.breaksCompletedToday || 0;
+    const currentBlock = blocksCompleted + 1;
     
-    // Calculate total remaining time properly
-    const totalRemainingMs = Math.max(0, 30 * 60 * 1000 - (minutesCompleted * 60 * 1000 + currentElapsedMs));
-    const remainingMinutes = Math.floor(totalRemainingMs / 60000);
-    const remainingSeconds = Math.floor((totalRemainingMs % 60000) / 1000);
-    
-    if (remainingMinutes === 0 && remainingSeconds === 0) {
-      timerInfo.textContent = 'Time up!';
+    if (currentBlock > 5) {
+      timerInfo.textContent = 'Training complete!';
       // Trigger session end
       endSessionWithWarmRecall();
     } else {
-      timerInfo.textContent = `Left: ${remainingMinutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+      timerInfo.textContent = `Block ${currentBlock}/5`;
     }
   }
 }
@@ -1953,18 +1963,22 @@ function updateMenuSessionDisplay() {
   if (!capInfo) return;
   
   if (isDailyLocked()) {
-    capInfo.textContent = '🎉 Daily goal achieved!';
+    capInfo.textContent = 'Training finished for today';
     capInfo.style.background = 'var(--good)';
   } else {
-    // Include current session elapsed time like updateMenuTimer() does
-    const minutesCompleted = state.daily.minutesCompleted || 0;
-    const currentElapsedMs = (state.session && state.session.startedAt) ? state.session.elapsedMs : 0;
-    const currentMinutes = Math.floor(currentElapsedMs / 60000);
-    const totalMinutes = minutesCompleted + currentMinutes;
-    const remaining = Math.max(0, 30 - totalMinutes);
+    // Check if training has started today
+    const hasStartedToday = state.session && state.session.startedAt && 
+                           state.daily && state.daily.date === getTodayDateString();
     
-    capInfo.textContent = `Left: ${remaining}:00 of 30:00`;
-    capInfo.style.background = '';
+    if (!hasStartedToday) {
+      capInfo.textContent = 'Training not started yet';
+      capInfo.style.background = '';
+    } else {
+      // Show completed blocks instead of time countdown
+      const blocksCompleted = state.timeblock?.breaksCompletedToday || 0;
+      capInfo.textContent = `Training blocks: ${blocksCompleted}/5 completed`;
+      capInfo.style.background = '';
+    }
   }
 }
 
@@ -2520,12 +2534,12 @@ function updateCapsUI(){
   // Update daily session UI (new system)
   updateSessionUI();
   
-  // Legacy system (keep for compatibility)
-  const left = Math.max(0, SESS_DAILY_MS - msUsedQuota());
+  // Legacy system (disabled - now using block-based system)
+  // const left = Math.max(0, SESS_DAILY_MS - msUsedQuota());
   // Don't override capInfo if daily session system is active
-  if (!state.session || !state.session.startedAt) {
-    text('capInfo', `Left: ${fmtMMSS(left)}`);
-  }
+  // if (!state.session || !state.session.startedAt) {
+  //   text('capInfo', `Left: ${fmtMMSS(left)}`);
+  // }
   
   const usedW = state.thisWeekMs || 0;
   const wp = byId('weekPill');
@@ -3525,26 +3539,8 @@ function showColdRecall() {
 
 // Check if warm recall should be shown automatically when returning to menu
 function checkAndShowWarmRecall() {
-  // Only show warm recall automatically after completing a 30min training session
-  // (when warmRecallPending flag is set)
-  
-  const todayKey = getTodayKey();
-  const todayRecall = state.recall[todayKey];
-  const warmRecallNotDone = !todayRecall || !todayRecall.warm || todayRecall.warm.length === 0;
-  
-  // Only condition: After 30min completion (warmRecallPending flag)
-  if (state.warmRecallPending && warmRecallNotDone) {
-    state.warmRecallPending = false; // Clear the flag
-    save();
-    // Small delay to let menu render first
-    setTimeout(() => {
-      showWarmRecall();
-    }, 100);
-    return;
-  }
-  
-  // Note: Removed automatic warm recall at session start to prevent
-  // unwanted triggers when accessing main menu without training
+  // Automatic warm recall disabled - user must press button manually
+  // This prevents interruptions when just accessing the menu
 }
 
 // Show warm recall modal with sequential flow  
@@ -6452,11 +6448,12 @@ function startTrainingAfterColdRecall(){
     }
     
     if(sessionActive && !paused){
-      // Update total time display  
-      const left = Math.max(0, SESS_DAILY_MS - msUsedQuota());
-      text('timerInfo', `Left: ${fmtMMSS(left)}`);
+      // Update block progress display instead of 30-minute countdown
+      updateTrainerTimer();  // This now shows "Block X/5" instead of time remaining
       
-      if(left<=0){
+      // Check if all 5 blocks are complete
+      const blocksCompleted = state.timeblock?.breaksCompletedToday || 0;
+      if(blocksCompleted >= 5){
         endSessionWithWarmRecall();
       }
     }
@@ -6489,21 +6486,10 @@ function startSession(){
 function endSessionWithWarmRecall(){
   if(!sessionActive) return;
   
-  // Check if warm recall has been done today
-  const todayKey = getTodayKey();
-  const todayRecall = state.recall[todayKey];
-  
-  if (!todayRecall || !todayRecall.warm || todayRecall.warm.length === 0) {
-    // Mark that warm recall should be shown when user returns to menu
-    state.warmRecallPending = true;
-    // Complete day without lockout and return to menu
-    completeDayWithoutLockout();
-    showScreen('menuScreen');
-    return;
-  }
-  
-  // Warm recall already done, proceed with normal session end
-  endDayAndLockout();
+  // Complete day without automatic warm recall
+  // User must manually press warm recall button if desired
+  completeDayWithoutLockout();
+  showScreen('menuScreen');
 }
 function endSession(auto){
   if(!sessionActive) return;
@@ -7195,15 +7181,15 @@ function populatePitchSelect(){
 /* ------------------ TUTORIAL PAGER ------------------ */
 let tIndex = 0;
 function setTutorialPage(i){
-  tIndex = Math.max(0, Math.min(5, i));
-  ['tPage1','tPage2','tPage3','tPage4','tPage5','tPage6'].forEach((id, idx)=>{
+  tIndex = Math.max(0, Math.min(6, i));
+  ['tPage1','tPage2','tPage3','tPage4','tPage5','tPage6','tPage7'].forEach((id, idx)=>{
     const el = byId(id);
     if(el) el.classList.toggle('active', idx===tIndex);
   });
   const back = byId('tBack'); if(back) back.style.visibility = (tIndex===0 ? 'hidden' : 'visible');
-  const next = byId('tNext'); if(next) next.textContent = (tIndex===5 ? 'Got it' : 'Next ▶');
+  const next = byId('tNext'); if(next) next.textContent = (tIndex===6 ? 'Got it' : 'Next ▶');
 }
-function nextTutorial(){ if(tIndex<5){ setTutorialPage(tIndex+1); return; } hide('welcomeModal'); showScreen('menuScreen'); updateCapsUI(); populatePitchSelect(); drawChart(); }
+function nextTutorial(){ if(tIndex<6){ setTutorialPage(tIndex+1); return; } hide('welcomeModal'); showScreen('menuScreen'); updateCapsUI(); populatePitchSelect(); drawChart(); }
 function prevTutorial(){ setTutorialPage(tIndex-1); }
 
 /* ------------------ WIRING ------------------ */
