@@ -1702,6 +1702,15 @@ function stopUnifiedTicker() {
 }
 
 function updateAllTimerUI() {
+  // Ensure week roll and other periodic tasks
+  ensureWeekRoll();
+  
+  // Update weekly time tracking if session active
+  if (sessionActive && !paused && !shepRunning) { 
+    state.thisWeekMs = (state.thisWeekMs || 0) + 1000; 
+    save(); 
+  }
+  
   // Update session timers if active
   if (state.session && state.session.startedAt) {
     updateSessionUI();
@@ -1713,6 +1722,27 @@ function updateAllTimerUI() {
   // Update trainer timer if on trainer screen
   if (sessionActive) {
     updateTrainerTimer();
+    
+    // Check for session end
+    const left = Math.max(0, SESS_DAILY_MS - msUsedQuota());
+    if (left <= 0) {
+      endSessionWithWarmRecall();
+    }
+  }
+  
+  // Handle TimeBlock break countdown
+  if (state.timeblock.breakActive && state.timeblock.breakEndsAt) {
+    updateTimeBlockBreakUI();
+    
+    const now = Date.now();
+    if (now >= state.timeblock.breakEndsAt) {
+      // Check if Flappy round has ended
+      if (!running) {
+        // No flappy game running, end break automatically
+        endTimeBlockBreakAndCloseModal();
+      }
+      // If flappy is still running, let user continue but show message
+    }
   }
   
   // Handle daily session progression
@@ -1746,6 +1776,10 @@ function updateAllTimerUI() {
     }
     save();
   }
+  
+  // Update UI elements that need refreshing
+  updateCapsUI(); 
+  try { drawChart(); } catch(_) {}
 }
 
 function updateMenuTimer() {
@@ -1916,11 +1950,11 @@ function updateSessionUI() {
 }
 
 function updateTrainerSessionDisplay() {
-  // Update the blockTimeInfo pill to show session progress
+  // Update the blockTimeInfo pill to show session progress using unified session data
   const blockTimeInfo = byId('blockTimeInfo');
   if (!blockTimeInfo) return;
   
-  if (!state.session.startedAt) {
+  if (!state.session || !state.session.startedAt) {
     blockTimeInfo.textContent = 'Press Play to start session';
     return;
   }
@@ -3980,8 +4014,21 @@ function finishRecallReview() {
     startTraining();
   } else {
     closeWarmRecall();  
-    // After warm recall, end day
-    endDayAndLockout();
+    // After warm recall, return to main menu instead of ending day
+    sessionActive = false;
+    stopAllTimers();
+    const rec = state.sessions[state.sessions.length-1]; 
+    if (rec && !rec.end) rec.end = Date.now();
+    save();
+    
+    // Ensure modal is closed
+    byId('warmRecallModal').style.display = 'none';
+    
+    // Navigate back to main menu
+    showScreen('menuScreen'); 
+    updateCapsUI(); 
+    populatePitchSelect(); 
+    drawChart();
   }
   
   currentRecallSession = null;
@@ -5387,20 +5434,8 @@ function updateLevelUI(){
   }
   text('delayInfo', `RT limit: ${rtWindowForSet(set)}ms • Delay: ${delayMs}ms`);
   
-  // Update block time display with current/total format
-  updateBlockTimeDisplay();
-  
   // Update OOB status pill
   updateOobStatusPill();
-}
-
-function updateBlockTimeDisplay() {
-  // Calculate blocks per set (24 blocks total, 5 blocks per set for timing purposes)
-  const BLOCKS_PER_SET = 5;
-  const currentTrainingBlock = ((state.currentBlock - 1) % BLOCKS_PER_SET) + 1;
-  const blockTime = getBlockActiveTime();
-  const blockTimeStr = fmtMMSS(blockTime);
-  text('blockTimeInfo', `${currentTrainingBlock}/${BLOCKS_PER_SET} ${blockTimeStr}/6:00`);
 }
 
 /* Build note pad and attach handlers */
@@ -6333,42 +6368,9 @@ function startTrainingAfterColdRecall(){
   state.lastSeen = Date.now(); save();
   updateCapsUI(); updateLevelUI(); paintNotes();
   updateBlockHUD(); // Show current block progress instead of "Press Play"
-  stopAllTimers();
-  tickId=setInterval(()=>{
-    ensureWeekRoll();
-    if(sessionActive && !paused && !shepRunning){ 
-      state.thisWeekMs = (state.thisWeekMs||0) + 1000; 
-      save(); 
-    }
-    
-    if(sessionActive && !paused){
-      // Update total time display  
-      const left = Math.max(0, SESS_DAILY_MS - msUsedQuota());
-      text('timerInfo', `Left: ${fmtMMSS(left)}`);
-      
-      if(left<=0){
-        endSessionWithWarmRecall();
-      }
-    }
-    
-    // Handle TimeBlock break countdown
-    if (state.timeblock.breakActive && state.timeblock.breakEndsAt) {
-      updateTimeBlockBreakUI();
-      
-      const now = Date.now();
-      if (now >= state.timeblock.breakEndsAt) {
-        // Check if Flappy round has ended
-        if (!running) {
-          // No flappy game running, end break automatically
-          endTimeBlockBreakAndCloseModal();
-        }
-        // If flappy is still running, let user continue but show message
-      }
-    }
-    
-    updateCapsUI(); 
-    try { drawChart(); } catch(_) {}
-  },1000);
+  
+  // Use unified ticker instead of separate legacy timer
+  startUnifiedTicker();
 }
 
 // Backwards compatibility wrapper
@@ -6389,8 +6391,18 @@ function endSessionWithWarmRecall(){
     return;
   }
   
-  // Warm recall already done, proceed with normal session end
-  endDayAndLockout();
+  // Warm recall already done, end session and return to menu
+  sessionActive = false;
+  stopAllTimers();
+  const rec = state.sessions[state.sessions.length-1]; 
+  if (rec && !rec.end) rec.end = Date.now();
+  save();
+  
+  // Navigate back to main menu
+  showScreen('menuScreen'); 
+  updateCapsUI(); 
+  populatePitchSelect(); 
+  drawChart();
 }
 function endSession(auto){
   if(!sessionActive) return;
