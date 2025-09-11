@@ -1756,14 +1756,16 @@ function updateMenuTimer() {
     capInfo.textContent = '🎉 Daily goal achieved!';
     capInfo.style.background = 'var(--good)';
   } else {
-    // Menu timer must reflect remaining time = 30 - (minutesCompleted + elapsedMs/60000)
+    // Menu timer must use same calculation as trainer timer for consistency
     const minutesCompleted = state.daily.minutesCompleted || 0;
     const currentElapsedMs = (state.session && state.session.startedAt) ? state.session.elapsedMs : 0;
-    const currentMinutes = Math.floor(currentElapsedMs / 60000);
-    const totalMinutes = minutesCompleted + currentMinutes;
-    const remaining = Math.max(0, 30 - totalMinutes);
     
-    capInfo.textContent = `Left: ${remaining}:00 of 30:00`;
+    // Calculate total remaining time in milliseconds (same method as updateTrainerTimer)
+    const totalRemainingMs = Math.max(0, 30 * 60 * 1000 - (minutesCompleted * 60 * 1000 + currentElapsedMs));
+    const remainingMinutes = Math.floor(totalRemainingMs / 60000);
+    const remainingSeconds = Math.floor((totalRemainingMs % 60000) / 1000);
+    
+    capInfo.textContent = `Left: ${remainingMinutes}:${remainingSeconds.toString().padStart(2, '0')} of 30:00`;
     capInfo.style.background = '';
   }
 }
@@ -2265,6 +2267,27 @@ function endDayAndLockout() {
   
   save();
   endSession(true);
+}
+
+function completeDayWithoutLockout() {
+  // Mark daily session as complete without triggering lockout
+  // This allows user to return to menu and see completion status
+  if (!state.daily.completedAt) {
+    state.daily.completedAt = Date.now();
+  }
+  
+  // Reset TimeBlock system for next day  
+  state.timeblock = {
+    activeMs: 0,
+    running: false,
+    startedAt: null,
+    breaksCompletedToday: 0,
+    breakActive: false,
+    breakEndsAt: null
+  };
+  
+  save();
+  endSession(false); // false = don't show lockout alert
 }
 
 function openFlappyModalForTimeBlockBreak() {
@@ -3980,8 +4003,8 @@ function finishRecallReview() {
     startTraining();
   } else {
     closeWarmRecall();  
-    // After warm recall, end day
-    endDayAndLockout();
+    // After warm recall, complete day without lockout - user can still access menu
+    completeDayWithoutLockout();
   }
   
   currentRecallSession = null;
