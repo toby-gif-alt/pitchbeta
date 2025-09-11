@@ -2490,6 +2490,10 @@ function showScreen(id){
     // C) On leaving Trainer (menu etc): pause the tick (set running=false) but DO NOT reset activeMs.
     pauseTimeBlockTimer();
     stopAllTimers(); sealDanglingSession(); updateCapsUI();
+    
+    // Keep unified ticker running for menu timer updates (fix for Issue 2)
+    startUnifiedTicker();
+    
     try{ populatePitchSelect(); drawChart(); }catch(_){}
     
     // Check if warm recall should be shown automatically
@@ -4134,6 +4138,11 @@ function startTraining() {
       startTimeBlockTimer();
     }
   }
+  
+  // Initialize UI components (fix for missing buttons after cold recall)
+  state.lastSeen = Date.now(); save();
+  updateCapsUI(); updateLevelUI(); paintNotes();
+  updateBlockHUD();
   
   // Schedule the first trial
   scheduleNextTrial();
