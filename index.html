@@ -1156,6 +1156,12 @@ if (!state.daily.recall) {
   save();
 }
 
+// Migration for lastInBoundsTimbre tracking
+if (typeof state.lastInBoundsTimbre === 'undefined') {
+  state.lastInBoundsTimbre = null;
+  save();
+}
+
 // Migration for jitter system
 if (!state.jitter) {
   state.jitter = {
