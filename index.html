@@ -2342,15 +2342,11 @@ function restoreFlappyModalOriginalState() {
     mainHeading.style.cssText = '';
   }
   
-  // Restore hidden elements
-  const soundToggleLabel = flappyModal.querySelector('#flappySoundToggleLabel');
-  const soundToggleBtn = flappyModal.querySelector('#flappySoundToggle');
+  // Restore hidden elements (sound toggle was never hidden, so no need to restore)
   const closeBtn = flappyModal.querySelector('#flappyClose');
   const scoreDisplay = flappyModal.querySelector('#flappyScore');
   const instructions = flappyModal.querySelector('p[style*="opacity:.8"]');
   
-  if (soundToggleLabel) soundToggleLabel.style.display = '';
-  if (soundToggleBtn) soundToggleBtn.style.display = '';
   if (closeBtn) closeBtn.style.display = '';
   if (scoreDisplay) scoreDisplay.style.display = '';
   if (instructions) instructions.style.display = '';
@@ -2388,15 +2384,11 @@ function updateTimeBlockBreakUI() {
       mainHeading.style.cssText = 'margin: 8px 0; font-weight: 600; color: var(--accent); font-size: 24px;';
     }
     
-    // Hide sound toggle elements during TimeBlock break
-    const soundToggleLabel = flappyModal.querySelector('#flappySoundToggleLabel');
-    const soundToggleBtn = flappyModal.querySelector('#flappySoundToggle');
+    // Hide some elements during TimeBlock break, but keep sound toggle visible
     const closeBtn = flappyModal.querySelector('#flappyClose');
     const scoreDisplay = flappyModal.querySelector('#flappyScore');
     const instructions = flappyModal.querySelector('p[style*="opacity:.8"]');
     
-    if (soundToggleLabel) soundToggleLabel.style.display = 'none';
-    if (soundToggleBtn) soundToggleBtn.style.display = 'none';
     if (closeBtn) closeBtn.style.display = 'none';
     if (scoreDisplay) scoreDisplay.style.display = 'none';
     if (instructions) instructions.style.display = 'none';
@@ -3203,11 +3195,20 @@ function getTrainedPCs() {
   return trainedSet(setSize);
 }
 
-// Select notes for recall - use all 12 pitches for comprehensive testing
+// Randomly select 2-3 notes from trained set (no repeats)
 function selectRecallNotes() {
-  // Return all 12 chromatic pitch classes for recall testing
-  // This matches the tutorial description: "sing the 12 pitches (C, C#, D, D#, E, F, F#, G, G#, A, A#, B)"
-  return ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B'];
+  const trained = getTrainedPCs();
+  const count = Math.min(3, Math.max(2, trained.length)); // 2-3 notes, but not more than available
+  
+  const selected = [];
+  const available = [...trained];
+  
+  for (let i = 0; i < count && available.length > 0; i++) {
+    const randomIndex = Math.floor(Math.random() * available.length);
+    selected.push(available.splice(randomIndex, 1)[0]);
+  }
+  
+  return selected;
 }
 
 // Analyze pitch recording and compute verdict
@@ -4004,7 +4005,8 @@ function renderRecallReviewPhase() {
       currentRecallSession.reviewIndex = state.recall.reviewIndex; // Keep in sync
       const item = reviewItems[state.recall.reviewIndex];
       updateRecallReviewUI(item, state.recall.reviewIndex, reviewItems.length);
-      renderRecallReviewPhase(); // Re-render for complete update
+      // Don't call renderRecallReviewPhase() here - just update content and button states
+      updateRecallReviewContent();
     }
   });
   
@@ -4014,11 +4016,52 @@ function renderRecallReviewPhase() {
       currentRecallSession.reviewIndex = state.recall.reviewIndex; // Keep in sync
       const item = reviewItems[state.recall.reviewIndex];
       updateRecallReviewUI(item, state.recall.reviewIndex, reviewItems.length);
-      renderRecallReviewPhase(); // Re-render for complete update
+      // Don't call renderRecallReviewPhase() here - just update content and button states
+      updateRecallReviewContent();
     } else {
       finishRecallReview();
     }
   });
+}
+
+// Update only the content and button states without recreating the DOM
+function updateRecallReviewContent() {
+  if (!currentRecallSession || currentRecallSession.phase !== 'review') return;
+  
+  const modalId = currentRecallSession.type === 'cold' ? 'coldRecallModal' : 'warmRecallModal';
+  const modal = byId(modalId);
+  if (!modal) return;
+  
+  // Use persistent state for navigation
+  const reviewItems = state.recall.review || currentRecallSession.takes;
+  const reviewIndex = state.recall.reviewIndex !== undefined ? state.recall.reviewIndex : currentRecallSession.reviewIndex;
+  const currentTake = reviewItems[reviewIndex];
+  
+  if (!currentTake) return;
+  
+  // Update position indicator
+  const positionEl = modal.querySelector('.recall-review-position');
+  if (positionEl) {
+    positionEl.textContent = `Result ${reviewIndex + 1} of ${reviewItems.length}`;
+  }
+  
+  // Update review content
+  const contentEl = modal.querySelector('.recall-review-content');
+  if (contentEl) {
+    contentEl.innerHTML = generateRecallReviewContent(currentTake);
+  }
+  
+  // Update button states and text
+  const prevBtn = byId('btnRecallPrev');
+  const nextBtn = byId('btnRecallNext');
+  
+  if (prevBtn) {
+    prevBtn.disabled = reviewIndex === 0;
+  }
+  
+  if (nextBtn) {
+    nextBtn.textContent = reviewIndex < reviewItems.length - 1 ? 'Next ▶' : 'Done';
+  }
 }
 
 // Generate review content with three-note gauge
