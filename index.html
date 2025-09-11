@@ -108,8 +108,10 @@
         <div class="tPage" id="tPage2">
           <h3>⏱ Daily session</h3>
           <ul>
-            <li>Train for <strong>30 minutes</strong> (timer runs only while actively training).</li>
-            <li>Menus, Flappy, and the 20-s <strong>Shepard tone</strong> don’t count.</li>
+            <li>Train for <strong>five 6-minute blocks</strong> with 1-minute breaks between each block.</li>
+            <li>Do this <strong>once a day, about 5-6 times a week</strong> for best results.</li>
+            <li>Complete all <strong>five blocks in one go</strong> - don't split throughout the day.</li>
+            <li>Menus, Flappy, and the 20-s <strong>Shepard tone</strong> don’t count toward training time.</li>
             <li>Blocks <strong>1–20</strong> with feedback; <strong>21–24</strong> are tests (no feedback).</li>
           </ul>
         </div>
@@ -138,6 +140,16 @@
           </ul>
         </div>
         <div class="tPage" id="tPage6">
+          <h3>🎤 Cold and Warm Recall</h3>
+          <ul>
+            <li><strong>Cold recall:</strong> Before starting training, sing the 12 pitches (C, C#, D, D#, E, F, F#, G, G#, A, A#, B) to test your memory.</li>
+            <li><strong>Warm recall:</strong> After completing training, sing the same 12 pitches again to compare improvement.</li>
+            <li>Both use your voice input - no need for perfect pitch, just sing what you think each note sounds like.</li>
+            <li>Cold recall is <strong>required before training</strong> - warm recall is <strong>optional after completion</strong> via the menu button.</li>
+            <li>These help track your progress and reinforce learning through vocal memory.</li>
+          </ul>
+        </div>
+        <div class="tPage" id="tPage7">
           <h3>📊 Assessment Test</h3>
           <ul>
             <li><strong>Purpose:</strong> Measure your absolute pitch ability with 20 random pitches across different audio types.</li>
@@ -7164,15 +7176,15 @@ function populatePitchSelect(){
 /* ------------------ TUTORIAL PAGER ------------------ */
 let tIndex = 0;
 function setTutorialPage(i){
-  tIndex = Math.max(0, Math.min(5, i));
-  ['tPage1','tPage2','tPage3','tPage4','tPage5','tPage6'].forEach((id, idx)=>{
+  tIndex = Math.max(0, Math.min(6, i));
+  ['tPage1','tPage2','tPage3','tPage4','tPage5','tPage6','tPage7'].forEach((id, idx)=>{
     const el = byId(id);
     if(el) el.classList.toggle('active', idx===tIndex);
   });
   const back = byId('tBack'); if(back) back.style.visibility = (tIndex===0 ? 'hidden' : 'visible');
-  const next = byId('tNext'); if(next) next.textContent = (tIndex===5 ? 'Got it' : 'Next ▶');
+  const next = byId('tNext'); if(next) next.textContent = (tIndex===6 ? 'Got it' : 'Next ▶');
 }
-function nextTutorial(){ if(tIndex<5){ setTutorialPage(tIndex+1); return; } hide('welcomeModal'); showScreen('menuScreen'); updateCapsUI(); populatePitchSelect(); drawChart(); }
+function nextTutorial(){ if(tIndex<6){ setTutorialPage(tIndex+1); return; } hide('welcomeModal'); showScreen('menuScreen'); updateCapsUI(); populatePitchSelect(); drawChart(); }
 function prevTutorial(){ setTutorialPage(tIndex-1); }
 
 /* ------------------ WIRING ------------------ */
