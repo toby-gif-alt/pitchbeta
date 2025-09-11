@@ -320,7 +320,7 @@
       <span class="pill" id="autoInfo">Auto-next: Off</span>
       <span class="pill" id="delayInfo">RT limit: 1183ms • Delay: 1000ms</span>
       <span class="pill" id="blockTimeInfo">TimeBlock 1/5 00:00/06:00</span>
-      <span class="pill" id="timerInfo">Time left: 30:00</span>
+      <span class="pill" id="timerInfo">Block 1/5</span>
       <span class="pill" id="oobStatusPill">OOB 15%</span>
     </div>
     <div id="barControls">
@@ -1761,20 +1761,22 @@ function updateMenuTimer() {
   if (!capInfo) return;
   
   if (isDailyLocked()) {
-    capInfo.textContent = '🎉 Daily goal achieved!';
+    capInfo.textContent = 'Training finished for today';
     capInfo.style.background = 'var(--good)';
   } else {
-    // Menu timer must use same calculation as trainer timer for consistency
-    const minutesCompleted = state.daily.minutesCompleted || 0;
-    const currentElapsedMs = (state.session && state.session.startedAt) ? state.session.elapsedMs : 0;
+    // Check if training has started today
+    const hasStartedToday = state.session && state.session.startedAt && 
+                           state.daily && state.daily.date === getTodayDateString();
     
-    // Calculate total remaining time in milliseconds (same method as updateTrainerTimer)
-    const totalRemainingMs = Math.max(0, 30 * 60 * 1000 - (minutesCompleted * 60 * 1000 + currentElapsedMs));
-    const remainingMinutes = Math.floor(totalRemainingMs / 60000);
-    const remainingSeconds = Math.floor((totalRemainingMs % 60000) / 1000);
-    
-    capInfo.textContent = `Left: ${remainingMinutes}:${remainingSeconds.toString().padStart(2, '0')} of 30:00`;
-    capInfo.style.background = '';
+    if (!hasStartedToday) {
+      capInfo.textContent = 'Training not started yet';
+      capInfo.style.background = '';
+    } else {
+      // Show completed blocks instead of time countdown
+      const blocksCompleted = state.timeblock?.breaksCompletedToday || 0;
+      capInfo.textContent = `Training blocks: ${blocksCompleted}/5 completed`;
+      capInfo.style.background = '';
+    }
   }
 }
 
@@ -1783,20 +1785,16 @@ function updateTrainerTimer() {
   
   const timerInfo = byId('timerInfo');
   if (timerInfo) {
-    const minutesCompleted = state.daily.minutesCompleted || 0;
-    const currentElapsedMs = state.session.elapsedMs || 0;
+    // Show only block progress, no 30-minute countdown
+    const blocksCompleted = state.timeblock?.breaksCompletedToday || 0;
+    const currentBlock = blocksCompleted + 1;
     
-    // Calculate total remaining time properly
-    const totalRemainingMs = Math.max(0, 30 * 60 * 1000 - (minutesCompleted * 60 * 1000 + currentElapsedMs));
-    const remainingMinutes = Math.floor(totalRemainingMs / 60000);
-    const remainingSeconds = Math.floor((totalRemainingMs % 60000) / 1000);
-    
-    if (remainingMinutes === 0 && remainingSeconds === 0) {
-      timerInfo.textContent = 'Time up!';
+    if (currentBlock > 5) {
+      timerInfo.textContent = 'Training complete!';
       // Trigger session end
       endSessionWithWarmRecall();
     } else {
-      timerInfo.textContent = `Left: ${remainingMinutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+      timerInfo.textContent = `Block ${currentBlock}/5`;
     }
   }
 }
@@ -3525,26 +3523,8 @@ function showColdRecall() {
 
 // Check if warm recall should be shown automatically when returning to menu
 function checkAndShowWarmRecall() {
-  // Only show warm recall automatically after completing a 30min training session
-  // (when warmRecallPending flag is set)
-  
-  const todayKey = getTodayKey();
-  const todayRecall = state.recall[todayKey];
-  const warmRecallNotDone = !todayRecall || !todayRecall.warm || todayRecall.warm.length === 0;
-  
-  // Only condition: After 30min completion (warmRecallPending flag)
-  if (state.warmRecallPending && warmRecallNotDone) {
-    state.warmRecallPending = false; // Clear the flag
-    save();
-    // Small delay to let menu render first
-    setTimeout(() => {
-      showWarmRecall();
-    }, 100);
-    return;
-  }
-  
-  // Note: Removed automatic warm recall at session start to prevent
-  // unwanted triggers when accessing main menu without training
+  // Automatic warm recall disabled - user must press button manually
+  // This prevents interruptions when just accessing the menu
 }
 
 // Show warm recall modal with sequential flow  
@@ -6489,21 +6469,10 @@ function startSession(){
 function endSessionWithWarmRecall(){
   if(!sessionActive) return;
   
-  // Check if warm recall has been done today
-  const todayKey = getTodayKey();
-  const todayRecall = state.recall[todayKey];
-  
-  if (!todayRecall || !todayRecall.warm || todayRecall.warm.length === 0) {
-    // Mark that warm recall should be shown when user returns to menu
-    state.warmRecallPending = true;
-    // Complete day without lockout and return to menu
-    completeDayWithoutLockout();
-    showScreen('menuScreen');
-    return;
-  }
-  
-  // Warm recall already done, proceed with normal session end
-  endDayAndLockout();
+  // Complete day without automatic warm recall
+  // User must manually press warm recall button if desired
+  completeDayWithoutLockout();
+  showScreen('menuScreen');
 }
 function endSession(auto){
   if(!sessionActive) return;
