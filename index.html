@@ -982,7 +982,14 @@ try{
       blocksDone: 0,         // number of complete blocks (0..5)
       blockElapsedMs: 0,     // elapsed time in current block (0..360000)
       inBreak: false,        // currently in break mode
-      breakRemainingMs: 0    // time remaining in current break (0..60000)
+      breakRemainingMs: 0,    // time remaining in current break (0..60000)
+      timer: {
+        startTs: null,        // epoch ms when session timer started
+        consumedMs: 0,        // sum of active time (excluding pauses)
+        remainingMs: 30 * 60 * 1000, // 30:00 minutes remaining
+        isPaused: false,      // whether timer is paused
+        pausedAccum: 0        // accumulated pause time
+      }
     },
     daily: {
       date: getTodayDateString(), // YYYY-MM-DD format
@@ -1117,9 +1124,15 @@ if (typeof state.trialOpen === 'undefined') {
   save();
 }
 
-// Migration for current trial state (new grading system)
-if (!state.current) {
-  state.current = null;  // Will be set when trial starts
+// Migration for session timer system
+if (!state.session.timer) {
+  state.session.timer = {
+    startTs: null,
+    consumedMs: 0,
+    remainingMs: 30 * 60 * 1000, // Start at exactly 30:00
+    isPaused: false,
+    pausedAccum: 0
+  };
   save();
 }
 
@@ -1691,7 +1704,98 @@ function startDailySession() {
   return true;
 }
 
-/* ------------------ UNIFIED TIMER SYSTEM ------------------ */
+/* ------------------ SESSION TIMER SYSTEM ------------------ */
+function updateSessionTimer() {
+  if (!state.session || !state.session.timer || !state.session.timer.startTs) return;
+  
+  const now = Date.now();
+  const timer = state.session.timer;
+  
+  // Update consumed time only if not paused and not in break
+  if (!timer.isPaused && !state.session.inBreak && sessionActive && !paused) {
+    timer.consumedMs = now - timer.startTs - timer.pausedAccum;
+    timer.remainingMs = Math.max(0, 30 * 60 * 1000 - timer.consumedMs);
+  }
+  
+  // Update UI
+  const timerInfo = byId('timerInfo');
+  if (timerInfo && sessionActive) {
+    const remainingMinutes = Math.floor(timer.remainingMs / 60000);
+    const remainingSeconds = Math.floor((timer.remainingMs % 60000) / 1000);
+    
+    if (timer.remainingMs <= 0) {
+      timerInfo.textContent = 'Time up!';
+      endSessionWithWarmRecall();
+    } else {
+      timerInfo.textContent = `Left: ${remainingMinutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+    }
+  }
+  
+  // Update menu timer to match
+  updateMenuTimerFromSession();
+}
+
+function updateMenuTimerFromSession() {
+  const capInfo = byId('capInfo');
+  if (!capInfo) return;
+  
+  if (isDailyLocked()) {
+    capInfo.textContent = '🎉 Daily goal achieved!';
+    capInfo.style.background = 'var(--good)';
+    return;
+  }
+  
+  // Show remaining time from session timer
+  let remainingMinutes = 30;
+  if (state.session && state.session.timer && state.session.timer.startTs) {
+    remainingMinutes = Math.floor(state.session.timer.remainingMs / 60000);
+  }
+  
+  capInfo.textContent = `Left: ${remainingMinutes}:00`;
+  capInfo.style.background = '';
+}
+
+function pauseSessionTimer() {
+  if (!state.session.timer || state.session.timer.isPaused) return;
+  
+  const now = Date.now();
+  state.session.timer.isPaused = true;
+  // Update consumedMs before pausing
+  if (state.session.timer.startTs) {
+    state.session.timer.consumedMs = now - state.session.timer.startTs - state.session.timer.pausedAccum;
+    state.session.timer.remainingMs = Math.max(0, 30 * 60 * 1000 - state.session.timer.consumedMs);
+  }
+  save();
+}
+
+function resumeSessionTimer() {
+  if (!state.session.timer || !state.session.timer.isPaused) return;
+  
+  const now = Date.now();
+  state.session.timer.isPaused = false;
+  // Adjust start time to account for pause
+  if (state.session.timer.startTs) {
+    const pauseDuration = now - (state.session.timer.startTs + state.session.timer.consumedMs + state.session.timer.pausedAccum);
+    state.session.timer.pausedAccum += pauseDuration;
+  }
+  save();
+}
+
+function startSessionBreak() {
+  if (!state.session.timer) return;
+  
+  state.session.inBreak = true;
+  pauseSessionTimer();
+  save();
+}
+
+function endSessionBreak() {
+  if (!state.session.timer) return;
+  
+  state.session.inBreak = false;
+  resumeSessionTimer();
+  save();
+}
 // 3) Single source of truth for timers + UI sync  
 let unifiedTickerId = null;
 
@@ -2204,6 +2308,10 @@ function beginTimeBlockBreak() {
   tb.running = false;
   tb.breakActive = true;
   tb.breakEndsAt = Date.now() + 60_000;
+  
+  // Start session break (pause the 30-minute timer)
+  startSessionBreak();
+  
   showFlappyModal({ countdown: tb.breakEndsAt }); // open modal; show 60s countdown; inputs in trainer disabled
   
   // Start break modal timer that checks every 250ms
@@ -2240,6 +2348,9 @@ function endTimeBlockBreak() {
   state.timeblock.breakActive = false;
   state.timeblock.breakEndsAt = null;
   state.timeblock.breaksCompletedToday++;
+  
+  // End session break (resume the 30-minute timer)
+  endSessionBreak();
   
   if (state.timeblock.breaksCompletedToday >= 5) {
     endDayAndLockout();
@@ -6267,6 +6378,16 @@ function startTrainingAfterColdRecall(){
   sessionActive=true; paused=false;
   (state.sessions||[]).push({start:Date.now(),end:null,pauses:[],completed:false}); 
   
+  // Initialize session timer properly
+  const now = Date.now();
+  if (!state.session.timer.startTs) {
+    state.session.timer.startTs = now;
+    state.session.timer.consumedMs = 0;
+    state.session.timer.remainingMs = 30 * 60 * 1000; // Exactly 30:00
+    state.session.timer.isPaused = false;
+    state.session.timer.pausedAccum = 0;
+  }
+  
   // Start the new daily session system
   if (!startDailySession()) {
     // Failed to start daily session (probably already completed)
@@ -6293,15 +6414,8 @@ function startTrainingAfterColdRecall(){
       save(); 
     }
     
-    if(sessionActive && !paused){
-      // Update total time display  
-      const left = Math.max(0, SESS_DAILY_MS - msUsedQuota());
-      text('timerInfo', `Left: ${fmtMMSS(left)}`);
-      
-      if(left<=0){
-        endSessionWithWarmRecall();
-      }
-    }
+    // Update session timer
+    updateSessionTimer();
     
     // Handle TimeBlock break countdown
     if (state.timeblock.breakActive && state.timeblock.breakEndsAt) {
@@ -6361,11 +6475,9 @@ function pauseStart(reason){
   if(!(last && !last.end)) rec.pauses.push({start:Date.now(), end:null, reason});
   paused=true;
   
-  // Pause daily session timer (new system)
-  // Don't pause during breaks as the break timer should continue
+  // Pause session timer unless it's a break (breaks have separate handling)
   if (reason !== 'timeblock-break' && !state.session.inBreak) {
-    // The daily session timer continues running but this allows other systems to pause
-    // The daily session manages its own pause state via inBreak flag
+    pauseSessionTimer();
   }
   
   // Pause TimeBlock timer when training pauses (legacy system)
@@ -6382,7 +6494,10 @@ function pauseEnd(){
   const last=rec.pauses[rec.pauses.length-1]; if(last && !last.end) last.end=Date.now();
   paused=false;
   
-  // Resume daily session - handled by updateDailySession timer
+  // Resume session timer if not in break
+  if (!state.session.inBreak) {
+    resumeSessionTimer();
+  }
   
   // Resume TimeBlock timer when training resumes (legacy system)
   if (!state.timeblock.breakActive) {
