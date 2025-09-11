@@ -1383,11 +1383,104 @@ function updateAltPool() {
   }
 }
 
+function processTimbreRescuesAtBlockBoundary(blockIndex) {
+  if (!state.timbre || !state.timbre.perPcStats) return;
+  
+  const trainedPCs = trainedSet(setFromIndex(state.levelIndex));
+  const allTimbres = ['piano', 'sine', 'guitar'];
+  
+  // Check each (PC, timbre) combination for rescue start/end
+  for (const pc of trainedPCs) {
+    for (const timbre of allTimbres) {
+      const stats = state.timbre.perPcStats[pc]?.[timbre];
+      if (!stats || stats.last40.length < 10) continue; // Need at least 10 trials
+      
+      if (!state.timbre.rescue[pc]) {
+        state.timbre.rescue[pc] = {};
+      }
+      
+      const rescue = state.timbre.rescue[pc][timbre] || { active: false, untilBlock: 0 };
+      
+      // Check if rescue should start
+      const needsRescue = stats.acc < 0.75 || Math.abs(stats.medianCents) > 25;
+      
+      if (needsRescue && !rescue.active) {
+        // Start rescue
+        rescue.active = true;
+        rescue.untilBlock = blockIndex + 1; // Active for next 1 full block
+        state.timbre.rescue[pc][timbre] = rescue;
+        
+        // Log rescue start
+        state.timbre.history.push({
+          ts: Date.now(),
+          blockIndex: blockIndex,
+          pc,
+          timbre,
+          event: 'rescue-start',
+          acc: Math.round(stats.acc * 1000) / 1000,
+          median: Math.round(stats.medianCents * 10) / 10,
+          sd: Math.round(stats.sdCents * 10) / 10
+        });
+        
+        console.log(`🔄 Rescue started for ${pc}/${timbre}: acc=${stats.acc.toFixed(3)}, median=${stats.medianCents.toFixed(1)}¢`);
+      } else if (rescue.active) {
+        // Check if rescue should end
+        const rescueCanEnd = stats.acc >= 0.80 && Math.abs(stats.medianCents) <= 20;
+        
+        if (rescueCanEnd || blockIndex > rescue.untilBlock) {
+          // End rescue
+          rescue.active = false;
+          state.timbre.rescue[pc][timbre] = rescue;
+          
+          // Log rescue end
+          const endEvent = rescueCanEnd ? 'rescue-end' : 'rescue-timeout';
+          state.timbre.history.push({
+            ts: Date.now(),
+            blockIndex: blockIndex,
+            pc,
+            timbre,
+            event: endEvent,
+            acc: Math.round(stats.acc * 1000) / 1000,
+            median: Math.round(stats.medianCents * 10) / 10,
+            sd: Math.round(stats.sdCents * 10) / 10
+          });
+          
+          console.log(`✅ Rescue ended for ${pc}/${timbre}: acc=${stats.acc.toFixed(3)}, median=${stats.medianCents.toFixed(1)}¢`);
+        }
+      }
+    }
+  }
+}
+
+function findActiveRescueForPc(pc) {
+  if (!state.timbre.rescue[pc]) return null;
+  
+  const currentBlock = blockFromIndex(state.levelIndex);
+  
+  // Check all timbres for this PC
+  for (const timbre of Object.keys(state.timbre.rescue[pc])) {
+    const rescue = state.timbre.rescue[pc][timbre];
+    if (rescue.active && currentBlock <= rescue.untilBlock) {
+      return { timbre, rescue };
+    }
+  }
+  
+  return null;
+}
+
 function selectTimbreForTrial(pc) {
   // Initialize if needed
   initTimbreVarietySystem();
   
   const chosen = state.timbre.chosen;
+  
+  // Check if a rescue is active for this PC
+  const activeRescue = findActiveRescueForPc(pc);
+  if (activeRescue) {
+    // During rescue: 50% weakTimbre / 50% chosen, others get 0%
+    const weakTimbre = activeRescue.timbre;
+    return Math.random() < 0.5 ? weakTimbre : chosen;
+  }
   
   // Calculate altOfDay using rotation index
   const altOfDay = state.timbre.altPool.length > 0 ? 
@@ -1499,17 +1592,32 @@ function checkTimbreRescue(pc, timbre) {
 }
 
 function logTimbreBlockEnd() {
+  // Collect active rescues
+  const activeRescues = [];
+  if (state.timbre.rescue) {
+    const currentBlock = blockFromIndex(state.levelIndex);
+    for (const pc of Object.keys(state.timbre.rescue)) {
+      for (const timbre of Object.keys(state.timbre.rescue[pc])) {
+        const rescue = state.timbre.rescue[pc][timbre];
+        if (rescue.active && currentBlock <= rescue.untilBlock) {
+          activeRescues.push({ pc, timbre, untilBlock: rescue.untilBlock });
+        }
+      }
+    }
+  }
+  
   // Log block summary
   const altTimbre = state.timbre.altPool.length > 0 ? 
     state.timbre.altPool[state.timbre.rotationIndex % state.timbre.altPool.length] : null;
   
   state.timbre.history.push({
     ts: Date.now(),
-    blockIndex: state.currentBlock || 1,
+    blockIndex: blockFromIndex(state.levelIndex),
     mode: state.timbre.mode,
-    proportions: { ...state.timbre.currentProportions },
     chosen: state.timbre.chosen,
-    altOfDay: altTimbre
+    altOfDay: altTimbre,
+    proportions: { ...state.timbre.currentProportions },
+    activeRescues: activeRescues
   });
   
   save();
@@ -4819,9 +4927,13 @@ function selectOctaveForInBounds(pc) {
   const mix = state.oct.currentMix;
   const overrides = state.oct.perNoteOverrides[pc] || {};
   
+  // Check if we're in rescue mode for this PC
+  const activeRescue = findActiveRescueForPc(pc);
+  
   // Apply per-note override if active (bias toward center octave by 20%)
+  // OR apply rescue bias (also 20% toward center)
   let adjustedMix = {...mix};
-  if (overrides.active) {
+  if (overrides.active || activeRescue) {
     const centerOct = state.oct.center;
     const biasAmount = 0.20;
     
@@ -4831,7 +4943,12 @@ function selectOctaveForInBounds(pc) {
       adjustedMix[oct] *= scaleFactor;
     }
     adjustedMix[centerOct] += biasAmount;
-    console.log(`🎵 Octave override for ${pc}: biasing toward center (${centerOct})`, adjustedMix);
+    
+    if (activeRescue) {
+      console.log(`🎵 Rescue mode octave bias for ${pc}: biasing toward center (${centerOct})`, adjustedMix);
+    } else {
+      console.log(`🎵 Octave override for ${pc}: biasing toward center (${centerOct})`, adjustedMix);
+    }
   }
   
   // Sample from the adjusted mix
@@ -5830,6 +5947,7 @@ function finalizeGrade(args) {
     detuneMode: cur.detuneMode || (cur.oob ? 'oob' : 'anchor'),
     jlLevel: cur.jlLevel ?? null,
     timbreUsed: cur.timbre || state.audioType || 'sine',
+    timbre: cur.timbre || state.audioType || 'sine', // Add explicit timbre field as specified
     // Piano-specific octave tracking
     targetOctave: cur.octave ?? null,
     sourceOctave: (state.audioType === AUDIO_TYPES.PIANO) ? cur.octave : cur.octave, // For piano: sourceOctave = targetOctave (no remapping)
@@ -6043,6 +6161,9 @@ function advanceCheck(){
   
   // Log timbre block end for variety mode
   logTimbreBlockEnd();
+  
+  // Process per-timbre rescues at block boundary
+  processTimbreRescuesAtBlockBoundary(block);
   
   // Reset training block counters
   state.trainingBlockTrials = 0;
@@ -6725,6 +6846,9 @@ function selectDetune(pc, isOOB) {
   const mode = chooseDetuneMode(pc);
   const specs = JITTER_LEVELS[level];
   
+  // Check if we're in rescue mode for this PC
+  const activeRescue = findActiveRescueForPc(pc);
+  
   if (mode === 'anchor') {
     return {
       cents: 0,
@@ -6735,7 +6859,15 @@ function selectDetune(pc, isOOB) {
   
   if (mode === 'probe') {
     const sign = Math.random() < 0.5 ? -1 : 1;
-    const cents = sign * (25 + Math.random() * 15); // ±25..±40¢
+    let cents = sign * (25 + Math.random() * 15); // ±25..±40¢
+    
+    // During rescue: clamp to lower half of range
+    if (activeRescue) {
+      const absVal = Math.abs(cents);
+      const clampedAbs = Math.min(absVal, 25 + (15 * 0.5)); // Clamp to lower half
+      cents = sign * clampedAbs;
+    }
+    
     return {
       cents: cents,
       mode: 'probe',
@@ -6745,7 +6877,14 @@ function selectDetune(pc, isOOB) {
   
   // Jitter mode
   const sign = Math.random() < 0.5 ? -1 : 1;
-  const cents = sign * (specs.jitterMin + Math.random() * (specs.jitterMax - specs.jitterMin));
+  let jitterRange = specs.jitterMax - specs.jitterMin;
+  
+  // During rescue: use smaller jitter band (clamp to lower half of current JL range)
+  if (activeRescue) {
+    jitterRange *= 0.5; // Reduce to lower half
+  }
+  
+  const cents = sign * (specs.jitterMin + Math.random() * jitterRange);
   return {
     cents: cents,
     mode: 'jitter',
