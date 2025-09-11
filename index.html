@@ -1775,10 +1775,11 @@ function updateTrainerTimer() {
   if (timerInfo) {
     const minutesCompleted = state.daily.minutesCompleted || 0;
     const currentElapsedMs = state.session.elapsedMs || 0;
-    const currentMinutes = Math.floor(currentElapsedMs / 60000);
-    const totalMinutes = minutesCompleted + currentMinutes;
-    const remainingMinutes = Math.max(0, 30 - totalMinutes);
-    const remainingSeconds = Math.max(0, 60 - Math.floor((currentElapsedMs % 60000) / 1000));
+    
+    // Calculate total remaining time properly
+    const totalRemainingMs = Math.max(0, 30 * 60 * 1000 - (minutesCompleted * 60 * 1000 + currentElapsedMs));
+    const remainingMinutes = Math.floor(totalRemainingMs / 60000);
+    const remainingSeconds = Math.floor((totalRemainingMs % 60000) / 1000);
     
     if (remainingMinutes === 0 && remainingSeconds === 0) {
       timerInfo.textContent = 'Time up!';
@@ -1945,8 +1946,13 @@ function updateMenuSessionDisplay() {
     capInfo.textContent = '🎉 Daily goal achieved!';
     capInfo.style.background = 'var(--good)';
   } else {
-    const completed = state.daily.minutesCompleted || 0;
-    const remaining = Math.max(0, 30 - completed);
+    // Include current session elapsed time like updateMenuTimer() does
+    const minutesCompleted = state.daily.minutesCompleted || 0;
+    const currentElapsedMs = (state.session && state.session.startedAt) ? state.session.elapsedMs : 0;
+    const currentMinutes = Math.floor(currentElapsedMs / 60000);
+    const totalMinutes = minutesCompleted + currentMinutes;
+    const remaining = Math.max(0, 30 - totalMinutes);
+    
     capInfo.textContent = `Left: ${remaining}:00 of 30:00`;
     capInfo.style.background = '';
   }
