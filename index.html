@@ -2326,6 +2326,8 @@ function completeSessionWithLockout() {
   
   save();
 }
+
+function endTimeBlockBreak() {
   state.timeblock.activeMs = 0;
   state.timeblock.breakActive = false;
   state.timeblock.breakEndsAt = null;
@@ -3963,39 +3965,7 @@ function finishRecallReview() {
   }
 }
 
-
-          
-          if (hz && hz > 80 && hz < 800) {
-            frequencies.push(hz);
-          }
-        }
-        
-        if (elapsed < 2000) { // Record for 2 seconds
-          requestAnimationFrame(detectPitch);
-        } else {
-          stopRecording();
-        }
-      };
-      
-      requestAnimationFrame(detectPitch);
-      
-    } catch (error) {
-      console.error('Recording failed:', error);
-      button.textContent = 'Error - Try Again';
-      button.style.background = 'var(--bad)';
-      recording = false;
-    }
-  };
-  
-  const stopRecording = () => {
-    if (!recording) return;
-    
-    recording = false;
-    
-    // Show "Processing..." feedback immediately
-    button.textContent = 'Processing...';
-    button.style.background = 'var(--muted)';
-    button.disabled = true;
+// 2) Single entry point for starting training after recall
     
     // Stop capture per prompt: stop
     state.recall.capturing = false; 
@@ -6262,13 +6232,97 @@ async function nextTrial(forceNew=false){
         detuneMode = detuneInfo.mode;
         jlLevel = detuneInfo.jlLevel;
         
-        chosenOctave = selectOctaveForInBounds(truePc);
+// Octave mixing policy 3-5 with windowed gates (requirement 7)
+function selectOctaveForInBounds(pc) {
+  const blockIndex = state.trainingBlockIndex || 1;
+  const trialsInSet = state.trainingBlockTrials || 0;
+  
+  // Default center=4, neighbors=3&5
+  let centerProb = 0.9; // Default 90/10 split
+  
+  // Apply windowed gating based on in-bounds performance
+  const recentInBounds = state.trials.filter(t => !t.oob).slice(-20); // Last 20 in-bounds
+  
+  if (recentInBounds.length >= 12 && trialsInSet >= 8) {
+    const windowTrials = recentInBounds.slice(-12, -8); // 8-12 window
+    const accuracy = windowTrials.filter(t => t.correct).length / windowTrials.length;
+    const medianCents = computeMedianCents(windowTrials);
+    
+    if (accuracy >= 0.80 && Math.abs(medianCents) <= 15) {
+      centerProb = 0.7; // 70/30 split
+    }
+  }
+  
+  if (recentInBounds.length >= 20 && trialsInSet >= 16) {
+    const windowTrials = recentInBounds.slice(-20, -16); // 16-20 window  
+    const accuracy = windowTrials.filter(t => t.correct).length / windowTrials.length;
+    const medianCents = computeMedianCents(windowTrials);
+    
+    if (accuracy >= 0.85 && Math.abs(medianCents) <= 12) {
+      centerProb = 0.6; // 60/40 split
+    }
+  }
+  
+  // Per-note weak override: +20% center bias if this PC had recent issues
+  const pcRecent = recentInBounds.filter(t => t.truePc === pc).slice(-5);
+  if (pcRecent.length >= 3) {
+    const pcAcc = pcRecent.filter(t => t.correct).length / pcRecent.length;
+    if (pcAcc < 0.7) {
+      centerProb = Math.min(1.0, centerProb + 0.2);
+    }
+  }
+  
+  // Select octave based on probability
+  if (Math.random() < centerProb) {
+    return 4; // Center octave
+  } else {
+    // ~10% "octave surprise" within neighbor share
+    const neighbors = [3, 5];
+    if (Math.random() < 0.1) {
+      // Surprise - pick less common octave
+      return neighbors[Math.floor(Math.random() * neighbors.length)];
+    } else {
+      return neighbors[Math.floor(Math.random() * neighbors.length)];
+    }
+  }
+}
+
+// Helper function to compute median cents from trials
+function computeMedianCents(trials) {
+  const centsErrors = trials.filter(t => t.centsErr !== null).map(t => t.centsErr);
+  if (centsErrors.length === 0) return 0;
+  
+  centsErrors.sort((a, b) => a - b);
+  const mid = Math.floor(centsErrors.length / 2);
+  return centsErrors.length % 2 === 0 
+    ? (centsErrors[mid - 1] + centsErrors[mid]) / 2 
+    : centsErrors[mid];
+}
         currentNote = `${truePc}${chosenOctave}`;
       }
       
       // C) Freeze in state.current (REQUIRED for grading)
       state.meta.trialSeq = (state.meta.trialSeq || 0) + 1;
-      // Select timbre for this trial
+      // Variety mode selection with distribution (requirement 8)
+function selectTimbreForTrial(pc) {
+  const varietyMode = state.timbre?.mode === 'variety';
+  
+  if (!varietyMode) {
+    // Single mode - always use chosen timbre
+    return state.timbre?.chosen || AUDIO_TYPES.PIANO;
+  }
+  
+  // Variety mode: ~80% chosen / 20% alt with daily rotation
+  if (Math.random() < 0.8) {
+    return state.timbre.chosen || AUDIO_TYPES.PIANO;
+  } else {
+    // Select alt timbre with daily rotation
+    const altPool = state.timbre?.altPool || [AUDIO_TYPES.SINE, AUDIO_TYPES.GUITAR];
+    const rotationIndex = state.timbre?.rotationIndex || 0;
+    const dailyAlt = altPool[rotationIndex % altPool.length];
+    return dailyAlt;
+  }
+}
       const selectedTimbre = plannedOOB && state.lastInBoundsTimbre ? 
         state.lastInBoundsTimbre : // OOB mirrors in-bounds timbre
         selectTimbreForTrial(truePc); // Normal selection
@@ -6468,7 +6522,19 @@ function recordTrialStats(trial) {
     }
   }
   
-  // Update jitter statistics for in-bounds trials
+  // Per-trial metrics (requirement 10)
+  trial.detuneCents = currentDetuneCents; // Applied detune
+  trial.centsErr = null; // Will be filled if pitch detection available
+  trial.timbre = cur.timbre;
+  trial.targetOctave = cur.octave;
+  trial.jl = cur.jlLevel;
+  
+  // Try to compute cents error if we have pitch data
+  if (cur.truePc && trial.guessPc && correct) {
+    // For correct trials, we might have pitch deviation data
+    // This would require pitch detection during trial, which we don't have yet
+    // For now, set to null as specified
+  }
   if (!trial.oob && trial.truePc) {
     const trainedPcs = getTrainedPCs();
     if (trainedPcs.includes(trial.truePc)) {
@@ -6559,7 +6625,38 @@ function advanceCheck(){
   // Training Block completed - handle adaptive OOB
   // Call AFTER logger as specified in requirements
   logTrainingBlockOobData(block, 'boundary');
-  const adaptBoundary = adaptOobTargetAtTrainingBlockBoundary(block);
+// OOB adaptor - adjust target every 3 blocks (requirement 6)
+function adaptOobTargetAtTrainingBlockBoundary(block) {
+  if (block % 3 !== 0) return; // Only every 3 blocks
+  
+  // Compute last-60 in-bounds accuracy
+  const inBoundsTrials = state.trials.filter(t => !t.oob).slice(-60);
+  if (inBoundsTrials.length === 0) return;
+  
+  const correctTrials = inBoundsTrials.filter(t => t.correct);
+  const acc60 = correctTrials.length / inBoundsTrials.length;
+  
+  // Adjust target OOB% by ±3 points based on performance
+  let adjustment = 0;
+  if (acc60 > 0.85) {
+    adjustment = +3; // Increase difficulty
+  } else if (acc60 < 0.70) {
+    adjustment = -3; // Decrease difficulty
+  }
+  
+  // Update target and clamp to [5,35]
+  const oldTarget = state.oob?.targetPct || 0.15;
+  const newTarget = Math.max(0.05, Math.min(0.35, oldTarget + adjustment/100));
+  
+  if (state.oob) {
+    state.oob.targetPct = newTarget;
+  }
+  
+  // Log the adaptation
+  console.log(`OOB adaptor: Block ${block}, acc60=${(acc60*100).toFixed(1)}%, ${oldTarget*100}% → ${newTarget*100}%`);
+  
+  save();
+}
   updateOobHealthCheckTrainingBlock();
   updateOobStatusPill();
   
@@ -7233,34 +7330,63 @@ function chooseDetuneMode(pc) {
 // Export chooseDetuneMode to window for debugging and validation
 window.chooseDetuneMode = chooseDetuneMode;
 
-// Select detune mode and value for a trial
+// Select detune mode and value for a trial (updated for requirements 3&4)
 function selectDetune(pc, isOOB) {
-  // OOB trials always get no detune
+  // OOB trials get micro-detune only (requirement 4)
   if (isOOB) {
+    // Draw from Gaussian(μ=0, σ≈2–3¢), clamp to ±5¢
+    const sigma = 2.5; // cents
+    const gaussian = () => {
+      let u = 0, v = 0;
+      while(u === 0) u = Math.random(); // Converting [0,1) to (0,1)
+      while(v === 0) v = Math.random();
+      return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+    };
+    
+    const rawDetune = gaussian() * sigma;
+    const clampedDetune = Math.max(-5, Math.min(5, rawDetune));
+    
     return {
-      cents: 0,
+      cents: clampedDetune,
       mode: 'oob',
       jlLevel: null
     };
   }
   
-  // Get jitter level and choose mode
-  const level = getJitterLevel(pc);
+  // In-bounds: use JL system
+  const jitterInfo = getJitterInfo(pc, { isOOB: false });
   const mode = chooseDetuneMode(pc);
-  const specs = JITTER_LEVELS[level];
-  
-  // Check if we're in rescue mode for this PC
-  const activeRescue = findActiveRescueForPc(pc);
   
   if (mode === 'anchor') {
     return {
       cents: 0,
       mode: 'anchor',
-      jlLevel: level
+      jlLevel: jitterInfo.level
     };
   }
   
   if (mode === 'probe') {
+    // Boundary probe logic (only for in-bounds)
+    const sign = Math.random() < 0.5 ? -1 : 1;
+    const probeCents = sign * (40 + Math.random() * 10); // ±40-50¢
+    return {
+      cents: probeCents,
+      mode: 'probe',
+      jlLevel: jitterInfo.level
+    };
+  }
+  
+  // Jitter mode
+  const sign = Math.random() < 0.5 ? -1 : 1;
+  const jitterRange = jitterInfo.jitterMax - jitterInfo.jitterMin;
+  const cents = sign * (jitterInfo.jitterMin + Math.random() * jitterRange);
+  
+  return {
+    cents: cents,
+    mode: 'jitter',
+    jlLevel: jitterInfo.level
+  };
+}
     const sign = Math.random() < 0.5 ? -1 : 1;
     let cents = sign * (25 + Math.random() * 15); // ±25..±40¢
     
