@@ -182,7 +182,7 @@
       <button id="startAssessment">📊 Assessment Test</button>
       <button id="viewTracker">📊 Track</button>
       <button id="startWarmRecall">🔥 Warm Recall</button>
-      <button id="playFlappy">🐤 Flappy (lockout only)</button>
+      <button id="playFlappy">🐤 Flappy (breaks/lockout only)</button>
       <button id="menuReset">⟲ Reset (factory)</button>
     </div>
 
@@ -1664,6 +1664,15 @@ function getTodayDateString() {
   return new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD format in local time
 }
 
+// Fix B.1: Helper function to get next local midnight as ISO string
+function nextLocalMidnightISO() {
+  const now = new Date();
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  tomorrow.setHours(0, 0, 0, 0); // Set to midnight
+  return tomorrow.toISOString();
+}
+
 /* ------------------ DAILY SESSION MANAGEMENT ------------------ */
 let sessionTimer = null;
 
@@ -1750,6 +1759,8 @@ function updateAllTimerUI() {
       state.daily.minutesCompleted = Math.floor(elapsed / 60000);
       if (state.daily.minutesCompleted >= 30 && !state.daily.completedAt) {
         state.daily.completedAt = Date.now();
+        // Fix B.1: Set lockoutUntil when session completes (30 minutes reached)
+        state.session.lockoutUntil = nextLocalMidnightISO();
       }
     }
     
@@ -1883,6 +1894,9 @@ function completeDailySession() {
   // Session fully complete - 30 minutes done
   state.daily.completedAt = Date.now();
   state.daily.minutesCompleted = 30;
+  
+  // Fix B.1: Set lockoutUntil when session completes (30 minutes reached)
+  state.session.lockoutUntil = nextLocalMidnightISO();
   
   // Stop session timer
   if (sessionTimer) {
@@ -2609,7 +2623,22 @@ function updateCapsUI(){
     else lp.style.display='none';
   }
   
-  const pf = byId('playFlappy'); if(pf) pf.disabled = !(locked || isDailyLocked());
+  // Fix B.2: Compute new gating flag for flappy availability  
+  const inBreak = !!state.session.inBreak;
+  const isLockedOut = !!state.session.lockoutUntil && (Date.now() < new Date(state.session.lockoutUntil).getTime());
+  const canPlayFlappy = inBreak || isLockedOut;
+
+  const pf = byId('playFlappy'); 
+  if(pf) {
+    pf.disabled = !canPlayFlappy;
+    // Fix B.3: Update button text and message as specified
+    if (canPlayFlappy) {
+      pf.textContent = '🐤 Play Flappy';
+    } else {
+      pf.textContent = '🐤 Flappy (unavailable)';
+      // Note: Alert message is handled in openFlappyFromMenu() with exact text from spec
+    }
+  }
   
   // Update warm recall button state
   const wr = byId('startWarmRecall'); 
@@ -3995,35 +4024,130 @@ function renderRecallReviewPhase() {
           ${reviewContent}
         </div>
       </div>
-      <div style="display:flex;justify-content:space-between;gap:12px">
-        <button id="btnRecallPrev" style="background:var(--muted)" 
+      <div style="display:flex;justify-content:space-between;gap:12px;pointer-events:auto">
+        <button data-recall-action="prev" style="background:var(--muted);pointer-events:auto" 
           ${reviewIndex === 0 ? 'disabled' : ''}>◀ Back</button>
         <div style="flex:1"></div>
-        <button id="btnRecallNext" style="background:var(--good)">
+        <button data-recall-action="next" style="background:var(--good);pointer-events:auto">
           ${reviewIndex < reviewItems.length - 1 ? 'Next ▶' : 'Done'}
+        </button>
+        <button data-recall-action="finish" style="background:var(--accent);color:var(--bg);font-weight:700;margin-left:8px;display:none;pointer-events:auto">
+          Finish
         </button>
       </div>
     </div>
   `;
   
-  // 4) Wire Next/Back buttons to increment/decrement reviewIndex and call updateRecallReviewUI
-  safe('btnRecallPrev', el => el.onclick = () => {
-    if (state.recall.reviewIndex > 0) {
-      state.recall.reviewIndex--;
-      currentRecallSession.reviewIndex = state.recall.reviewIndex; // Keep in sync
+  // Set up delegated click handlers for recall buttons (avoid stale handlers)
+  setupRecallDelegatedHandlers(modal);
+}
+}
+
+// Fix A.1: Set up delegated click handlers for recall buttons (avoid stale handlers)
+function setupRecallDelegatedHandlers(modal) {
+  // Remove any existing handlers to avoid duplicates
+  modal.removeEventListener('click', handleRecallDelegatedClick);
+  
+  // Add single delegated handler
+  modal.addEventListener('click', handleRecallDelegatedClick);
+}
+
+function handleRecallDelegatedClick(e) {
+  const btn = e.target.closest('[data-recall-action]');
+  if (!btn) return;
+  
+  const action = btn.dataset.recallAction; // 'next' | 'prev' | 'finish'
+  if (!currentRecallSession) return;
+  
+  const reviewItems = state.recall.review || currentRecallSession.takes;
+  const currentIndex = state.recall.reviewIndex !== undefined ? state.recall.reviewIndex : currentRecallSession.reviewIndex;
+  
+  if (action === 'prev') {
+    if (currentIndex > 0) {
+      state.recall.reviewIndex = currentIndex - 1;
+      currentRecallSession.reviewIndex = state.recall.reviewIndex;
       updateRecallReviewContent();
     }
-  });
-  
-  safe('btnRecallNext', el => el.onclick = () => {
-    if (state.recall.reviewIndex < reviewItems.length - 1) {
-      state.recall.reviewIndex++;
-      currentRecallSession.reviewIndex = state.recall.reviewIndex; // Keep in sync
+  } else if (action === 'next') {
+    if (currentIndex < reviewItems.length - 1) {
+      state.recall.reviewIndex = currentIndex + 1;
+      currentRecallSession.reviewIndex = state.recall.reviewIndex;
       updateRecallReviewContent();
     } else {
+      // Last item → show final summary or finish
       finishRecallReview();
     }
-  });
+  } else if (action === 'finish') {
+    // Fix A.2: Persist results if not already persisted
+    persistRecallResults(currentRecallSession);
+    closeRecallUI();
+  }
+}
+
+// Fix A.2: Implement persistRecallResults to save to state.daily.recall
+function persistRecallResults(recallSession) {
+  if (!recallSession || !recallSession.takes) return;
+  
+  const todayISO = getTodayDateString();
+  
+  // Initialize state.daily if needed
+  if (!state.daily) {
+    state.daily = {
+      date: todayISO,
+      minutesCompleted: 0,
+      completedAt: null,
+      recall: []
+    };
+  }
+  
+  // Initialize recall array if needed
+  if (!state.daily.recall) {
+    state.daily.recall = [];
+  }
+  
+  // Guard against duplicate pushing - check if this tag+date already exists
+  const existingEntry = state.daily.recall.find(entry => 
+    entry.date === todayISO && entry.tag === recallSession.type
+  );
+  
+  if (existingEntry) {
+    console.log(`Recall results for ${recallSession.type} on ${todayISO} already persisted`);
+    return;
+  }
+  
+  // Add each result to state.daily.recall
+  for (const result of recallSession.takes) {
+    if (result.analysis) {
+      state.daily.recall.push({
+        date: todayISO,
+        tag: recallSession.type, // 'cold' or 'warm'
+        pc: result.pitchClass,
+        medianCents: result.analysis.medianCents,
+        sdCents: result.analysis.sdCents,
+        verdict: result.analysis.verdict
+      });
+    }
+  }
+  
+  save();
+  console.log(`Persisted ${recallSession.takes.length} recall results for ${recallSession.type}`);
+}
+
+function closeRecallUI() {
+  // Hide both cold and warm recall modals
+  const coldModal = byId('coldRecallModal');
+  const warmModal = byId('warmRecallModal');
+  
+  if (coldModal) coldModal.style.display = 'none';
+  if (warmModal) warmModal.style.display = 'none';
+  
+  // Clear current session
+  currentRecallSession = null;
+  
+  // Return to main menu
+  showScreen('menuScreen');
+  updateCapsUI();
+}
 }
 
 // Update only the content and button states without recreating the DOM
@@ -7086,14 +7210,21 @@ window.chooseDetuneMode = chooseDetuneMode;
 
 // Select detune mode and value for a trial
 function selectDetune(pc, isOOB) {
-  // OOB trials always get no detune
+  // Fix C.1: OOB micro-detune only (±5¢), no probes
   if (isOOB) {
+    // Micro detune around 0 with clamp
+    const g = (Math.random() * 2 - 1) * 3; // Simple uniform: -3 to +3 base range
+    const cents = Math.max(-5, Math.min(5, g)); // Clamp ±5¢
     return {
-      cents: 0,
+      cents: cents,
       mode: 'oob',
-      jlLevel: null
+      jlLevel: null,
+      reason: 'oob'
     };
   }
+  
+  // NOTE: OOB does NOT route into boundary probe logic at all.
+  // Keep existing in-bounds jitter/probe code unchanged below.
   
   // Get jitter level and choose mode
   const level = getJitterLevel(pc);
@@ -7533,13 +7664,16 @@ let fCtx, flappyRAF=null, running=false, score=0, pipes=[], bird, pipeTimer=0, l
 const FLAPPY = { gravity:900, flap:-380, baseSpeed:140, maxSpeed:260, speed:140, baseGap:140, gap:140, introPipes:5, introExtra:60, spawnEvery:1.20, width:52 };
 
 function openFlappyFromMenu(){ 
-  if(isLocked()) {
+  // Fix B.2: Use new gating logic
+  const inBreak = !!state.session.inBreak;
+  const isLockedOut = !!state.session.lockoutUntil && (Date.now() < new Date(state.session.lockoutUntil).getTime());
+  const canPlayFlappy = inBreak || isLockedOut;
+  
+  if(canPlayFlappy) {
     openFlappyModal(); 
-  } else if (state.timeblock && state.timeblock.breakActive && sessionActive) {
-    // Allow reopening flappy only during 60-second TimeBlock breaks
-    openFlappyModal();
   } else {
-    alert('Flappy is only available during lockout or 60-second training breaks.'); 
+    // Fix B.3: Use exact message from specification
+    alert('Flappy is available during 60-second breaks and after you complete today\'s training.'); 
   }
 }
 function openFlappyModal(){ 
