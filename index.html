@@ -2815,19 +2815,16 @@ async function preloadFlappyAudio() {
 }
 
 // E) Flappy sound function
-function playFlappySound() {
+async function playFlappySound() {
   if (state.flappyMuted) return;
   
   try {
-    const ctx = getCtx();
-    if (FLAPPY_AUDIO_BUFFER) {
-      const src = ctx.createBufferSource();
-      src.buffer = FLAPPY_AUDIO_BUFFER;
-      const g = ctx.createGain(); 
-      g.gain.value = 0.5; // Reasonable volume
-      src.connect(g).connect(ctx.destination);
-      src.start();
-    }
+    const url = 'audio/flappy.mp3'; // existing asset
+    const buf = await loadBuffer(url); // reuse existing loader
+    const src = getCtx().createBufferSource();
+    src.buffer = buf; 
+    src.connect(getCtx().destination); 
+    src.start();
   } catch (e) {
     console.warn('Could not play flappy sound:', e);
   }
@@ -4028,6 +4025,18 @@ function startRecallReview() {
   // Save all results to state
   for (const take of currentRecallSession.takes) {
     saveRecallData(currentRecallSession.type, take);
+    
+    // Add to analytics series for Progress tracker
+    state.analytics ||= {};
+    state.analytics.recallSeries ||= [];
+    state.analytics.recallSeries.push({
+      date: new Date().toISOString(),
+      day: state.daily?.ymd,
+      tag: currentRecallSession.type,     // 'cold' or 'warm'
+      pc: take.pc,                        // 'A','Bb',...
+      cents: take.medianCents,            // signed median cents error
+      accPct: recallAccPct(take.medianCents)
+    });
   }
   
   renderRecallReviewPhase();
