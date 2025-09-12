@@ -284,6 +284,18 @@
       </div>
       <canvas id="progressCanvas" width="1000" height="300" style="width:100%;height:auto;border-radius:12px;background:var(--card);border:1px solid var(--muted)"></canvas>
     </div>
+
+    <!-- Pitch Recall Chart -->
+    <section id="recall-progress-card" class="card" style="margin-top:14px">
+      <header><h3>🎯 Pitch Recall (Cold / Warm)</h3></header>
+      <div class="pc-chip-row" id="recall-pitch-chips" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"></div>
+      <canvas id="recall-progress-chart" width="1000" height="300" style="width:100%;height:auto;border-radius:12px;background:var(--card);border:1px solid var(--muted)"></canvas>
+      <div class="mini-legend" style="display:flex;gap:12px;align-items:center;font-size:13px;opacity:.9;margin-top:8px">
+        <span class="dot" style="width:12px;height:12px;border-radius:50%;background:#3b82f6"></span> Cold
+        <span class="dot" style="width:12px;height:12px;border-radius:50%;background:#eab308;margin-left:12px"></span> Warm
+        <span id="recall-latest" style="margin-left:12px;font-weight:600"></span>
+      </div>
+    </section>
   </div>
 
   <!-- Assessment Tracker Screen -->
@@ -1345,6 +1357,21 @@ if (state.daily && state.daily.date !== getTodayDateString()) {
       state.timbre.rotationIndex = (state.timbre.rotationIndex + 1) % state.timbre.altPool.length;
     }
   }
+  save();
+}
+
+// Migration for UI state for recall chart
+if (!state.ui) {
+  state.ui = {};
+  save();
+}
+
+// Initialize recall chart UI state
+if (!state.ui.recallPitch) {
+  // Default to first trained pitch if any exist, otherwise 'A'
+  const currentSet = setFromIndex(state.levelIndex);
+  const trainedPitches = trainedSet(currentSet);
+  state.ui.recallPitch = trainedPitches.length > 0 ? trainedPitches[0] : 'A';
   save();
 }
 
@@ -7546,8 +7573,217 @@ function populatePitchSelect(){
   sel.onchange = ()=> drawChart();
   const gran = byId('granularitySelect'); if(gran){ gran.onchange = ()=> drawChart(); gran.value='WEEKLY'; }
   
+  // Render recall chart components
+  renderRecallPitchChips();
+  drawRecallChart();
+  
   // Update variety mode UI when menu is shown
   updateVarietyModeUI();
+}
+
+/* ------------------ RECALL CHART FUNCTIONS ------------------ */
+
+// Accuracy mapping function for recall (reuse existing if available)
+function recallAccPct(centsErr) {
+  const a = Math.abs(centsErr);
+  if (a <= 5) return 100;
+  const MAX = 600; // tritone boundary
+  const pct = 100 * (1 - (a - 5)/(MAX - 5));
+  return Math.max(0, Math.min(100, Math.round(pct)));
+}
+
+// Render pitch class chips for recall chart
+function renderRecallPitchChips() {
+  const container = byId('recall-pitch-chips');
+  if (!container) return;
+  
+  container.innerHTML = '';
+  const allPCs = ['A', 'Bb', 'B', 'C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab'];
+  
+  // Get currently trained pitches for visual highlighting
+  const currentSet = setFromIndex(state.levelIndex);
+  const trainedPitches = trainedSet(currentSet);
+  
+  allPCs.forEach(pc => {
+    const chip = document.createElement('button');
+    chip.textContent = pcLabel(pc);
+    chip.style.cssText = 'padding:6px 12px;margin:0;border-radius:16px;border:1px solid var(--muted);font-size:12px;cursor:pointer;';
+    
+    // Highlight if trained
+    if (trainedPitches.includes(pc)) {
+      chip.style.background = 'var(--muted)';
+      chip.style.color = 'var(--text)';
+    } else {
+      chip.style.background = 'var(--muted2)';
+      chip.style.color = 'var(--neutral)';
+    }
+    
+    // Highlight if selected
+    if (pc === state.ui.recallPitch) {
+      chip.style.background = 'var(--accent)';
+      chip.style.color = 'var(--bg)';
+      chip.style.fontWeight = '600';
+    }
+    
+    chip.onclick = () => {
+      state.ui.recallPitch = pc;
+      save();
+      renderRecallPitchChips(); // Re-render chips
+      drawRecallChart(); // Re-draw chart
+    };
+    
+    container.appendChild(chip);
+  });
+}
+
+// Draw the recall chart
+function drawRecallChart() {
+  const canvas = byId('recall-progress-chart');
+  if (!canvas) return;
+  
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  
+  const P = {l: 56, r: 24, t: 16, b: 28};
+  const AX = P.l, AY = P.t, AW = W - P.l - P.r, AH = H - P.t - P.b;
+  
+  // Colors
+  const colCard = getComputedStyle(document.documentElement).getPropertyValue('--card') || '#1e293b';
+  const colMuted = getComputedStyle(document.documentElement).getPropertyValue('--muted') || '#334155';
+  const colText = getComputedStyle(document.documentElement).getPropertyValue('--text') || '#e5e7eb';
+  const colBlue = '#3b82f6'; // Cold
+  const colYellow = '#eab308'; // Warm
+  
+  ctx.fillStyle = colCard;
+  ctx.fillRect(0, 0, W, H);
+  
+  // Get recall data for selected pitch
+  const selectedPc = state.ui.recallPitch || 'A';
+  const rows = (state.analytics?.recallSeries || []).filter(p => p.pc === selectedPc);
+  
+  if (rows.length === 0) {
+    // Show empty state
+    ctx.fillStyle = colText;
+    ctx.font = '14px Fredoka, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(`No recall data for ${pcLabel(selectedPc)} yet.`, W / 2, H / 2);
+    // Clear latest values when no data
+    updateRecallLatestValues([], [], selectedPc);
+    return;
+  }
+  
+  // Filter and limit to last 30 entries per series
+  const cold = rows.filter(p => p.tag === 'cold').slice(-30);
+  const warm = rows.filter(p => p.tag === 'warm').slice(-30);
+  
+  if (cold.length === 0 && warm.length === 0) {
+    ctx.fillStyle = colText;
+    ctx.font = '14px Fredoka, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(`No recall data for ${pcLabel(selectedPc)} yet.`, W / 2, H / 2);
+    // Clear latest values when no data
+    updateRecallLatestValues([], [], selectedPc);
+    return;
+  }
+  
+  // Combine data points for x-axis scaling
+  const allPoints = [...cold, ...warm];
+  const dates = allPoints.map(p => new Date(p.date).getTime()).sort();
+  const minDate = dates[0];
+  const maxDate = dates[dates.length - 1];
+  const dateRange = maxDate - minDate || 86400000; // At least 1 day range
+  
+  // Scales
+  const xScale = (date) => AX + ((date - minDate) / dateRange) * AW;
+  const yScale = (pct) => AY + AH - (pct / 100) * AH;
+  
+  // Draw Y grid and labels
+  ctx.strokeStyle = colMuted;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let y = 0; y <= 100; y += 20) {
+    const yPos = yScale(y);
+    ctx.moveTo(AX, yPos);
+    ctx.lineTo(AX + AW, yPos);
+  }
+  ctx.stroke();
+  
+  ctx.fillStyle = colText;
+  ctx.font = '12px system-ui,sans-serif';
+  ctx.textAlign = 'right';
+  for (let y = 0; y <= 100; y += 20) {
+    const yPos = yScale(y) + 4;
+    ctx.fillText(String(y) + '%', AX - 8, yPos);
+  }
+  
+  // Draw lines and dots for Cold (blue) and Warm (yellow)
+  if (cold.length > 0) {
+    const coldPts = cold.map(p => ({
+      x: new Date(p.date).getTime(),
+      y: p.accPct
+    }));
+    drawLine(ctx, coldPts, colBlue, xScale, yScale);
+    coldPts.forEach(p => drawDot(ctx, xScale(p.x), yScale(p.y), colBlue, 4));
+  }
+  
+  if (warm.length > 0) {
+    const warmPts = warm.map(p => ({
+      x: new Date(p.date).getTime(),
+      y: p.accPct
+    }));
+    drawLine(ctx, warmPts, colYellow, xScale, yScale);
+    warmPts.forEach(p => drawDot(ctx, xScale(p.x), yScale(p.y), colYellow, 4));
+  }
+  
+  // Update latest values
+  updateRecallLatestValues(cold, warm, selectedPc);
+  
+  // Chart title
+  ctx.fillStyle = colText;
+  ctx.font = '13px system-ui,sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(`Pitch Recall: ${pcLabel(selectedPc)}`, AX, AY - 2);
+}
+
+// Update latest values display
+function updateRecallLatestValues(cold, warm, pc) {
+  const latestEl = byId('recall-latest');
+  if (!latestEl) return;
+  
+  let latestText = '';
+  
+  if (cold.length > 0 || warm.length > 0) {
+    const parts = [];
+    
+    if (cold.length > 0) {
+      const latest = cold[cold.length - 1];
+      const cents = latest.cents || 0;
+      const sign = cents >= 0 ? '+' : '';
+      parts.push(`Cold: ${latest.accPct}% (${sign}${Math.round(cents)}¢)`);
+    }
+    
+    if (warm.length > 0) {
+      const latest = warm[warm.length - 1];
+      const cents = latest.cents || 0;
+      const sign = cents >= 0 ? '+' : '';
+      parts.push(`Warm: ${latest.accPct}% (${sign}${Math.round(cents)}¢)`);
+    }
+    
+    if (parts.length > 0) {
+      // Get most recent date
+      const allDates = [];
+      if (cold.length > 0) allDates.push(new Date(cold[cold.length - 1].date));
+      if (warm.length > 0) allDates.push(new Date(warm[warm.length - 1].date));
+      const mostRecent = new Date(Math.max(...allDates));
+      const dateStr = mostRecent.toISOString().split('T')[0];
+      
+      latestText = `Latest — ${parts.join(', ')} on ${dateStr}`;
+    }
+  }
+  // If no data, latestText remains empty string, which will clear the display
+  
+  latestEl.textContent = latestText;
 }
 
 /* ------------------ TUTORIAL PAGER ------------------ */
@@ -8518,7 +8754,7 @@ window.qaAnalyzeDetune = function(last = 200) {
 
 /* ------------------ INIT ------------------ */
 window.addEventListener('load', wireOnce);
-window.addEventListener('resize', ()=>{ try{ drawChart(); }catch(_){ }});
+window.addEventListener('resize', ()=>{ try{ drawChart(); drawRecallChart(); }catch(_){ }});
 </script>
 </body>
 </html>
