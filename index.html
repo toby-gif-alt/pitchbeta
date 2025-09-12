@@ -4003,7 +4003,6 @@ function finishRecallReview() {
       // Re-render UI
       renderRecallCapturePhase();
     }, 800); // 800ms delay to show completion feedback
-  };
   
   button.onmousedown = (e) => {
     e.preventDefault();
@@ -4025,6 +4024,8 @@ function finishRecallReview() {
     e.preventDefault(); 
     if (recording) stopRecording(); 
   };
+  
+  }; // End stopRecording function
   
   return button;
 }
@@ -7385,39 +7386,6 @@ function selectDetune(pc, isOOB) {
     cents: cents,
     mode: 'jitter',
     jlLevel: jitterInfo.level
-  };
-}
-    const sign = Math.random() < 0.5 ? -1 : 1;
-    let cents = sign * (25 + Math.random() * 15); // ±25..±40¢
-    
-    // During rescue: clamp to lower half of range
-    if (activeRescue) {
-      const absVal = Math.abs(cents);
-      const clampedAbs = Math.min(absVal, 25 + (15 * 0.5)); // Clamp to lower half
-      cents = sign * clampedAbs;
-    }
-    
-    return {
-      cents: cents,
-      mode: 'probe',
-      jlLevel: level
-    };
-  }
-  
-  // Jitter mode
-  const sign = Math.random() < 0.5 ? -1 : 1;
-  let jitterRange = specs.jitterMax - specs.jitterMin;
-  
-  // During rescue: use smaller jitter band (clamp to lower half of current JL range)
-  if (activeRescue) {
-    jitterRange *= 0.5; // Reduce to lower half
-  }
-  
-  const cents = sign * (specs.jitterMin + Math.random() * jitterRange);
-  return {
-    cents: cents,
-    mode: 'jitter',
-    jlLevel: level
   };
 }
 
