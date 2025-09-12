@@ -256,8 +256,9 @@
     <div class="card" id="recallCard" style="margin-top:14px">
       <h3>🎯 Recall History</h3>
       <div style="margin-bottom:8px">
-        <button id="btnExportRecall" style="background:var(--accent);color:var(--bg);font-weight:700;margin-right:8px">📄 Export Recall CSV</button>
-        <span style="opacity:0.7;font-size:13px">Today's cold/warm pitch recall results</span>
+        <!-- CSV export removed - recall data now shown on main tracker chart -->
+        <!-- <button id="btnExportRecall" style="background:var(--accent);color:var(--bg);font-weight:700;margin-right:8px">📄 Export Recall CSV</button> -->
+        <span style="opacity:0.7;font-size:13px">Today's cold/warm pitch recall results (also shown on tracker chart)</span>
       </div>
       <div id="recallHistoryToday" style="border:1px solid var(--muted);border-radius:12px;padding:12px;background:var(--card);min-height:80px">
         <p id="recallHistoryEmpty" style="opacity:0.7;text-align:center;margin:20px 0">No recall data for today</p>
@@ -294,9 +295,11 @@
     </div>
     
     <div style="margin:20px 0">
-      <div id="trackerLegend" style="display:flex;gap:12px;align-items:center;font-size:13px;opacity:.9;margin-bottom:12px">
+      <div id="trackerLegend" style="display:flex;gap:12px;align-items:center;font-size:13px;opacity:.9;margin-bottom:12px;flex-wrap:wrap">
         <span class="legendDot" style="background:var(--good)"></span> <span>Exact Correct %</span>
         <span class="legendDot" style="background:var(--accent);margin-left:12px"></span> <span>Within ±1 semitone %</span>
+        <span class="legendDot" style="background:#3b82f6;margin-left:12px"></span> <span>Cold Recall %</span>
+        <span class="legendDot" style="background:#eab308;margin-left:12px"></span> <span>Warm Recall %</span>
       </div>
       <canvas id="trackerCanvas" width="1000" height="300" style="width:100%;height:auto;border-radius:12px;background:var(--card);border:1px solid var(--muted)"></canvas>
     </div>
@@ -1245,10 +1248,15 @@ if (!state.session) {
 }
 
 if (!state.daily) {
+  const ymd = todaysLocalYmd();
   state.daily = {
+    ymd,
     date: getTodayDateString(), // YYYY-MM-DD format
     minutesCompleted: 0,        // total minutes completed today (0..30)
-    completedAt: null           // timestamp when 30 min reached, null if not complete
+    completedAt: null,          // timestamp when 30 min reached, null if not complete
+    didCold: false,            // daily cold recall completion flag
+    didWarm: false,            // daily warm recall completion flag
+    recall: []                 // recall results for today
   };
   save();
 }
@@ -1296,12 +1304,29 @@ if (typeof state.warmRecallPending === 'undefined') {
   save();
 }
 
-// Reset daily progress if date has changed (date rollover)
+// Migration for daily recall tracking flags
+if (state.daily && (typeof state.daily.didCold === 'undefined' || typeof state.daily.didWarm === 'undefined')) {
+  const ymd = todaysLocalYmd();
+  state.daily.ymd = ymd;
+  state.daily.didCold = false;
+  state.daily.didWarm = false;
+  if (!state.daily.recall) {
+    state.daily.recall = [];
+  }
+  save();
+}
+
+// Reset daily progress if date has changed (date rollover)  
 if (state.daily && state.daily.date !== getTodayDateString()) {
+  const ymd = todaysLocalYmd();
   state.daily = {
+    ymd,
     date: getTodayDateString(),
     minutesCompleted: 0,
-    completedAt: null
+    completedAt: null,
+    didCold: false,
+    didWarm: false,
+    recall: []
   };
   // Reset session state on date rollover
   state.session = {
@@ -1662,6 +1687,12 @@ function getCurrentBreakDuration() {
 
 function getTodayDateString() {
   return new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD format in local time
+}
+
+// Helper function for daily cold recall system
+function todaysLocalYmd() {
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 }
 
 // Fix B.1: Helper function to get next local midnight as ISO string
@@ -3226,6 +3257,15 @@ function getTodayKey() {
   return today.toISOString().split('T')[0]; // YYYY-MM-DD format
 }
 
+// Calculate recall accuracy percentage from signed cents error
+function recallAccPct(centsErr) {
+  const a = Math.abs(centsErr);
+  if (a <= 5) return 100;             // perfect window
+  const MAX = 600;                     // tritone = "most opposite"
+  const pct = 100 * (1 - (a - 5)/(MAX - 5));
+  return Math.max(0, Math.min(100, Math.round(pct)));
+}
+
 // Get trained pitch classes for current session
 function getTrainedPCs() {
   const setSize = setFromIndex(state.levelIndex);
@@ -4114,9 +4154,14 @@ function persistRecallResults(recallSession) {
     return;
   }
   
-  // Add each result to state.daily.recall
+  // Initialize analytics if needed
+  state.analytics = state.analytics || {};
+  state.analytics.recallSeries = state.analytics.recallSeries || [];
+  
+  // Add each result to state.daily.recall and tracker
   for (const result of recallSession.takes) {
     if (result.analysis) {
+      // Save to daily recall data
       state.daily.recall.push({
         date: todayISO,
         tag: recallSession.type, // 'cold' or 'warm'
@@ -4124,6 +4169,17 @@ function persistRecallResults(recallSession) {
         medianCents: result.analysis.medianCents,
         sdCents: result.analysis.sdCents,
         verdict: result.analysis.verdict
+      });
+      
+      // Compute accuracy and save to tracker
+      const accPct = recallAccPct(result.analysis.medianCents);
+      state.analytics.recallSeries.push({
+        date: new Date().toISOString(),
+        day: state.daily.ymd,
+        tag: recallSession.type,              // 'cold' or 'warm'
+        pc: result.pitchClass,
+        accPct,
+        cents: result.analysis.medianCents
       });
     }
   }
@@ -4298,6 +4354,14 @@ function finishRecallReview() {
   
   // Update display
   updateRecallDisplay();
+  
+  // Set completion flags
+  if (currentRecallSession.type === 'cold') {
+    state.daily.didCold = true;
+  } else {
+    state.daily.didWarm = true;
+  }
+  save();
   
   // Close modal and continue
   if (currentRecallSession.type === 'cold') {
@@ -6092,19 +6156,38 @@ function drawTrackerChart() {
   ctx.fillRect(0, 0, W, H);
   
   const scores = state.assessmentScores || [];
-  if (scores.length === 0) {
+  const recallSeries = state.analytics?.recallSeries || [];
+  
+  if (scores.length === 0 && recallSeries.length === 0) {
     ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text') || '#e5e7eb';
     ctx.font = '14px Fredoka, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('No assessment data yet', W / 2, H / 2);
+    ctx.fillText('No assessment or recall data yet', W / 2, H / 2);
     return;
   }
   
-  // Sort by date
+  // Sort assessment scores by date
   const sortedScores = [...scores].sort((a, b) => a.date - b.date);
   
-  const maxTests = Math.max(10, sortedScores.length);
-  const xScale = (i) => AX + (i / (maxTests - 1)) * AW;
+  // Build cold and warm recall arrays sorted by date
+  const coldRecall = recallSeries.filter(p => p.tag === 'cold').sort((a, b) => new Date(a.date) - new Date(b.date));
+  const warmRecall = recallSeries.filter(p => p.tag === 'warm').sort((a, b) => new Date(a.date) - new Date(b.date));
+  
+  // Find the range of all data points for x-axis scaling
+  const allDataPoints = [
+    ...sortedScores.map(s => s.date),
+    ...coldRecall.map(r => new Date(r.date).getTime()),
+    ...warmRecall.map(r => new Date(r.date).getTime())
+  ].sort();
+  
+  const maxTests = Math.max(10, allDataPoints.length);
+  const xScale = (date) => {
+    if (allDataPoints.length <= 1) return AX + AW / 2;
+    const minDate = allDataPoints[0];
+    const maxDate = allDataPoints[allDataPoints.length - 1];
+    if (maxDate === minDate) return AX + AW / 2;
+    return AX + ((date - minDate) / (maxDate - minDate)) * AW;
+  };
   const yScale = (pct) => AY + AH - (pct / 100) * AH;
   
   // Draw grid lines
@@ -6135,6 +6218,7 @@ function drawTrackerChart() {
     ctx.fillText(`${i}%`, AX - 8, yScale(i) + 4);
   }
   
+  // Draw assessment scores lines (if more than 1 point)
   if (sortedScores.length > 1) {
     // Draw exact scores line
     const exactColor = getComputedStyle(document.documentElement).getPropertyValue('--good') || '#16a34a';
@@ -6142,7 +6226,7 @@ function drawTrackerChart() {
     ctx.strokeStyle = exactColor;
     ctx.lineWidth = 3;
     sortedScores.forEach((score, i) => {
-      const x = xScale(i);
+      const x = xScale(score.date);
       const y = yScale(score.exact);
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
@@ -6155,7 +6239,7 @@ function drawTrackerChart() {
     ctx.strokeStyle = nearMissColor;
     ctx.lineWidth = 3;
     sortedScores.forEach((score, i) => {
-      const x = xScale(i);
+      const x = xScale(score.date);
       const y = yScale(score.nearMiss);
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
@@ -6163,9 +6247,37 @@ function drawTrackerChart() {
     ctx.stroke();
   }
   
-  // Draw data points
+  // Draw cold recall line (blue)
+  if (coldRecall.length > 1) {
+    ctx.beginPath();
+    ctx.strokeStyle = '#3b82f6'; // Blue
+    ctx.lineWidth = 3;
+    coldRecall.forEach((point, i) => {
+      const x = xScale(new Date(point.date).getTime());
+      const y = yScale(point.accPct);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+  
+  // Draw warm recall line (yellow)
+  if (warmRecall.length > 1) {
+    ctx.beginPath();
+    ctx.strokeStyle = '#eab308'; // Yellow
+    ctx.lineWidth = 3;
+    warmRecall.forEach((point, i) => {
+      const x = xScale(new Date(point.date).getTime());
+      const y = yScale(point.accPct);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+  
+  // Draw assessment data points
   sortedScores.forEach((score, i) => {
-    const x = xScale(i);
+    const x = xScale(score.date);
     
     // Exact score point
     ctx.beginPath();
@@ -6177,6 +6289,26 @@ function drawTrackerChart() {
     ctx.beginPath();
     ctx.arc(x, yScale(score.nearMiss), 4, 0, Math.PI * 2);
     ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent') || '#fbbf24';
+    ctx.fill();
+  });
+  
+  // Draw cold recall points (blue circular markers)
+  coldRecall.forEach(point => {
+    const x = xScale(new Date(point.date).getTime());
+    const y = yScale(point.accPct);
+    ctx.beginPath();
+    ctx.arc(x, y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = '#3b82f6'; // Blue
+    ctx.fill();
+  });
+  
+  // Draw warm recall points (yellow circular markers)
+  warmRecall.forEach(point => {
+    const x = xScale(new Date(point.date).getTime());
+    const y = yScale(point.accPct);
+    ctx.beginPath();
+    ctx.arc(x, y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = '#eab308'; // Yellow
     ctx.fill();
   });
 }
@@ -6629,14 +6761,18 @@ function initiateTrainingSession(){
     showScreen('menuScreen'); return;
   }
   
-  // Check if cold recall has been done today
-  const todayKey = getTodayKey();
-  const todayRecall = state.recall[todayKey];
+  // Ensure daily flags are properly initialized
+  const ymd = todaysLocalYmd();
+  state.daily = state.daily || {};
+  if (state.daily.ymd !== ymd) {
+    state.daily = { ymd, didCold: false, didWarm: false, recall: [] };
+    // DO NOT touch training timers/lockout here.
+  }
   
-  if (!todayRecall || !todayRecall.cold || todayRecall.cold.length === 0) {
-    // Show cold recall modal before starting training
+  // Gate training start on Cold Recall (once per day)
+  if (!state.daily.didCold) {
     showColdRecall();
-    return;
+    return; // training begins after cold finishes
   }
   
   // Cold recall already done, proceed with training
@@ -7494,7 +7630,8 @@ function wireOnce(){
     startRecallReview();
   });
   
-  safe('btnExportRecall', el=> el.onclick=()=> exportRecallCSV());
+  // CSV export removed - recall data now shown on tracker chart
+  // safe('btnExportRecall', el=> el.onclick=()=> exportRecallCSV());
 
   // Set selector
   safe('setSizeSelect', sel=>{
