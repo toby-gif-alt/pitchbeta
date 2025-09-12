@@ -4064,6 +4064,25 @@ function updateRecallReviewContent() {
   if (nextBtn) {
     nextBtn.textContent = reviewIndex < reviewItems.length - 1 ? 'Next ▶' : 'Done';
   }
+  
+  // Re-attach event handlers to ensure buttons work after content updates
+  safe('btnRecallPrev', el => el.onclick = () => {
+    if (state.recall.reviewIndex > 0) {
+      state.recall.reviewIndex--;
+      currentRecallSession.reviewIndex = state.recall.reviewIndex; // Keep in sync
+      updateRecallReviewContent();
+    }
+  });
+  
+  safe('btnRecallNext', el => el.onclick = () => {
+    if (state.recall.reviewIndex < reviewItems.length - 1) {
+      state.recall.reviewIndex++;
+      currentRecallSession.reviewIndex = state.recall.reviewIndex; // Keep in sync
+      updateRecallReviewContent();
+    } else {
+      finishRecallReview();
+    }
+  });
 }
 
 // Generate review content with three-note gauge
@@ -7760,7 +7779,19 @@ function step(ts){
   bird.vy += FLAPPY.gravity * dt; bird.y  += bird.vy * dt;
   pipeTimer -= dt; if(pipeTimer <= 0){ pipeTimer += FLAPPY.spawnEvery; spawnPipe(); }
   for(const p of pipes){ p.x -= FLAPPY.speed * dt; }
-  for(const p of pipes){ if(!p.passed && p.x + FLAPPY.width < bird.x){ p.passed = true; score++; progressiveDifficulty(); text('flappyScore',`Score: ${score} • Best: ${state.flappyHighScore||0}`); } }
+  for(const p of pipes){ if(!p.passed && p.x + FLAPPY.width < bird.x){ p.passed = true; score++; progressiveDifficulty(); 
+    // Update high score immediately if new high score is achieved
+    if (score > (state.flappyHighScore || 0)) {
+      state.flappyHighScore = score;
+      save();
+      // Update high score display in top-right
+      const highScoreDisplay = byId('flappyHighScoreValue');
+      if (highScoreDisplay) {
+        highScoreDisplay.textContent = state.flappyHighScore;
+      }
+    }
+    // Update current score display with current high score
+    text('flappyScore',`Score: ${score} • Best: ${state.flappyHighScore||0}`); } }
   pipes = pipes.filter(p=> p.x + FLAPPY.width > 0);
   fCtx.clearRect(0,0,cnv.width,cnv.height); drawPipes(); drawBird();
   if(bird.y < 0 || bird.y > cnv.height){ return onFlappyLose(); }
