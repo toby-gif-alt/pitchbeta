@@ -3765,6 +3765,39 @@ function startWarmRecallFromMenu() {
   showWarmRecall();
 }
 
+// Check if warm recall should be shown automatically after completing daily session
+function checkAndShowWarmRecall() {
+  try {
+    // Check if warm recall is pending
+    if (!state.warmRecallPending) {
+      return;
+    }
+    
+    // Check if user has completed 30 minutes today
+    if (!state.daily || !state.daily.completedAt) {
+      return;
+    }
+    
+    // Check if warm recall has already been done today
+    const todayKey = getTodayDateString();
+    if (state.recall && state.recall[todayKey] && state.recall[todayKey].warm && state.recall[todayKey].warm.length > 0) {
+      // Already done today, clear the pending flag
+      state.warmRecallPending = false;
+      save();
+      return;
+    }
+    
+    // All conditions met, show warm recall automatically and clear the flag
+    state.warmRecallPending = false;
+    save();
+    showWarmRecall();
+  } catch (e) {
+    // If there's any error, just clear the pending flag and continue
+    state.warmRecallPending = false;
+    save();
+  }
+}
+
 // Render the capture phase UI using FSM
 function renderRecallCapturePhase() {
   const fsm = state.recall.fsm;
