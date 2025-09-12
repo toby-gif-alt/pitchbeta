@@ -404,11 +404,10 @@
     <div class="card" style="text-align:center">
       <div style="position: relative;">
         <h3>🐤 Flappy Break</h3>
-        <!-- E) Sound toggle checkbox at top-right -->
-        <label id="flappySoundToggleLabel" style="position: absolute; top: 0; right: 0; display: flex; align-items: center; font-size: 13px; opacity: 0.9; cursor: pointer;">
-          <input type="checkbox" id="flappySoundCheckbox" style="margin-right: 6px;">
-          Mute Flappy sound
-        </label>
+        <!-- High score display at top-right -->
+        <div id="flappyHighScoreDisplay" style="position: absolute; top: 0; right: 0; display: flex; align-items: center; font-size: 13px; opacity: 0.9;">
+          🏆 High: <span id="flappyHighScoreValue">0</span>
+        </div>
       </div>
       <canvas id="flappyCanvas" width="320" height="480"></canvas>
       <div style="margin-top:8px">
@@ -1864,8 +1863,8 @@ function startDailyBreak() {
   state.session.inBreak = true;
   state.session.breakRemainingMs = getCurrentBreakDuration();
   
-  // Open flappy modal with countdown
-  openFlappyModalForDailyBreak();
+  // Don't automatically open flappy - only during 60-second TimeBlock breaks
+  // openFlappyModalForDailyBreak();
   
   save();
 }
@@ -4012,9 +4011,6 @@ function renderRecallReviewPhase() {
     if (state.recall.reviewIndex > 0) {
       state.recall.reviewIndex--;
       currentRecallSession.reviewIndex = state.recall.reviewIndex; // Keep in sync
-      const item = reviewItems[state.recall.reviewIndex];
-      updateRecallReviewUI(item, state.recall.reviewIndex, reviewItems.length);
-      // Don't call renderRecallReviewPhase() here - just update content and button states
       updateRecallReviewContent();
     }
   });
@@ -4023,9 +4019,6 @@ function renderRecallReviewPhase() {
     if (state.recall.reviewIndex < reviewItems.length - 1) {
       state.recall.reviewIndex++;
       currentRecallSession.reviewIndex = state.recall.reviewIndex; // Keep in sync
-      const item = reviewItems[state.recall.reviewIndex];
-      updateRecallReviewUI(item, state.recall.reviewIndex, reviewItems.length);
-      // Don't call renderRecallReviewPhase() here - just update content and button states
       updateRecallReviewContent();
     } else {
       finishRecallReview();
@@ -7523,11 +7516,11 @@ const FLAPPY = { gravity:900, flap:-380, baseSpeed:140, maxSpeed:260, speed:140,
 function openFlappyFromMenu(){ 
   if(isLocked()) {
     openFlappyModal(); 
-  } else if (state.inBreak && sessionActive) {
-    // Allow reopening flappy during breaks
+  } else if (state.timeblock && state.timeblock.breakActive && sessionActive) {
+    // Allow reopening flappy only during 60-second TimeBlock breaks
     openFlappyModal();
   } else {
-    alert('Flappy is intended for lockout/rewards.'); 
+    alert('Flappy is only available during lockout or 60-second training breaks.'); 
   }
 }
 function openFlappyModal(){ 
@@ -7548,18 +7541,10 @@ function openFlappyModal(){
     soundToggle.textContent = state.flappyMuted ? '🔇 Sound Off' : '🔊 Sound On';
   }
   
-  // E) Setup sound toggle checkbox
-  const soundCheckbox = byId('flappySoundCheckbox');
-  if (soundCheckbox) {
-    soundCheckbox.checked = state.flappyMuted;
-    soundCheckbox.onchange = () => {
-      state.flappyMuted = soundCheckbox.checked;
-      save();
-      // Update button text too
-      if (soundToggle) {
-        soundToggle.textContent = state.flappyMuted ? '🔇 Sound Off' : '🔊 Sound On';
-      }
-    };
+  // Update high score display
+  const highScoreDisplay = byId('flappyHighScoreValue');
+  if (highScoreDisplay) {
+    highScoreDisplay.textContent = state.flappyHighScore || 0;
   }
   
   // C) Hide close button and prevent ESC/backdrop clicks during countdown
@@ -7811,9 +7796,6 @@ function attachFlappyControls(){
     state.flappyMuted = !state.flappyMuted;
     save();
     el.textContent = state.flappyMuted ? '🔇 Sound Off' : '🔊 Sound On';
-    // Update checkbox too
-    const checkbox = byId('flappySoundCheckbox');
-    if (checkbox) checkbox.checked = state.flappyMuted;
   });
   _flHandlers={onCanvasClick,onTouchStart,onKey,onClose};
 }
