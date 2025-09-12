@@ -687,27 +687,42 @@ const QA_BREAK_DURATION_MS = 10 * 1000; // 10 seconds
 
 /* ------------------ JITTER SYSTEM CONSTANTS ------------------ */
 const JITTER_LEVELS = {
-  0: { // JL0 (onboarding)
+  0: { // JL0 (±3–8¢; ~0–3% probes)
     jitterMin: 3, jitterMax: 8,
     probeRate: 0.02, 
     anchorRate: 0.10
   },
-  1: { // JL1 (early)  
+  1: { // JL1 (±5–10¢; ~5–6% probes) - DEFAULT
     jitterMin: 5, jitterMax: 10,
-    probeRate: 0.05,
+    probeRate: 0.055,
     anchorRate: 0.08
   },
-  2: { // JL2 (mid)
+  2: { // JL2 (±5–15¢; ~10% probes)
     jitterMin: 5, jitterMax: 15,
-    probeRate: 0.08,
+    probeRate: 0.10,
     anchorRate: 0.05
   },
-  3: { // JL3 (mature)
+  3: { // JL3 (±5–15¢; ~10% probes)
     jitterMin: 5, jitterMax: 15,
-    probeRate: 0.11,
+    probeRate: 0.10,
     anchorRate: 0.05
   }
 };
+
+// Get jitter info reading from per-pitch JL levels (requirement 3)
+function getJitterInfo(pc, opts = {}) {
+  const pcData = state.jl?.perPc?.[pc] || { level: 1, lastChangedBlock: 0 };
+  const level = pcData.level;
+  const specs = JITTER_LEVELS[level] || JITTER_LEVELS[1];
+  
+  return {
+    level: level,
+    jitterMin: specs.jitterMin,
+    jitterMax: specs.jitterMax,
+    probeRate: opts.isOOB ? 0 : specs.probeRate, // No probes for OOB (requirement 4)
+    anchorRate: specs.anchorRate
+  };
+}
 
 /* ------------------ THEME SYSTEM ------------------ */
 function applyTheme(themeName) {
@@ -983,7 +998,14 @@ try{
       blocksDone: 0,         // number of complete blocks (0..5)
       blockElapsedMs: 0,     // elapsed time in current block (0..360000)
       inBreak: false,        // currently in break mode
-      breakRemainingMs: 0    // time remaining in current break (0..60000)
+      breakRemainingMs: 0,   // time remaining in current break (0..60000)
+      // Single-source timer (requirement 9)
+      timer: {
+        startTs: null,       // session start timestamp
+        pausedAccum: 0,      // accumulated paused time
+        isPaused: false,     // pause state
+        remainingMs: 30 * 60 * 1000  // exactly 30:00 start
+      }
     },
     daily: {
       date: getTodayDateString(), // YYYY-MM-DD format
@@ -1140,6 +1162,18 @@ if (!state.recall) {
   save();
 }
 
+// FSM-based recall state (requirement 1)
+if (!state.recall.fsm) {
+  state.recall.fsm = {
+    state: 'idle', // 'idle'|'recording'|'analyzing'|'reviewing'|'done'
+    tag: null,     // null|'cold'|'warm'
+    queue: [],     // array of PCs to record
+    idx: 0,        // current index in queue
+    results: []    // array of analyzed results
+  };
+  save();
+}
+
 // 4) Initialize review arrays for warm review pager
 if (!state.recall.review) {
   state.recall.review = [];
@@ -1148,7 +1182,18 @@ if (typeof state.recall.reviewIndex === 'undefined') {
   state.recall.reviewIndex = 0;
 }
 
-// Migration for confusion tracking
+// Migration for JL per-pitch system (requirement 3)
+if (!state.jl) {
+  state.jl = {
+    perPc: {} // pc: { level: 0|1|2|3, lastChangedBlock: number }
+  };
+  
+  // Initialize all PCs to JL1 (default)
+  for (const pc of PC) {
+    state.jl.perPc[pc] = { level: 1, lastChangedBlock: 0 };
+  }
+  save();
+}
 if (!state.confusionMatrix || !state.perfStats || typeof state.lastInBoundsPc === 'undefined') {
   // Initialize confusion tracking structures
   state.confusionMatrix = {};
@@ -2259,6 +2304,29 @@ function showFlappyModal(options = {}) {
   }
 }
 
+// Helper function to get next local midnight ISO (requirement 2)
+function nextLocalMidnightISO() {
+  const now = new Date();
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  tomorrow.setHours(0, 0, 0, 0);
+  return tomorrow.toISOString();
+}
+
+// Session completion with lockout (requirement 2)
+function completeSessionWithLockout() {
+  // Set lockout until next calendar day (requirement 2)
+  state.session.lockoutUntil = nextLocalMidnightISO();
+  
+  // Mark daily completion
+  if (!state.daily.completedAt) {
+    state.daily.completedAt = Date.now();
+    state.daily.minutesCompleted = 30;
+  }
+  
+  save();
+}
+
 function endTimeBlockBreak() {
   state.timeblock.activeMs = 0;
   state.timeblock.breakActive = false;
@@ -2609,7 +2677,28 @@ function updateCapsUI(){
     else lp.style.display='none';
   }
   
-  const pf = byId('playFlappy'); if(pf) pf.disabled = !(locked || isDailyLocked());
+  // Update Flappy button state (requirement 2: enable during breaks AND lockout)
+  const pf = byId('playFlappy'); 
+  if(pf) {
+    const inBreak = !!state.session?.inBreak || !!state.timeblock?.breakActive;
+    const isLockedOut = locked || isDailyLocked();
+    const canPlayFlappy = inBreak || isLockedOut;
+    
+    pf.disabled = !canPlayFlappy;
+    
+    if (canPlayFlappy) {
+      if (inBreak) {
+        pf.textContent = '🐤 Play Flappy (Break)';
+        pf.title = 'Flappy is available during breaks';
+      } else {
+        pf.textContent = '🐤 Play Flappy (Lockout)';
+        pf.title = 'Flappy is available during daily lockout';
+      }
+    } else {
+      pf.textContent = '🐤 Flappy (break/lockout only)';
+      pf.title = 'Flappy is only available during 60s breaks or daily lockout';
+    }
+  }
   
   // Update warm recall button state
   const wr = byId('startWarmRecall'); 
@@ -3538,23 +3627,36 @@ function createHumButton(targetPc, onComplete) {
   return container;
 }
 
-// Enhanced recall session system for sequential capture -> review flow
-let currentRecallSession = null;
+/* ------------------ RECALL SYSTEM FSM (Requirement 1) ------------------ */
 
-// Initialize a new recall session
-function initializeRecallSession(type) {
-  const selectedNotes = selectRecallNotes();
+// Start recall session (FSM approach)
+function startRecall(tag) {
+  // Pause training timers/scheduler
+  if (sessionActive) {
+    pauseStart('recall');
+  }
   
-  currentRecallSession = {
-    type: type, // 'cold' or 'warm'
-    date: getTodayKey(),
-    prompts: selectedNotes.map(pc => ({ pc })),
-    takes: [], // Will store completed recordings
-    currentIndex: 0, // Current prompt index
-    phase: 'capture' // 'capture' or 'review'
+  // Choose 2-3 learned PCs for the queue
+  const trainedPcs = getTrainedPCs();
+  const count = Math.min(3, Math.max(2, trainedPcs.length));
+  const selected = [];
+  const available = [...trainedPcs];
+  
+  for (let i = 0; i < count && available.length > 0; i++) {
+    const randomIndex = Math.floor(Math.random() * available.length);
+    selected.push(available.splice(randomIndex, 1)[0]);
+  }
+  
+  // Initialize FSM state
+  state.recall.fsm = {
+    state: 'recording',
+    tag: tag, // 'cold' or 'warm'
+    queue: selected,
+    idx: 0,
+    results: []
   };
   
-  return currentRecallSession;
+  save();
 }
 
 // Save recall data to state (updated for new format)
@@ -3578,26 +3680,70 @@ function saveRecallData(type, data) {
   save();
 }
 
-// Show cold recall modal with sequential flow
+// Process 2-second capture → analyzing state → compute result
+function processRecallCapture(frequencies, targetPc) {
+  // Transition to analyzing state
+  state.recall.fsm.state = 'analyzing';
+  save();
+  
+  // Compute analysis
+  const analysis = analyzeRecording(frequencies, targetPc);
+  const result = {
+    pc: targetPc,
+    medianCents: analysis.medianCents,
+    sdCents: analysis.sdCents,
+    verdict: analysis.verdict,
+    timestamp: Date.now()
+  };
+  
+  // Push result and advance
+  state.recall.fsm.results.push(result);
+  
+  if (state.recall.fsm.idx + 1 < state.recall.fsm.queue.length) {
+    // More items - advance to next recording
+    state.recall.fsm.idx++;
+    state.recall.fsm.state = 'recording';
+  } else {
+    // All done - transition to reviewing
+    state.recall.fsm.state = 'reviewing';
+    state.recall.reviewIndex = 0;
+  }
+  
+  save();
+  
+  // Re-render the UI
+  renderRecallUI();
+}
+
+// Render recall UI based on FSM state
+function renderRecallUI() {
+  const fsm = state.recall.fsm;
+  const modalId = fsm.tag === 'cold' ? 'coldRecallModal' : 'warmRecallModal';
+  const modal = byId(modalId);
+  
+  if (!modal) return;
+  
+  if (fsm.state === 'recording' || fsm.state === 'analyzing') {
+    renderRecallCapturePhase();
+  } else if (fsm.state === 'reviewing') {
+    renderRecallReviewPhase();
+  }
+}
+
+// Show cold recall modal with FSM flow
 function showColdRecall() {
-  initializeRecallSession('cold');
+  startRecall('cold');
   const modal = byId('coldRecallModal');
   modal.style.display = 'flex';
-  renderRecallCapturePhase();
+  renderRecallUI();
 }
 
-// Check if warm recall should be shown automatically when returning to menu
-function checkAndShowWarmRecall() {
-  // Automatic warm recall disabled - user must press button manually
-  // This prevents interruptions when just accessing the menu
-}
-
-// Show warm recall modal with sequential flow  
+// Show warm recall modal with FSM flow  
 function showWarmRecall() {
-  initializeRecallSession('warm');
+  startRecall('warm');
   const modal = byId('warmRecallModal');
   modal.style.display = 'flex';
-  renderRecallCapturePhase();
+  renderRecallUI();
 }
 
 // Start warm recall from menu button - check if allowed
@@ -3619,29 +3765,30 @@ function startWarmRecallFromMenu() {
   showWarmRecall();
 }
 
-// Render the capture phase UI
+// Render the capture phase UI using FSM
 function renderRecallCapturePhase() {
-  if (!currentRecallSession) return;
+  const fsm = state.recall.fsm;
+  if (!fsm || fsm.state === 'idle') return;
   
-  const modalId = currentRecallSession.type === 'cold' ? 'coldRecallModal' : 'warmRecallModal';
+  const modalId = fsm.tag === 'cold' ? 'coldRecallModal' : 'warmRecallModal';
   const modal = byId(modalId);
-  const notesContainer = byId(currentRecallSession.type + 'RecallNotes');
-  const completeButton = byId(currentRecallSession.type === 'cold' ? 'btnColdRecallComplete' : 'btnWarmRecallComplete');
+  const notesContainer = byId(fsm.tag + 'RecallNotes');
+  const completeButton = byId(fsm.tag === 'cold' ? 'btnColdRecallComplete' : 'btnWarmRecallComplete');
   
   if (!notesContainer || !completeButton) return;
   
   // Clear container only if needed (prevents unnecessary flashing)
-  if (notesContainer.children.length !== currentRecallSession.prompts.length) {
+  if (notesContainer.children.length !== fsm.queue.length) {
     notesContainer.innerHTML = '';
   }
   
   completeButton.style.display = 'none';
   
   // Create capture UI for each prompt
-  currentRecallSession.prompts.forEach((prompt, index) => {
-    const isActive = index === currentRecallSession.currentIndex;
-    const isCompleted = index < currentRecallSession.currentIndex;
-    const isFuture = index > currentRecallSession.currentIndex;
+  fsm.queue.forEach((pc, index) => {
+    const isActive = index === fsm.idx && (fsm.state === 'recording' || fsm.state === 'analyzing');
+    const isCompleted = index < fsm.idx || (index === fsm.idx && fsm.results.length > index);
+    const isFuture = index > fsm.idx;
     
     // Find existing div or create new one
     let noteDiv = notesContainer.children[index];
@@ -3680,173 +3827,145 @@ function renderRecallCapturePhase() {
     // Clear and populate content
     noteDiv.innerHTML = '';
     
-    const titleEl = document.createElement('h3');
-    titleEl.style.margin = '0 0 12px 0';
-    titleEl.textContent = `Hum ${pcLabel(prompt.pc)}`;
-    noteDiv.appendChild(titleEl);
-    
     if (isCompleted) {
-      const checkEl = document.createElement('div');
-      checkEl.textContent = '✓ Recorded';
-      checkEl.style.cssText = 'font-weight: 600; color: var(--good);';
-      noteDiv.appendChild(checkEl);
+      // Show completion status
+      noteDiv.innerHTML = `
+        <h4 style="margin: 0 0 8px 0; color: inherit;">${PC_LABEL[pc] || pc}</h4>
+        <div style="color: var(--good); font-weight: 600;">✓ Completed</div>
+      `;
     } else if (isActive) {
-      const humButton = createSequentialHumButton(prompt.pc, index);
-      noteDiv.appendChild(humButton);
+      // Show recording interface
+      noteDiv.appendChild(createHumButton(pc, (result) => {
+        processRecallCapture(result.frequencies || [], pc);
+      }));
     } else {
-      const waitEl = document.createElement('div');
-      waitEl.textContent = 'Wait...';
-      waitEl.style.cssText = 'opacity: 0.6; font-style: italic;';
-      noteDiv.appendChild(waitEl);
+      // Show waiting state
+      noteDiv.innerHTML = `
+        <h4 style="margin: 0 0 8px 0; color: inherit;">${PC_LABEL[pc] || pc}</h4>
+        <div style="opacity: 0.7;">Waiting...</div>
+      `;
     }
   });
   
-  // Show review button if all captures complete
-  if (currentRecallSession.currentIndex >= currentRecallSession.prompts.length) {
-    completeButton.style.display = 'inline-block';
-    completeButton.textContent = 'Review Results';
+  // Check if all recordings are complete
+  if (fsm.results.length >= fsm.queue.length) {
+    // All complete - transition to review
+    state.recall.fsm.state = 'reviewing';
+    save();
+    renderRecallReviewPhase();
   }
 }
 
-// Create a hum button for sequential capture
-function createSequentialHumButton(targetPc, index) {
-  const button = document.createElement('button');
-  button.textContent = 'Hold to Hum';
-  button.style.cssText = `
-    padding: 12px 24px;
-    font-size: 16px;
-    background: var(--bg);
-    color: var(--accent);
-    border-radius: 12px;
-    border: none;
-    cursor: pointer;
-    font-weight: 600;
-    min-width: 140px;
+// Render review phase using FSM and event delegation  
+function renderRecallReviewPhase() {
+  const fsm = state.recall.fsm;
+  if (!fsm || fsm.state !== 'reviewing') return;
+  
+  const modalId = fsm.tag === 'cold' ? 'coldRecallModal' : 'warmRecallModal';
+  const modal = byId(modalId);
+  if (!modal) return;
+  
+  const reviewIndex = state.recall.reviewIndex || 0;
+  const reviewItems = fsm.results;
+  
+  if (reviewItems.length === 0) return;
+  
+  // Use event delegation for Next/Prev/Finish (single handler; read data-idx)
+  modal.innerHTML = `
+    <div class="card" style="max-width:600px;margin:20px;text-align:center;pointer-events:auto;">
+      <h2>${fsm.tag === 'cold' ? '🧊 Cold' : '🔥 Warm'} Recall - Review</h2>
+      <div class="recall-review-content">
+        ${generateRecallReviewContent(reviewItems[reviewIndex])}
+      </div>
+      <div class="recall-review-nav" style="display:flex;gap:10px;justify-content:space-between;margin-top:16px;">
+        <button id="btnRecallPrev" ${reviewIndex === 0 ? 'disabled' : ''} data-action="prev">◀ Prev</button>
+        <div class="recall-review-position">Result ${reviewIndex + 1} of ${reviewItems.length}</div>
+        <button id="btnRecallNext" data-action="${reviewIndex < reviewItems.length - 1 ? 'next' : 'finish'}">
+          ${reviewIndex < reviewItems.length - 1 ? 'Next ▶' : 'Done'}
+        </button>
+      </div>
+    </div>
   `;
   
-  let recording = false;
-  let frequencies = [];
-  let audioContext = null;
-  let analyser = null;
-  let microphone = null;
-  
-  const startRecording = async () => {
-    if (recording) return;
+  // Event delegation - single handler for all review buttons
+  const handleReviewNavigation = (event) => {
+    const action = event.target.dataset.action;
+    if (!action) return;
     
-    recording = true;
-    frequencies = [];
-    
-    button.textContent = 'Recording...';
-    button.style.background = 'var(--bad)';
-    
-    try {
-      // AudioWorklet mic pipeline
-      const ctx = (window.audioCtx ||= new (window.AudioContext||window.webkitAudioContext)());
-      await ctx.resume(); // must be after a user gesture
-      
-      if (!ctx.audioWorklet) {
-        console.warn('AudioWorklet not supported; falling back to ScriptProcessor');
-        // Fallback: use existing ScriptProcessor path
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: false, noiseSuppression: false, autoGainControl: false,
-            channelCount: 1
-          }
-        });
-        const source = ctx.createMediaStreamSource(stream);
-        const N = 2048;
-        const proc = ctx.createScriptProcessor(N, 1, 1);
-        source.connect(proc);
-        const sink = ctx.createGain(); sink.gain.value = 0; proc.connect(sink); sink.connect(ctx.destination);
-        
-        state.recall = state.recall || {};
-        state.recall.backend = 'script';
-        state.recall.detector = window.detectors.createPitchDetector({ method:'yin', sampleRate: ctx.sampleRate });
-        
-        let frames = [];
-        proc.onaudioprocess = (e) => {
-          if (!recording) return;
-          const ch0 = e.inputBuffer.getChannelData(0);
-          frames.push(new Float32Array(ch0));
-        };
-        state.recall.frames = frames;
-      } else {
-        await ctx.audioWorklet.addModule('worklets/recall-capture-processor.js');
-        const node = new AudioWorkletNode(ctx, 'recall-capture');
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: { 
-            echoCancellation: false, 
-            noiseSuppression: false, 
-            autoGainControl: false, 
-            channelCount: 1 
-          }
-        });
-        const src = ctx.createMediaStreamSource(stream);
-        src.connect(node); // node does not need to connect to destination
-        
-        state.recall = state.recall || {};
-        state.recall.backend = 'worklet';
-        state.recall.frames = []; // store last session frames
-        state.recall.framesCount = 0;
-        node.port.onmessage = (e) => {
-          if (!recording) return;
-          // e.data is a transferred Float32Array
-          state.recall.frames.push(e.data);
-          state.recall.framesCount = (state.recall.framesCount || 0) + 1;
-        };
-        state.recall.workletNode = node;
-      }
-
-      // Create detector once
-      state.recall.detector = window.detectors.createPitchDetector({ method:'yin', sampleRate: ctx.sampleRate });
-      
-      // Start/Stop capture per prompt: start
-      state.recall.frames = []; 
-      state.recall.framesCount = 0; 
-      state.recall.capturing = true;
-      
-      const recordingStart = Date.now();
-      
-      const detectPitch = () => {
-        if (!recording) return;
-        
-        const elapsed = Date.now() - recordingStart;
-        
-        if (state.recall.frames.length > 0) {
-          const latestFrame = state.recall.frames[state.recall.frames.length - 1];
-          const hz = state?.recall?.detector?.getPitch(latestFrame) || null;
-          
-          if (hz && hz > 80 && hz < 800) {
-            frequencies.push(hz);
-          }
-        }
-        
-        if (elapsed < 2000) { // Record for 2 seconds
-          requestAnimationFrame(detectPitch);
-        } else {
-          stopRecording();
-        }
-      };
-      
-      requestAnimationFrame(detectPitch);
-      
-    } catch (error) {
-      console.error('Recording failed:', error);
-      button.textContent = 'Error - Try Again';
-      button.style.background = 'var(--bad)';
-      recording = false;
+    if (action === 'prev' && state.recall.reviewIndex > 0) {
+      state.recall.reviewIndex--;
+      renderRecallReviewPhase(); // Re-render with new index
+    } else if (action === 'next' && state.recall.reviewIndex < reviewItems.length - 1) {
+      state.recall.reviewIndex++;
+      renderRecallReviewPhase(); // Re-render with new index
+    } else if (action === 'finish') {
+      finishRecallReview();
     }
   };
   
-  const stopRecording = () => {
-    if (!recording) return;
-    
-    recording = false;
-    
-    // Show "Processing..." feedback immediately
-    button.textContent = 'Processing...';
-    button.style.background = 'var(--muted)';
-    button.disabled = true;
+  // Attach single event handler with delegation
+  modal.addEventListener('click', handleReviewNavigation);
+}
+
+// Finish recall review and save results
+function finishRecallReview() {
+  const fsm = state.recall.fsm;
+  if (!fsm || fsm.state !== 'reviewing') return;
+  
+  // Save all results to daily recall data
+  const todayKey = getTodayKey();
+  if (!state.recall[todayKey]) {
+    state.recall[todayKey] = { cold: [], warm: [] };
+  }
+  
+  // Append each analyzed result to state.daily.recall  
+  fsm.results.forEach(result => {
+    state.recall[todayKey][fsm.tag].push({
+      date: todayKey,
+      tag: fsm.tag,
+      pc: result.pc,
+      medianCents: result.medianCents,
+      sdCents: result.sdCents,
+      verdict: result.verdict,
+      timestamp: result.timestamp
+    });
+  });
+  
+  // Transition FSM to done state
+  state.recall.fsm.state = 'done';
+  save();
+  
+  // Close modal and resume training if time remains
+  const modalId = fsm.tag === 'cold' ? 'coldRecallModal' : 'warmRecallModal';
+  byId(modalId).style.display = 'none';
+  
+  // Resume training if session was active
+  if (sessionActive) {
+    pauseEnd();
+  }
+  
+  // Reset FSM for next use
+  state.recall.fsm = {
+    state: 'idle',
+    tag: null,
+    queue: [],
+    idx: 0,
+    results: []
+  };
+  save();
+  
+  // Handle post-recall flow
+  if (fsm.tag === 'cold') {
+    // After cold recall, start training
+    showScreen('trainerScreen');
+    initiateTrainingSession();
+  } else {
+    // After warm recall, return to menu
+    showScreen('menuScreen');
+  }
+}
+
+// 2) Single entry point for starting training after recall
     
     // Stop capture per prompt: stop
     state.recall.capturing = false; 
@@ -6113,13 +6232,97 @@ async function nextTrial(forceNew=false){
         detuneMode = detuneInfo.mode;
         jlLevel = detuneInfo.jlLevel;
         
-        chosenOctave = selectOctaveForInBounds(truePc);
+// Octave mixing policy 3-5 with windowed gates (requirement 7)
+function selectOctaveForInBounds(pc) {
+  const blockIndex = state.trainingBlockIndex || 1;
+  const trialsInSet = state.trainingBlockTrials || 0;
+  
+  // Default center=4, neighbors=3&5
+  let centerProb = 0.9; // Default 90/10 split
+  
+  // Apply windowed gating based on in-bounds performance
+  const recentInBounds = state.trials.filter(t => !t.oob).slice(-20); // Last 20 in-bounds
+  
+  if (recentInBounds.length >= 12 && trialsInSet >= 8) {
+    const windowTrials = recentInBounds.slice(-12, -8); // 8-12 window
+    const accuracy = windowTrials.filter(t => t.correct).length / windowTrials.length;
+    const medianCents = computeMedianCents(windowTrials);
+    
+    if (accuracy >= 0.80 && Math.abs(medianCents) <= 15) {
+      centerProb = 0.7; // 70/30 split
+    }
+  }
+  
+  if (recentInBounds.length >= 20 && trialsInSet >= 16) {
+    const windowTrials = recentInBounds.slice(-20, -16); // 16-20 window  
+    const accuracy = windowTrials.filter(t => t.correct).length / windowTrials.length;
+    const medianCents = computeMedianCents(windowTrials);
+    
+    if (accuracy >= 0.85 && Math.abs(medianCents) <= 12) {
+      centerProb = 0.6; // 60/40 split
+    }
+  }
+  
+  // Per-note weak override: +20% center bias if this PC had recent issues
+  const pcRecent = recentInBounds.filter(t => t.truePc === pc).slice(-5);
+  if (pcRecent.length >= 3) {
+    const pcAcc = pcRecent.filter(t => t.correct).length / pcRecent.length;
+    if (pcAcc < 0.7) {
+      centerProb = Math.min(1.0, centerProb + 0.2);
+    }
+  }
+  
+  // Select octave based on probability
+  if (Math.random() < centerProb) {
+    return 4; // Center octave
+  } else {
+    // ~10% "octave surprise" within neighbor share
+    const neighbors = [3, 5];
+    if (Math.random() < 0.1) {
+      // Surprise - pick less common octave
+      return neighbors[Math.floor(Math.random() * neighbors.length)];
+    } else {
+      return neighbors[Math.floor(Math.random() * neighbors.length)];
+    }
+  }
+}
+
+// Helper function to compute median cents from trials
+function computeMedianCents(trials) {
+  const centsErrors = trials.filter(t => t.centsErr !== null).map(t => t.centsErr);
+  if (centsErrors.length === 0) return 0;
+  
+  centsErrors.sort((a, b) => a - b);
+  const mid = Math.floor(centsErrors.length / 2);
+  return centsErrors.length % 2 === 0 
+    ? (centsErrors[mid - 1] + centsErrors[mid]) / 2 
+    : centsErrors[mid];
+}
         currentNote = `${truePc}${chosenOctave}`;
       }
       
       // C) Freeze in state.current (REQUIRED for grading)
       state.meta.trialSeq = (state.meta.trialSeq || 0) + 1;
-      // Select timbre for this trial
+      // Variety mode selection with distribution (requirement 8)
+function selectTimbreForTrial(pc) {
+  const varietyMode = state.timbre?.mode === 'variety';
+  
+  if (!varietyMode) {
+    // Single mode - always use chosen timbre
+    return state.timbre?.chosen || AUDIO_TYPES.PIANO;
+  }
+  
+  // Variety mode: ~80% chosen / 20% alt with daily rotation
+  if (Math.random() < 0.8) {
+    return state.timbre.chosen || AUDIO_TYPES.PIANO;
+  } else {
+    // Select alt timbre with daily rotation
+    const altPool = state.timbre?.altPool || [AUDIO_TYPES.SINE, AUDIO_TYPES.GUITAR];
+    const rotationIndex = state.timbre?.rotationIndex || 0;
+    const dailyAlt = altPool[rotationIndex % altPool.length];
+    return dailyAlt;
+  }
+}
       const selectedTimbre = plannedOOB && state.lastInBoundsTimbre ? 
         state.lastInBoundsTimbre : // OOB mirrors in-bounds timbre
         selectTimbreForTrial(truePc); // Normal selection
@@ -6319,7 +6522,19 @@ function recordTrialStats(trial) {
     }
   }
   
-  // Update jitter statistics for in-bounds trials
+  // Per-trial metrics (requirement 10)
+  trial.detuneCents = currentDetuneCents; // Applied detune
+  trial.centsErr = null; // Will be filled if pitch detection available
+  trial.timbre = cur.timbre;
+  trial.targetOctave = cur.octave;
+  trial.jl = cur.jlLevel;
+  
+  // Try to compute cents error if we have pitch data
+  if (cur.truePc && trial.guessPc && correct) {
+    // For correct trials, we might have pitch deviation data
+    // This would require pitch detection during trial, which we don't have yet
+    // For now, set to null as specified
+  }
   if (!trial.oob && trial.truePc) {
     const trainedPcs = getTrainedPCs();
     if (trainedPcs.includes(trial.truePc)) {
@@ -6410,7 +6625,38 @@ function advanceCheck(){
   // Training Block completed - handle adaptive OOB
   // Call AFTER logger as specified in requirements
   logTrainingBlockOobData(block, 'boundary');
-  const adaptBoundary = adaptOobTargetAtTrainingBlockBoundary(block);
+// OOB adaptor - adjust target every 3 blocks (requirement 6)
+function adaptOobTargetAtTrainingBlockBoundary(block) {
+  if (block % 3 !== 0) return; // Only every 3 blocks
+  
+  // Compute last-60 in-bounds accuracy
+  const inBoundsTrials = state.trials.filter(t => !t.oob).slice(-60);
+  if (inBoundsTrials.length === 0) return;
+  
+  const correctTrials = inBoundsTrials.filter(t => t.correct);
+  const acc60 = correctTrials.length / inBoundsTrials.length;
+  
+  // Adjust target OOB% by ±3 points based on performance
+  let adjustment = 0;
+  if (acc60 > 0.85) {
+    adjustment = +3; // Increase difficulty
+  } else if (acc60 < 0.70) {
+    adjustment = -3; // Decrease difficulty
+  }
+  
+  // Update target and clamp to [5,35]
+  const oldTarget = state.oob?.targetPct || 0.15;
+  const newTarget = Math.max(0.05, Math.min(0.35, oldTarget + adjustment/100));
+  
+  if (state.oob) {
+    state.oob.targetPct = newTarget;
+  }
+  
+  // Log the adaptation
+  console.log(`OOB adaptor: Block ${block}, acc60=${(acc60*100).toFixed(1)}%, ${oldTarget*100}% → ${newTarget*100}%`);
+  
+  save();
+}
   updateOobHealthCheckTrainingBlock();
   updateOobStatusPill();
   
@@ -7084,34 +7330,63 @@ function chooseDetuneMode(pc) {
 // Export chooseDetuneMode to window for debugging and validation
 window.chooseDetuneMode = chooseDetuneMode;
 
-// Select detune mode and value for a trial
+// Select detune mode and value for a trial (updated for requirements 3&4)
 function selectDetune(pc, isOOB) {
-  // OOB trials always get no detune
+  // OOB trials get micro-detune only (requirement 4)
   if (isOOB) {
+    // Draw from Gaussian(μ=0, σ≈2–3¢), clamp to ±5¢
+    const sigma = 2.5; // cents
+    const gaussian = () => {
+      let u = 0, v = 0;
+      while(u === 0) u = Math.random(); // Converting [0,1) to (0,1)
+      while(v === 0) v = Math.random();
+      return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+    };
+    
+    const rawDetune = gaussian() * sigma;
+    const clampedDetune = Math.max(-5, Math.min(5, rawDetune));
+    
     return {
-      cents: 0,
+      cents: clampedDetune,
       mode: 'oob',
       jlLevel: null
     };
   }
   
-  // Get jitter level and choose mode
-  const level = getJitterLevel(pc);
+  // In-bounds: use JL system
+  const jitterInfo = getJitterInfo(pc, { isOOB: false });
   const mode = chooseDetuneMode(pc);
-  const specs = JITTER_LEVELS[level];
-  
-  // Check if we're in rescue mode for this PC
-  const activeRescue = findActiveRescueForPc(pc);
   
   if (mode === 'anchor') {
     return {
       cents: 0,
       mode: 'anchor',
-      jlLevel: level
+      jlLevel: jitterInfo.level
     };
   }
   
   if (mode === 'probe') {
+    // Boundary probe logic (only for in-bounds)
+    const sign = Math.random() < 0.5 ? -1 : 1;
+    const probeCents = sign * (40 + Math.random() * 10); // ±40-50¢
+    return {
+      cents: probeCents,
+      mode: 'probe',
+      jlLevel: jitterInfo.level
+    };
+  }
+  
+  // Jitter mode
+  const sign = Math.random() < 0.5 ? -1 : 1;
+  const jitterRange = jitterInfo.jitterMax - jitterInfo.jitterMin;
+  const cents = sign * (jitterInfo.jitterMin + Math.random() * jitterRange);
+  
+  return {
+    cents: cents,
+    mode: 'jitter',
+    jlLevel: jitterInfo.level
+  };
+}
     const sign = Math.random() < 0.5 ? -1 : 1;
     let cents = sign * (25 + Math.random() * 15); // ±25..±40¢
     
