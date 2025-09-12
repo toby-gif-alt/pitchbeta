@@ -3966,7 +3966,7 @@ function finishRecallReview() {
 }
 
 // 2) Single entry point for starting training after recall
-    
+function stopRecording() {
     // Stop capture per prompt: stop
     state.recall.capturing = false; 
     const frames = (state.recall && state.recall.frames) ? state.recall.frames.slice() : [];
@@ -4024,8 +4024,6 @@ function finishRecallReview() {
     e.preventDefault(); 
     if (recording) stopRecording(); 
   };
-  
-  }; // End stopRecording function
   
   return button;
 }
