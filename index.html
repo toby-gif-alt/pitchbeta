@@ -2172,11 +2172,13 @@ function tickTimeBlock(now = performance.now()) {
     const dt = Math.max(0, now - tb.startedAt);
     tb.activeMs += dt;
     tb.startedAt = now;
-    if (tb.activeMs >= 6*60*1000) {
-      // Don't start flappy break if training is already complete (5/5 blocks done)
-      if (tb.breaksCompletedToday >= 5) {
-        // Training already complete - just end the day
-        endDayAndLockout();
+    if (tb.activeMs >= getCurrentBlockDuration()) {
+      // Check if this would be the 5th completed block (training should end)
+      if (tb.breaksCompletedToday >= 4) {
+        // 5th block completed - end training session
+        tb.breaksCompletedToday++; // Mark the 5th block as complete
+        save();
+        endSessionWithWarmRecall(); // Use the proper completion function
       } else {
         beginTimeBlockBreak();
       }
@@ -2422,12 +2424,14 @@ function renderTrainerHeaderTimeBlock() {
   const breaksCompleted = state.timeblock?.breaksCompletedToday || 0;
   const i = Math.min(5, breaksCompleted + 1);
   
-  // Show "TimeBlock i/5  mm:ss / 06:00"
-  // Compute mm:ss from state.timeblock.activeMs (clamp to 0..360000).
-  const activeMs = Math.max(0, Math.min(360000, state.timeblock?.activeMs || 0));
+  // Show "TimeBlock i/5  mm:ss / duration"
+  // Compute mm:ss from state.timeblock.activeMs (clamp to block duration).
+  const blockDuration = getCurrentBlockDuration();
+  const activeMs = Math.max(0, Math.min(blockDuration, state.timeblock?.activeMs || 0));
   const mmss = fmtMMSS(activeMs);
+  const totalTime = fmtMMSS(blockDuration);
   
-  text('blockTimeInfo', `TimeBlock ${i}/5  ${mmss} / 06:00`);
+  text('blockTimeInfo', `TimeBlock ${i}/5  ${mmss} / ${totalTime}`);
 }
 
 // F) Fix missing logger reference
@@ -2564,8 +2568,17 @@ function showScreen(id){
 }
 function ensureWeekRoll(){ const wi=currentWeekIdx(); if(state.thisWeekIdx!==wi){ state.thisWeekIdx=wi; state.thisWeekMs=0; save(); } }
 function isLocked(){ return state.lockoutUntil && Date.now() < state.lockoutUntil; }
+function clearOldLockouts(){
+  // Clear lockouts that have expired or are invalid
+  if (state.lockoutUntil && Date.now() >= state.lockoutUntil) {
+    state.lockoutUntil = null;
+    state.capResetAt = null;
+    save();
+  }
+}
 function updateCapsUI(){
   ensureWeekRoll();
+  clearOldLockouts();  // Clear expired lockouts before updating UI
   
   // Update daily session UI (new system)
   updateSessionUI();
@@ -6465,6 +6478,9 @@ function initiateTrainingSession(){
   stopAllTimers();
   sealDanglingSession();
   
+  // Clear any expired lockouts before checking
+  clearOldLockouts();
+  
   // Check daily lockout first (new system)
   if(isDailyLocked()){
     alert('Training completed for today. Come back tomorrow!\nYou can still play Flappy from the menu.');
@@ -6530,9 +6546,9 @@ function startTrainingAfterColdRecall(){
       // Update block progress display instead of 30-minute countdown
       updateTrainerTimer();  // This now shows "Block X/5" instead of time remaining
       
-      // Check if all 5 blocks are complete
+      // Check if all 5 blocks are complete (this is a backup check)
       const blocksCompleted = state.timeblock?.breaksCompletedToday || 0;
-      if(blocksCompleted >= 5){
+      if(blocksCompleted >= 5 && sessionActive){
         endSessionWithWarmRecall();
       }
     }
