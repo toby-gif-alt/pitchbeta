@@ -183,7 +183,6 @@
       <button id="viewTracker">📊 Track</button>
       <button id="startWarmRecall">🔥 Warm Recall</button>
       <button id="playFlappy">🐤 Flappy (lockout only)</button>
-      <button id="resetLockout">⚡ Reset lockout/timer</button>
       <button id="menuReset">⟲ Reset (factory)</button>
     </div>
 
@@ -7302,16 +7301,6 @@ function wireOnce(){
   safe('viewTracker', el=> el.onclick=()=> showTracker());
   safe('startWarmRecall', el=> el.onclick=()=> startWarmRecallFromMenu());
   safe('playFlappy',  el=> el.onclick=()=> openFlappyFromMenu());
-  safe('resetLockout',el=> el.onclick=()=>{
-    if(!confirm('Reset lockout/timer now? This starts a fresh 30-minute window immediately.')) return;
-    state.lockoutUntil = null; state.capResetAt = Date.now(); state.lastSeen = Date.now();
-    // Reset block system
-    state.currentBlock = 1;
-    state.blockStartTime = null;
-    state.inBreak = false;
-    state.breakStartTime = null;
-    save(); updateCapsUI(); alert('Timer reset. You can start training now.');
-  });
   safe('menuReset',   el=> el.onclick=()=> doFactoryReset());
 
   // Assessment warning modal
