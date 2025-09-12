@@ -173,7 +173,7 @@
   <div class="card screen" id="menuScreen">
     <h1 id="greeting">Absolute Pitch Trainer</h1>
     <div class="row">
-      <span class="pill" id="capInfo">Training not started yet</span>
+      <span class="pill" id="capInfo">Training not started</span>
       <span class="pill" id="weekPill">This week: 0 hrs 0 mins</span>
       <span class="pill" id="lockoutPill" style="display:none">🔒 Locked</span>
     </div>
@@ -1773,7 +1773,7 @@ function updateMenuTimer() {
   if (!capInfo) return;
   
   if (isDailyLocked()) {
-    capInfo.textContent = 'Training finished for today';
+    capInfo.textContent = 'Training finished - come back tomorrow';
     capInfo.style.background = 'var(--good)';
   } else {
     // Check if training has started today
@@ -1781,12 +1781,10 @@ function updateMenuTimer() {
                            state.daily && state.daily.date === getTodayDateString();
     
     if (!hasStartedToday) {
-      capInfo.textContent = 'Training not started yet';
+      capInfo.textContent = 'Training not started';
       capInfo.style.background = '';
     } else {
-      // Show completed blocks instead of time countdown
-      const blocksCompleted = state.timeblock?.breaksCompletedToday || 0;
-      capInfo.textContent = `Training blocks: ${blocksCompleted}/5 completed`;
+      capInfo.textContent = 'Training started';
       capInfo.style.background = '';
     }
   }
@@ -1963,7 +1961,7 @@ function updateMenuSessionDisplay() {
   if (!capInfo) return;
   
   if (isDailyLocked()) {
-    capInfo.textContent = 'Training finished for today';
+    capInfo.textContent = 'Training finished - come back tomorrow';
     capInfo.style.background = 'var(--good)';
   } else {
     // Check if training has started today
@@ -1971,12 +1969,10 @@ function updateMenuSessionDisplay() {
                            state.daily && state.daily.date === getTodayDateString();
     
     if (!hasStartedToday) {
-      capInfo.textContent = 'Training not started yet';
+      capInfo.textContent = 'Training not started';
       capInfo.style.background = '';
     } else {
-      // Show completed blocks instead of time countdown
-      const blocksCompleted = state.timeblock?.breaksCompletedToday || 0;
-      capInfo.textContent = `Training blocks: ${blocksCompleted}/5 completed`;
+      capInfo.textContent = 'Training started';
       capInfo.style.background = '';
     }
   }
@@ -2611,6 +2607,7 @@ function updateCapsUI(){
     const todayKey = getTodayDateString();
     const hasWarmRecallToday = state.recall && state.recall[todayKey] && state.recall[todayKey].warm && state.recall[todayKey].warm.length > 0;
     
+    // Button should be enabled when training is complete AND warm recall hasn't been done yet today
     wr.disabled = !hasCompleted30Min || hasWarmRecallToday;
     
     if (!hasCompleted30Min) {
@@ -2618,7 +2615,7 @@ function updateCapsUI(){
     } else if (hasWarmRecallToday) {
       wr.title = 'Already completed warm recall for today';
     } else {
-      wr.title = 'Test your pitch recognition after training';
+      wr.title = 'Warm recall is now available - sing the 12 pitches after training';
     }
   }
   
