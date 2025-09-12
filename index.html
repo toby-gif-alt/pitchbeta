@@ -5389,7 +5389,7 @@ function selectOobOctaveWithParity(trainedSet) {
 
 /* ------------------ OCTAVE MIX HYBRID GATED POLICY ------------------ */
 
-// Select octave for in-bounds trials using current mix + per-note overrides
+// Select octave for in-bounds trials using current mix consumption (Task B)
 function selectOctaveForInBounds(pc) {
   if (!state.oct) {
     return rand(currentOctaves());
@@ -5422,21 +5422,12 @@ function selectOctaveForInBounds(pc) {
     }
   }
   
-  // Sample from the adjusted mix
-  const rand = Math.random();
-  let cumulative = 0;
+  // Task B: Consume octave mix using the specified pseudocode
+  const R = Math.random();
+  const oct = R < adjustedMix['3'] ? 3 : (R < adjustedMix['3'] + adjustedMix['4'] ? 4 : 5);
   
-  for (const oct of state.oct.allowed) {
-    cumulative += adjustedMix[oct] || 0;
-    if (rand <= cumulative) {
-      console.log(`🎵 Selected octave ${oct} for in-bounds ${pc} (rand=${rand.toFixed(3)}, mix=${JSON.stringify(adjustedMix)})`);
-      return oct;
-    }
-  }
-  
-  // Fallback to center octave
-  console.log(`🎵 Fallback to center octave ${state.oct.center} for ${pc}`);
-  return state.oct.center;
+  console.log(`🎵 Selected octave ${oct} for in-bounds ${pc} (R=${R.toFixed(3)}, mix=${JSON.stringify(adjustedMix)})`);
+  return oct;
 }
 
 // Select octave for OOB trials (mirrors in-bounds currentMix)
@@ -6384,8 +6375,8 @@ async function nextTrial(forceNew=false){
         detuneMode = 'oob'; 
         jlLevel = null;
         
-        // Use octave parity mirroring for OOB trials
-        chosenOctave = selectOctaveForOOB(truePc);
+        // Task B: OOB mirrors the same octave as the in-bounds trial
+        chosenOctave = state.lastInBoundsOctave || selectOctaveForOOB(truePc);
         currentNote = `${truePc}${chosenOctave}`;
       } else {
         // in-bounds: call chooseDetuneMode(truePc) and assign cents/mode/jlLevel
@@ -6396,16 +6387,19 @@ async function nextTrial(forceNew=false){
         
         chosenOctave = selectOctaveForInBounds(truePc);
         currentNote = `${truePc}${chosenOctave}`;
+        
+        // Task B: Store selected octave for next OOB trial
+        state.lastInBoundsOctave = chosenOctave;
       }
       
       // C) Freeze in state.current (REQUIRED for grading)
       state.meta.trialSeq = (state.meta.trialSeq || 0) + 1;
-      // Select timbre for this trial
+      // Task B: Select timbre for this trial with mirroring
       const selectedTimbre = plannedOOB && state.lastInBoundsTimbre ? 
         state.lastInBoundsTimbre : // OOB mirrors in-bounds timbre
         selectTimbreForTrial(truePc); // Normal selection
       
-      // Store selected timbre for next OOB trial
+      // Task B: Store selected timbre for next OOB trial
       if (!plannedOOB) {
         state.lastInBoundsTimbre = selectedTimbre;
       }
