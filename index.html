@@ -6242,7 +6242,13 @@ function drawTrackerChart() {
   ctx.beginPath();
   ctx.moveTo(AX, AY);
   ctx.lineTo(AX, AY + AH);
-  ctx.lineTo(AX + AW, AY + AH);
+  ctx.stroke();
+  
+  // Draw X-axis at 0% line
+  const zeroY = yScale(0);
+  ctx.beginPath();
+  ctx.moveTo(AX, zeroY);
+  ctx.lineTo(AX + AW, zeroY);
   ctx.stroke();
   
   // Draw Y-axis labels
