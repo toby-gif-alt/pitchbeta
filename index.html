@@ -2301,7 +2301,6 @@ function beginTimeBlockBreak() {
   // Start break modal timer that checks every 250ms
   if (breakModalTimer) clearInterval(breakModalTimer);
   breakModalTimer = setInterval(() => {
-    updateTimeBlockBreakUI();
     maybeCloseBreakModal();
   }, 250);
   
@@ -4191,24 +4190,7 @@ function persistRecallResults(recallSession) {
     return;
   }
   
-  // Also check analytics to prevent duplicate entries there
-  if (!state.analytics) {
-    state.analytics = {};
-  }
-  if (!state.analytics.recallSeries) {
-    state.analytics.recallSeries = [];
-  }
-  
-  const existingAnalyticsEntries = state.analytics.recallSeries.filter(entry => 
-    entry.tag === recallSession.type && entry.day === state.daily?.ymd
-  );
-  
-  if (existingAnalyticsEntries.length > 0) {
-    console.log(`Analytics recall results for ${recallSession.type} on ${state.daily?.ymd} already exist, skipping duplicate`);
-    return;
-  }
-  
-  // Initialize analytics if needed (moved up for duplicate check)
+  // Initialize analytics if needed
   state.analytics = state.analytics || {};
   state.analytics.recallSeries = state.analytics.recallSeries || [];
   
