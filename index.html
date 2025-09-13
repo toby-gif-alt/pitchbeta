@@ -4238,6 +4238,14 @@ function closeRecallUI() {
   // Return to main menu
   showScreen('menuScreen');
   updateCapsUI();
+  
+  // Force update recall chart with new data
+  try {
+    populateRecallPitchSelect();
+    drawRecallChart();
+  } catch (e) {
+    console.warn('Failed to update recall chart:', e);
+  }
 }
 
 // Update only the content and button states without recreating the DOM
@@ -7631,11 +7639,42 @@ function getRecallWeeklyBins(pitch) {
     });
   }
   
-  // Get recall data (placeholder for now - would need real data structure)
+  // Get recall data from analytics
   const recallData = state.analytics?.recallSeries || [];
-  const todayStr = getTodayDateString();
+  if (recallData.length === 0) return bins;
   
-  // For now, return empty bins - real implementation would populate from recall data
+  // Get current week's date range
+  const today = new Date();
+  const currentWeekStart = new Date(today);
+  currentWeekStart.setDate(today.getDate() - today.getDay()); // Start of current week (Sunday)
+  currentWeekStart.setHours(0, 0, 0, 0);
+  
+  // Process recall data for current week
+  recallData.forEach(entry => {
+    const entryDate = new Date(entry.date);
+    
+    // Check if entry is within current week
+    const daysSinceWeekStart = Math.floor((entryDate - currentWeekStart) / (24 * 60 * 60 * 1000));
+    if (daysSinceWeekStart < 0 || daysSinceWeekStart >= 7) return;
+    
+    // Check pitch filter
+    if (pitch !== 'OVERALL' && entry.pc !== pitch) return;
+    
+    // Convert cents error to accuracy band
+    const band = centsToAccuracyBand(entry.cents || 0);
+    const day = daysSinceWeekStart + 1; // 1-based day indexing
+    
+    // Add to appropriate bin (cold or warm)
+    const bin = bins[day - 1]; // 0-based array indexing
+    if (entry.tag === 'cold') {
+      bin.cold.count++;
+      bin.cold.totalBand += band;
+    } else if (entry.tag === 'warm') {
+      bin.warm.count++;
+      bin.warm.totalBand += band;
+    }
+  });
+  
   return bins;
 }
 
@@ -7650,10 +7689,41 @@ function getRecallOverallBins(pitch) {
     });
   }
   
-  // Get recall data (placeholder for now - would need real data structure)
+  // Get recall data from analytics
   const recallData = state.analytics?.recallSeries || [];
+  if (recallData.length === 0) return bins;
   
-  // For now, return empty bins - real implementation would populate from recall data
+  // Get start date of training program (8-week period)
+  const startDate = state.startDate ? new Date(state.startDate) : new Date();
+  
+  // Process recall data for 8-week period
+  recallData.forEach(entry => {
+    const entryDate = new Date(entry.date);
+    
+    // Calculate which week this entry belongs to (1-8)
+    const daysSinceStart = Math.floor((entryDate - startDate) / (24 * 60 * 60 * 1000));
+    const week = Math.floor(daysSinceStart / 7) + 1;
+    
+    // Check if entry is within 8-week range
+    if (week < 1 || week > 8) return;
+    
+    // Check pitch filter
+    if (pitch !== 'OVERALL' && entry.pc !== pitch) return;
+    
+    // Convert cents error to accuracy band
+    const band = centsToAccuracyBand(entry.cents || 0);
+    
+    // Add to appropriate bin (cold or warm)
+    const bin = bins[week - 1]; // 0-based array indexing
+    if (entry.tag === 'cold') {
+      bin.cold.count++;
+      bin.cold.totalBand += band;
+    } else if (entry.tag === 'warm') {
+      bin.warm.count++;
+      bin.warm.totalBand += band;
+    }
+  });
+  
   return bins;
 }
 
@@ -7784,11 +7854,14 @@ function drawRecallChart() {
     }
   }
   
-  // Show empty state message if no data
-  ctx.fillStyle = colText;
-  ctx.font = '14px Fredoka, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('No recall data yet. Complete cold/warm recall to see results.', W / 2, H / 2);
+  // Show empty state message only if no data exists
+  const recallData = state.analytics?.recallSeries || [];
+  if (recallData.length === 0) {
+    ctx.fillStyle = colText;
+    ctx.font = '14px Fredoka, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('No recall data yet. Complete cold/warm recall to see results.', W / 2, H / 2);
+  }
 }
 
 /* ------------------ TUTORIAL PAGER ------------------ */
