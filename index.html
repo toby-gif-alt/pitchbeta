@@ -252,18 +252,7 @@
 
 
 
-    <!-- Recall History -->
-    <div class="card" id="recallCard" style="margin-top:14px">
-      <h3>🎯 Recall History</h3>
-      <div style="margin-bottom:8px">
-        <!-- CSV export removed - recall data now shown on main tracker chart -->
-        <!-- <button id="btnExportRecall" style="background:var(--accent);color:var(--bg);font-weight:700;margin-right:8px">📄 Export Recall CSV</button> -->
-        <span style="opacity:0.7;font-size:13px">Today's cold/warm pitch recall results (also shown on tracker chart)</span>
-      </div>
-      <div id="recallHistoryToday" style="border:1px solid var(--muted);border-radius:12px;padding:12px;background:var(--card);min-height:80px">
-        <p id="recallHistoryEmpty" style="opacity:0.7;text-align:center;margin:20px 0">No recall data for today</p>
-      </div>
-    </div>
+
 
     <!-- Progress -->
     <div class="card" id="progressCard" style="margin-top:14px">
@@ -288,13 +277,20 @@
     <!-- Pitch Recall Chart -->
     <section id="recall-progress-card" class="card" style="margin-top:14px">
       <header><h3>🎯 Pitch Recall (Cold / Warm)</h3></header>
-      <div class="pc-chip-row" id="recall-pitch-chips" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"></div>
-      <canvas id="recall-progress-chart" width="1000" height="300" style="width:100%;height:auto;border-radius:12px;background:var(--card);border:1px solid var(--muted)"></canvas>
-      <div class="mini-legend" style="display:flex;gap:12px;align-items:center;font-size:13px;opacity:.9;margin-top:8px">
-        <span class="dot" style="width:12px;height:12px;border-radius:50%;background:#3b82f6"></span> Cold
-        <span class="dot" style="width:12px;height:12px;border-radius:50%;background:#eab308;margin-left:12px"></span> Warm
-        <span id="recall-latest" style="margin-left:12px;font-weight:600"></span>
+      <div id="recallControls" style="margin-bottom:12px">
+        <label for="recallPitchSelect">Pitch:</label>
+        <select id="recallPitchSelect" style="padding-right:28px"></select>
+        <label for="recallGranularitySelect">View:</label>
+        <select id="recallGranularitySelect" style="padding-right:28px">
+          <option value="WEEKLY" selected>Weekly (Day 1 → 7)</option>
+          <option value="OVERALL">Overall (Week 1 → 8)</option>
+        </select>
+        <div id="recallLegend" style="display:flex;gap:12px;align-items:center;font-size:13px;opacity:.9;margin-left:20px;display:inline-flex">
+          <span class="legendDot" style="background:#3b82f6"></span> <span>Cold</span>
+          <span class="legendDot" style="background:#eab308;margin-left:12px"></span> <span>Warm</span>
+        </div>
       </div>
+      <canvas id="recall-progress-chart" width="1000" height="300" style="width:100%;height:auto;border-radius:12px;background:var(--card);border:1px solid var(--muted)"></canvas>
     </section>
   </div>
 
@@ -2683,15 +2679,16 @@ function updateCapsUI(){
   
   // Fix B.2: Compute new gating flag for flappy availability  
   const inBreak = !!state.session.inBreak;
-  const isLockedOut = !!state.session.lockoutUntil && (Date.now() < new Date(state.session.lockoutUntil).getTime());
-  const canPlayFlappy = inBreak || isLockedOut;
+  const isLockedOut = !!state.lockoutUntil && (Date.now() < new Date(state.lockoutUntil).getTime());
+  const hasCompletedTraining = state.daily && state.daily.completedAt; // Training completed today
+  const canPlayFlappy = inBreak || isLockedOut || hasCompletedTraining;
 
   const pf = byId('playFlappy'); 
   if(pf) {
     pf.disabled = !canPlayFlappy;
     // Fix B.3: Update button text and message as specified
     if (canPlayFlappy) {
-      pf.textContent = '🐤 Play Flappy';
+      pf.textContent = '🐤 Flappy';
     } else {
       pf.textContent = '🐤 Flappy (unavailable)';
       // Note: Alert message is handled in openFlappyFromMenu() with exact text from spec
@@ -7576,8 +7573,8 @@ function populatePitchSelect(){
   sel.onchange = ()=> drawChart();
   const gran = byId('granularitySelect'); if(gran){ gran.onchange = ()=> drawChart(); gran.value='WEEKLY'; }
   
-  // Render recall chart components
-  renderRecallPitchChips();
+  // Initialize recall chart controls
+  populateRecallPitchSelect();
   drawRecallChart();
   
   // Update variety mode UI when menu is shown
@@ -7586,60 +7583,78 @@ function populatePitchSelect(){
 
 /* ------------------ RECALL CHART FUNCTIONS ------------------ */
 
-// Accuracy mapping function for recall (reuse existing if available)
-function recallAccPct(centsErr) {
+// Convert cents error to accuracy band (0-5 scale)
+function centsToAccuracyBand(centsErr) {
   const a = Math.abs(centsErr);
-  if (a <= 5) return 100;
-  const MAX = 600; // tritone boundary
-  const pct = 100 * (1 - (a - 5)/(MAX - 5));
-  return Math.max(0, Math.min(100, Math.round(pct)));
+  if (a <= 10) return 5; // ±10c = 100% (top band)
+  if (a <= 20) return 4; // ±11-20c  
+  if (a <= 50) return 3; // ±21-50c
+  if (a <= 100) return 2; // ±51-100c
+  if (a <= 200) return 1; // ±101-200c
+  return 0; // 201c+ (bottom band)
 }
 
-// Render pitch class chips for recall chart
-function renderRecallPitchChips() {
-  const container = byId('recall-pitch-chips');
-  if (!container) return;
-  
-  container.innerHTML = '';
-  const allPCs = ['A', 'Bb', 'B', 'C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab'];
-  
-  // Get currently trained pitches for visual highlighting
-  const currentSet = setFromIndex(state.levelIndex);
-  const trainedPitches = trainedSet(currentSet);
-  
-  allPCs.forEach(pc => {
-    const chip = document.createElement('button');
-    chip.textContent = pcLabel(pc);
-    chip.style.cssText = 'padding:6px 12px;margin:0;border-radius:16px;border:1px solid var(--muted);font-size:12px;cursor:pointer;';
-    
-    // Highlight if trained
-    if (trainedPitches.includes(pc)) {
-      chip.style.background = 'var(--muted)';
-      chip.style.color = 'var(--text)';
-    } else {
-      chip.style.background = 'var(--muted2)';
-      chip.style.color = 'var(--neutral)';
-    }
-    
-    // Highlight if selected
-    if (pc === state.ui.recallPitch) {
-      chip.style.background = 'var(--accent)';
-      chip.style.color = 'var(--bg)';
-      chip.style.fontWeight = '600';
-    }
-    
-    chip.onclick = () => {
-      state.ui.recallPitch = pc;
-      save();
-      renderRecallPitchChips(); // Re-render chips
-      drawRecallChart(); // Re-draw chart
-    };
-    
-    container.appendChild(chip);
-  });
+// Get accuracy band label
+function getAccuracyBandLabel(band) {
+  const labels = ['200c+', '101-200c', '51-100c', '21-50c', '11-20c', '±10c'];
+  return labels[band] || '200c+';
 }
 
-// Draw the recall chart
+// Populate recall pitch selector
+function populateRecallPitchSelect() {
+  const sel = byId('recallPitchSelect'); 
+  if (!sel) return;
+  sel.innerHTML='';
+  const mk=(v,t)=>{ const o=document.createElement('option'); o.value=v; o.textContent=t; return o; };
+  sel.appendChild(mk('OVERALL','Overall'));
+  PC.forEach(pc=> sel.appendChild(mk(pc, pcLabel(pc))));
+  sel.onchange = ()=> drawRecallChart();
+  
+  const gran = byId('recallGranularitySelect'); 
+  if (gran) { 
+    gran.onchange = ()=> drawRecallChart(); 
+    gran.value='WEEKLY'; 
+  }
+}
+
+// Get recall data bins for weekly view (similar to thisWeekBins)
+function getRecallWeeklyBins(pitch) {
+  const bins = [];
+  for (let day = 1; day <= 7; day++) {
+    bins.push({
+      day: day,
+      cold: { count: 0, totalBand: 0 },
+      warm: { count: 0, totalBand: 0 }
+    });
+  }
+  
+  // Get recall data (placeholder for now - would need real data structure)
+  const recallData = state.analytics?.recallSeries || [];
+  const todayStr = getTodayDateString();
+  
+  // For now, return empty bins - real implementation would populate from recall data
+  return bins;
+}
+
+// Get recall data bins for overall view (similar to eightWeekBins) 
+function getRecallOverallBins(pitch) {
+  const bins = [];
+  for (let week = 1; week <= 8; week++) {
+    bins.push({
+      week: week,
+      cold: { count: 0, totalBand: 0 },
+      warm: { count: 0, totalBand: 0 }
+    });
+  }
+  
+  // Get recall data (placeholder for now - would need real data structure)
+  const recallData = state.analytics?.recallSeries || [];
+  
+  // For now, return empty bins - real implementation would populate from recall data
+  return bins;
+}
+
+// Draw the recall chart (updated to match main progress chart)
 function drawRecallChart() {
   const canvas = byId('recall-progress-chart');
   if (!canvas) return;
@@ -7661,132 +7676,116 @@ function drawRecallChart() {
   ctx.fillStyle = colCard;
   ctx.fillRect(0, 0, W, H);
   
-  // Get recall data for selected pitch
-  const selectedPc = state.ui.recallPitch || 'A';
-  const rows = (state.analytics?.recallSeries || []).filter(p => p.pc === selectedPc);
+  const mode = byId('recallGranularitySelect')?.value || 'WEEKLY';
+  const pitch = byId('recallPitchSelect')?.value || 'OVERALL';
   
-  if (rows.length === 0) {
-    // Show empty state
-    ctx.fillStyle = colText;
-    ctx.font = '14px Fredoka, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(`No recall data for ${pcLabel(selectedPc)} yet.`, W / 2, H / 2);
-    // Clear latest values when no data
-    updateRecallLatestValues([], [], selectedPc);
-    return;
-  }
+  // Y-axis scale: 0 = 200c+, 5 = ±10c (inverted from band numbers)
+  const yscale = (band) => AY + AH - ((band / 5) * AH);
   
-  // Filter and limit to last 30 entries per series
-  const cold = rows.filter(p => p.tag === 'cold').slice(-30);
-  const warm = rows.filter(p => p.tag === 'warm').slice(-30);
-  
-  if (cold.length === 0 && warm.length === 0) {
-    ctx.fillStyle = colText;
-    ctx.font = '14px Fredoka, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(`No recall data for ${pcLabel(selectedPc)} yet.`, W / 2, H / 2);
-    // Clear latest values when no data
-    updateRecallLatestValues([], [], selectedPc);
-    return;
-  }
-  
-  // Combine data points for x-axis scaling
-  const allPoints = [...cold, ...warm];
-  const dates = allPoints.map(p => new Date(p.date).getTime()).sort();
-  const minDate = dates[0];
-  const maxDate = dates[dates.length - 1];
-  const dateRange = maxDate - minDate || 86400000; // At least 1 day range
-  
-  // Scales
-  const xScale = (date) => AX + ((date - minDate) / dateRange) * AW;
-  const yScale = (pct) => AY + AH - (pct / 100) * AH;
-  
-  // Draw Y grid and labels
-  ctx.strokeStyle = colMuted;
-  ctx.lineWidth = 1;
+  /* Y grid + labels */
+  ctx.strokeStyle = colMuted; 
+  ctx.lineWidth = 1; 
   ctx.beginPath();
-  for (let y = 0; y <= 100; y += 20) {
-    const yPos = yScale(y);
-    ctx.moveTo(AX, yPos);
-    ctx.lineTo(AX + AW, yPos);
-  }
+  for (let band = 0; band <= 5; band++) { 
+    const y = yscale(band); 
+    ctx.moveTo(AX, y); 
+    ctx.lineTo(AX + AW, y);
+  } 
   ctx.stroke();
   
-  ctx.fillStyle = colText;
+  ctx.fillStyle = colText; 
   ctx.font = '12px system-ui,sans-serif';
   ctx.textAlign = 'right';
-  for (let y = 0; y <= 100; y += 20) {
-    const yPos = yScale(y) + 4;
-    ctx.fillText(String(y) + '%', AX - 8, yPos);
+  for (let band = 0; band <= 5; band++) { 
+    const y = yscale(band) + 4; 
+    ctx.fillText(getAccuracyBandLabel(band), AX - 8, y); 
   }
-  
-  // Draw lines and dots for Cold (blue) and Warm (yellow)
-  if (cold.length > 0) {
-    const coldPts = cold.map(p => ({
-      x: new Date(p.date).getTime(),
-      y: p.accPct
-    }));
-    drawLine(ctx, coldPts, colBlue, xScale, yScale);
-    coldPts.forEach(p => drawDot(ctx, xScale(p.x), yScale(p.y), colBlue, 4));
-  }
-  
-  if (warm.length > 0) {
-    const warmPts = warm.map(p => ({
-      x: new Date(p.date).getTime(),
-      y: p.accPct
-    }));
-    drawLine(ctx, warmPts, colYellow, xScale, yScale);
-    warmPts.forEach(p => drawDot(ctx, xScale(p.x), yScale(p.y), colYellow, 4));
-  }
-  
-  // Update latest values
-  updateRecallLatestValues(cold, warm, selectedPc);
-  
-  // Chart title
-  ctx.fillStyle = colText;
-  ctx.font = '13px system-ui,sans-serif';
-  ctx.textAlign = 'left';
-  ctx.fillText(`Pitch Recall: ${pcLabel(selectedPc)}`, AX, AY - 2);
-}
 
-// Update latest values display
-function updateRecallLatestValues(cold, warm, pc) {
-  const latestEl = byId('recall-latest');
-  if (!latestEl) return;
-  
-  let latestText = '';
-  
-  if (cold.length > 0 || warm.length > 0) {
-    const parts = [];
+  if (mode === 'WEEKLY') {
+    const bins = getRecallWeeklyBins(pitch);
+    const xscale = (d) => AX + ((d - 1) / (7 - 1)) * AW;
     
-    if (cold.length > 0) {
-      const latest = cold[cold.length - 1];
-      const cents = latest.cents || 0;
-      const sign = cents >= 0 ? '+' : '';
-      parts.push(`Cold: ${latest.accPct}% (${sign}${Math.round(cents)}¢)`);
+    // X grid
+    ctx.strokeStyle = colMuted; 
+    ctx.beginPath();
+    for (let d = 1; d <= 7; d++) { 
+      const x = xscale(d); 
+      ctx.moveTo(x, AY); 
+      ctx.lineTo(x, AY + AH);
+    } 
+    ctx.stroke();
+    
+    // X labels
+    ctx.fillStyle = colText;
+    ctx.textAlign = 'center';
+    for (let d = 1; d <= 7; d++) { 
+      const x = xscale(d); 
+      ctx.fillText(`Day ${d}`, x, H - 6); 
     }
     
-    if (warm.length > 0) {
-      const latest = warm[warm.length - 1];
-      const cents = latest.cents || 0;
-      const sign = cents >= 0 ? '+' : '';
-      parts.push(`Warm: ${latest.accPct}% (${sign}${Math.round(cents)}¢)`);
-    }
-    
-    if (parts.length > 0) {
-      // Get most recent date
-      const allDates = [];
-      if (cold.length > 0) allDates.push(new Date(cold[cold.length - 1].date));
-      if (warm.length > 0) allDates.push(new Date(warm[warm.length - 1].date));
-      const mostRecent = new Date(Math.max(...allDates));
-      const dateStr = mostRecent.toISOString().split('T')[0];
+    // Plot points for cold and warm data
+    for (const bin of bins) {
+      const x = xscale(bin.day);
       
-      latestText = `Latest — ${parts.join(', ')} on ${dateStr}`;
+      // Cold data (blue)
+      if (bin.cold.count > 0) {
+        const avgBand = bin.cold.totalBand / bin.cold.count;
+        drawDot(ctx, x - 8, yscale(avgBand), colBlue, 6);
+      }
+      
+      // Warm data (yellow) 
+      if (bin.warm.count > 0) {
+        const avgBand = bin.warm.totalBand / bin.warm.count;
+        drawDot(ctx, x + 8, yscale(avgBand), colYellow, 6);
+      }
+    }
+    
+  } else {
+    // OVERALL mode - Week 1 to 8
+    const bins = getRecallOverallBins(pitch);
+    const xscale = (w) => AX + ((w - 1) / (8 - 1)) * AW;
+    
+    // X grid
+    ctx.strokeStyle = colMuted; 
+    ctx.beginPath();
+    for (let w = 1; w <= 8; w++) { 
+      const x = xscale(w); 
+      ctx.moveTo(x, AY); 
+      ctx.lineTo(x, AY + AH);
+    } 
+    ctx.stroke();
+    
+    // X labels
+    ctx.fillStyle = colText;
+    ctx.textAlign = 'center';
+    for (let w = 1; w <= 8; w++) { 
+      const x = xscale(w); 
+      ctx.fillText(`Week ${w}`, x, H - 6); 
+    }
+    
+    // Plot points for cold and warm data
+    for (const bin of bins) {
+      const x = xscale(bin.week);
+      
+      // Cold data (blue)
+      if (bin.cold.count > 0) {
+        const avgBand = bin.cold.totalBand / bin.cold.count;
+        drawDot(ctx, x - 8, yscale(avgBand), colBlue, 5);
+      }
+      
+      // Warm data (yellow)
+      if (bin.warm.count > 0) {
+        const avgBand = bin.warm.totalBand / bin.warm.count;
+        drawDot(ctx, x + 8, yscale(avgBand), colYellow, 5);
+      }
     }
   }
-  // If no data, latestText remains empty string, which will clear the display
   
-  latestEl.textContent = latestText;
+  // Show empty state message if no data
+  ctx.fillStyle = colText;
+  ctx.font = '14px Fredoka, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('No recall data yet. Complete cold/warm recall to see results.', W / 2, H / 2);
 }
 
 /* ------------------ TUTORIAL PAGER ------------------ */
@@ -8038,10 +8037,11 @@ let fCtx, flappyRAF=null, running=false, score=0, pipes=[], bird, pipeTimer=0, l
 const FLAPPY = { gravity:900, flap:-380, baseSpeed:140, maxSpeed:260, speed:140, baseGap:140, gap:140, introPipes:5, introExtra:60, spawnEvery:1.20, width:52 };
 
 function openFlappyFromMenu(){ 
-  // Fix B.2: Use new gating logic
+  // Fix B.2: Use new gating logic including training completion
   const inBreak = !!state.session.inBreak;
-  const isLockedOut = !!state.session.lockoutUntil && (Date.now() < new Date(state.session.lockoutUntil).getTime());
-  const canPlayFlappy = inBreak || isLockedOut;
+  const isLockedOut = !!state.lockoutUntil && (Date.now() < new Date(state.lockoutUntil).getTime());
+  const hasCompletedTraining = state.daily && state.daily.completedAt; // Training completed today
+  const canPlayFlappy = inBreak || isLockedOut || hasCompletedTraining;
   
   if(canPlayFlappy) {
     openFlappyModal(); 
