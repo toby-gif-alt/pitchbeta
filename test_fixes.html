@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Fixes</title>
+</head>
+<body>
+    <h1>Testing the Fixes</h1>
+    
+    <h2>Test 1: Timer Function</h2>
+    <div id="timer-test">
+        <p>Testing fmtMMSS function with various values:</p>
+        <ul id="timer-results"></ul>
+    </div>
+    
+    <h2>Test 2: Duplicate Prevention Logic</h2>
+    <div id="duplicate-test">
+        <p>Testing duplicate detection logic:</p>
+        <ul id="duplicate-results"></ul>
+    </div>
+    
+    <script>
+        // Test the timer formatting function
+        function fmtMMSS(ms){ 
+            const s=Math.max(0,Math.floor(ms/1000)); 
+            const m=Math.floor(s/60); 
+            const ss=String(s%60).padStart(2,'0'); 
+            return `${m}:${ss}`; 
+        }
+        
+        // Test timer function with various values
+        const timerResults = document.getElementById('timer-results');
+        const testValues = [60000, 59000, 30000, 15000, 5000, 1000, 500, 0];
+        
+        testValues.forEach(ms => {
+            const li = document.createElement('li');
+            li.textContent = `${ms}ms = ${fmtMMSS(ms)}`;
+            timerResults.appendChild(li);
+        });
+        
+        // Test duplicate prevention logic
+        const duplicateResults = document.getElementById('duplicate-results');
+        
+        // Mock state object
+        const mockState = {
+            analytics: {
+                recallSeries: [
+                    { tag: 'cold', day: '2024-01-01', pc: 'A' },
+                    { tag: 'warm', day: '2024-01-01', pc: 'B' }
+                ]
+            },
+            daily: {
+                ymd: '2024-01-01'
+            }
+        };
+        
+        // Test duplicate detection
+        function checkForDuplicates(state, tag, day) {
+            const existingAnalyticsEntries = state.analytics.recallSeries.filter(entry => 
+                entry.tag === tag && entry.day === day
+            );
+            return existingAnalyticsEntries.length > 0;
+        }
+        
+        const testCases = [
+            { tag: 'cold', day: '2024-01-01', expected: true },
+            { tag: 'warm', day: '2024-01-01', expected: true },
+            { tag: 'cold', day: '2024-01-02', expected: false },
+            { tag: 'warm', day: '2024-01-02', expected: false }
+        ];
+        
+        testCases.forEach(testCase => {
+            const result = checkForDuplicates(mockState, testCase.tag, testCase.day);
+            const status = result === testCase.expected ? '✓' : '✗';
+            const li = document.createElement('li');
+            li.textContent = `${status} ${testCase.tag} on ${testCase.day}: ${result} (expected: ${testCase.expected})`;
+            li.style.color = result === testCase.expected ? 'green' : 'red';
+            duplicateResults.appendChild(li);
+        });
+    </script>
+</body>
+</html>
