@@ -7656,33 +7656,77 @@ function getRecallWeeklyBins(pitch) {
   sevenDaysAgo.setDate(today.getDate() - 6); // 7 days ago (inclusive of today)
   sevenDaysAgo.setHours(0, 0, 0, 0); // Start of that day
   
-  // Process recall data for the last 7 days
-  recallData.forEach(entry => {
-    const entryDate = new Date(entry.date);
+  if (pitch === 'OVERALL') {
+    // For OVERALL: Calculate average accuracy across all pitches per day
+    const dailyData = {};
     
-    // Check if entry is within the last 7 days
-    if (entryDate < sevenDaysAgo || entryDate > today) return;
+    // Group data by day and tag (cold/warm)
+    recallData.forEach(entry => {
+      const entryDate = new Date(entry.date);
+      
+      // Check if entry is within the last 7 days
+      if (entryDate < sevenDaysAgo || entryDate > today) return;
+      
+      // Calculate which day this belongs to (1-7)
+      const daysSinceStart = Math.floor((entryDate - sevenDaysAgo) / (24 * 60 * 60 * 1000));
+      const day = Math.min(7, Math.max(1, daysSinceStart + 1)); // Clamp to 1-7 range
+      
+      const key = `${day}-${entry.tag}`;
+      if (!dailyData[key]) {
+        dailyData[key] = [];
+      }
+      
+      const band = centsToAccuracyBand(entry.cents || 0);
+      dailyData[key].push(band);
+    });
     
-    // Check pitch filter
-    if (pitch !== 'OVERALL' && entry.pc !== pitch) return;
-    
-    // Calculate which day this belongs to (1-7, where 1 is 7 days ago, 7 is today)
-    const daysSinceStart = Math.floor((entryDate - sevenDaysAgo) / (24 * 60 * 60 * 1000));
-    const day = Math.min(7, Math.max(1, daysSinceStart + 1)); // Clamp to 1-7 range
-    
-    // Convert cents error to accuracy band
-    const band = centsToAccuracyBand(entry.cents || 0);
-    
-    // Add to appropriate bin (cold or warm)
-    const bin = bins[day - 1]; // 0-based array indexing
-    if (entry.tag === 'cold') {
-      bin.cold.count++;
-      bin.cold.totalBand += band;
-    } else if (entry.tag === 'warm') {
-      bin.warm.count++;
-      bin.warm.totalBand += band;
+    // Calculate averages for each day
+    for (const [key, bandValues] of Object.entries(dailyData)) {
+      const [day, tag] = key.split('-');
+      const dayNum = parseInt(day);
+      const bin = bins[dayNum - 1];
+      
+      if (bandValues.length > 0) {
+        const avgBand = bandValues.reduce((sum, band) => sum + band, 0) / bandValues.length;
+        
+        if (tag === 'cold') {
+          bin.cold.count = 1; // Represent as one averaged point
+          bin.cold.totalBand = avgBand;
+        } else if (tag === 'warm') {
+          bin.warm.count = 1; // Represent as one averaged point
+          bin.warm.totalBand = avgBand;
+        }
+      }
     }
-  });
+  } else {
+    // Original logic for specific pitch selection
+    recallData.forEach(entry => {
+      const entryDate = new Date(entry.date);
+      
+      // Check if entry is within the last 7 days
+      if (entryDate < sevenDaysAgo || entryDate > today) return;
+      
+      // Check pitch filter
+      if (entry.pc !== pitch) return;
+      
+      // Calculate which day this belongs to (1-7, where 1 is 7 days ago, 7 is today)
+      const daysSinceStart = Math.floor((entryDate - sevenDaysAgo) / (24 * 60 * 60 * 1000));
+      const day = Math.min(7, Math.max(1, daysSinceStart + 1)); // Clamp to 1-7 range
+      
+      // Convert cents error to accuracy band
+      const band = centsToAccuracyBand(entry.cents || 0);
+      
+      // Add to appropriate bin (cold or warm)
+      const bin = bins[day - 1]; // 0-based array indexing
+      if (entry.tag === 'cold') {
+        bin.cold.count++;
+        bin.cold.totalBand += band;
+      } else if (entry.tag === 'warm') {
+        bin.warm.count++;
+        bin.warm.totalBand += band;
+      }
+    });
+  }
   
   return bins;
 }
@@ -7705,33 +7749,77 @@ function getRecallOverallBins(pitch) {
   // Get start date of training program (8-week period)
   const startDate = state.startDate ? new Date(state.startDate) : new Date();
   
-  // Process recall data for 8-week period
-  recallData.forEach(entry => {
-    const entryDate = new Date(entry.date);
+  if (pitch === 'OVERALL') {
+    // For OVERALL: Calculate average accuracy across all pitches per week
+    const weeklyData = {};
     
-    // Calculate which week this entry belongs to (1-8)
-    const daysSinceStart = Math.floor((entryDate - startDate) / (24 * 60 * 60 * 1000));
-    const week = Math.floor(daysSinceStart / 7) + 1;
+    // Group data by week and tag (cold/warm)
+    recallData.forEach(entry => {
+      const entryDate = new Date(entry.date);
+      
+      // Calculate which week this entry belongs to (1-8)
+      const daysSinceStart = Math.floor((entryDate - startDate) / (24 * 60 * 60 * 1000));
+      const week = Math.floor(daysSinceStart / 7) + 1;
+      
+      // Check if entry is within 8-week range
+      if (week < 1 || week > 8) return;
+      
+      const key = `${week}-${entry.tag}`;
+      if (!weeklyData[key]) {
+        weeklyData[key] = [];
+      }
+      
+      const band = centsToAccuracyBand(entry.cents || 0);
+      weeklyData[key].push(band);
+    });
     
-    // Check if entry is within 8-week range
-    if (week < 1 || week > 8) return;
-    
-    // Check pitch filter
-    if (pitch !== 'OVERALL' && entry.pc !== pitch) return;
-    
-    // Convert cents error to accuracy band
-    const band = centsToAccuracyBand(entry.cents || 0);
-    
-    // Add to appropriate bin (cold or warm)
-    const bin = bins[week - 1]; // 0-based array indexing
-    if (entry.tag === 'cold') {
-      bin.cold.count++;
-      bin.cold.totalBand += band;
-    } else if (entry.tag === 'warm') {
-      bin.warm.count++;
-      bin.warm.totalBand += band;
+    // Calculate averages for each week
+    for (const [key, bandValues] of Object.entries(weeklyData)) {
+      const [week, tag] = key.split('-');
+      const weekNum = parseInt(week);
+      const bin = bins[weekNum - 1];
+      
+      if (bandValues.length > 0) {
+        const avgBand = bandValues.reduce((sum, band) => sum + band, 0) / bandValues.length;
+        
+        if (tag === 'cold') {
+          bin.cold.count = 1; // Represent as one averaged point
+          bin.cold.totalBand = avgBand;
+        } else if (tag === 'warm') {
+          bin.warm.count = 1; // Represent as one averaged point
+          bin.warm.totalBand = avgBand;
+        }
+      }
     }
-  });
+  } else {
+    // Original logic for specific pitch selection
+    recallData.forEach(entry => {
+      const entryDate = new Date(entry.date);
+      
+      // Calculate which week this entry belongs to (1-8)
+      const daysSinceStart = Math.floor((entryDate - startDate) / (24 * 60 * 60 * 1000));
+      const week = Math.floor(daysSinceStart / 7) + 1;
+      
+      // Check if entry is within 8-week range
+      if (week < 1 || week > 8) return;
+      
+      // Check pitch filter
+      if (entry.pc !== pitch) return;
+      
+      // Convert cents error to accuracy band
+      const band = centsToAccuracyBand(entry.cents || 0);
+      
+      // Add to appropriate bin (cold or warm)
+      const bin = bins[week - 1]; // 0-based array indexing
+      if (entry.tag === 'cold') {
+        bin.cold.count++;
+        bin.cold.totalBand += band;
+      } else if (entry.tag === 'warm') {
+        bin.warm.count++;
+        bin.warm.totalBand += band;
+      }
+    });
+  }
   
   return bins;
 }
@@ -7805,46 +7893,61 @@ function drawRecallChart() {
       ctx.fillText(`Day ${d}`, x, H - 6); 
     }
     
-    // Plot individual recall data points instead of aggregated bins
-    const recallData = state.analytics?.recallSeries || [];
     
-    // Get the most recent 7 days ending with today
-    const today = new Date();
-    today.setHours(23, 59, 59, 999);
-    const sevenDaysAgo = new Date(today);
-    sevenDaysAgo.setDate(today.getDate() - 6);
-    sevenDaysAgo.setHours(0, 0, 0, 0);
-    
-    // Filter and plot individual data points
-    let coldOffset = 0;
-    let warmOffset = 0;
-    
-    recallData.forEach(entry => {
-      const entryDate = new Date(entry.date);
+    if (pitch === 'OVERALL') {
+      // For OVERALL, plot averaged data points using bins
+      bins.forEach(bin => {
+        const x = xscale(bin.day);
+        
+        // Cold data (blue) - plot averaged point
+        if (bin.cold.count > 0) {
+          const avgBand = bin.cold.totalBand; // Already averaged in bin function
+          drawDot(ctx, x - 8, yscale(avgBand), colBlue, 6);
+        }
+        
+        // Warm data (yellow) - plot averaged point
+        if (bin.warm.count > 0) {
+          const avgBand = bin.warm.totalBand; // Already averaged in bin function  
+          drawDot(ctx, x + 8, yscale(avgBand), colYellow, 6);
+        }
+      });
+    } else {
+      // For specific pitch, plot individual recall data points
+      const recallData = state.analytics?.recallSeries || [];
       
-      // Check if entry is within the last 7 days
-      if (entryDate < sevenDaysAgo || entryDate > today) return;
+      // Get the most recent 7 days ending with today
+      const today = new Date();
+      today.setHours(23, 59, 59, 999);
+      const sevenDaysAgo = new Date(today);
+      sevenDaysAgo.setDate(today.getDate() - 6);
+      sevenDaysAgo.setHours(0, 0, 0, 0);
       
-      // Check pitch filter
-      if (pitch !== 'OVERALL' && entry.pc !== pitch) return;
-      
-      // Calculate which day this belongs to (1-7)
-      const daysSinceStart = Math.floor((entryDate - sevenDaysAgo) / (24 * 60 * 60 * 1000));
-      const day = Math.min(7, Math.max(1, daysSinceStart + 1));
-      
-      const x = xscale(day);
-      const band = centsToAccuracyBand(entry.cents || 0);
-      const y = yscale(band);
-      
-      // Plot individual points with small offset for same-day entries
-      if (entry.tag === 'cold') {
-        drawDot(ctx, x - 8, y, colBlue, 5);
-        coldOffset += 2; // Small vertical offset for multiple same-day entries
-      } else if (entry.tag === 'warm') {
-        drawDot(ctx, x + 8, y, colYellow, 5);
-        warmOffset += 2;
-      }
-    });
+      // Filter and plot individual data points for specific pitch
+      recallData.forEach(entry => {
+        const entryDate = new Date(entry.date);
+        
+        // Check if entry is within the last 7 days
+        if (entryDate < sevenDaysAgo || entryDate > today) return;
+        
+        // Check pitch filter
+        if (entry.pc !== pitch) return;
+        
+        // Calculate which day this belongs to (1-7)
+        const daysSinceStart = Math.floor((entryDate - sevenDaysAgo) / (24 * 60 * 60 * 1000));
+        const day = Math.min(7, Math.max(1, daysSinceStart + 1));
+        
+        const x = xscale(day);
+        const band = centsToAccuracyBand(entry.cents || 0);
+        const y = yscale(band);
+        
+        // Plot individual points with small offset for same-day entries
+        if (entry.tag === 'cold') {
+          drawDot(ctx, x - 8, y, colBlue, 5);
+        } else if (entry.tag === 'warm') {
+          drawDot(ctx, x + 8, y, colYellow, 5);
+        }
+      });
+    }
     
   } else {
     // OVERALL mode - Week 1 to 8
@@ -7869,20 +7972,20 @@ function drawRecallChart() {
       ctx.fillText(`Week ${w}`, x, H - 6); 
     }
     
-    // Plot points for cold and warm data
+    // Plot points for cold and warm data using bins
     for (const bin of bins) {
       const x = xscale(bin.week);
       
       // Cold data (blue)
       if (bin.cold.count > 0) {
-        const avgBand = bin.cold.totalBand / bin.cold.count;
-        drawDot(ctx, x - 8, yscale(avgBand), colBlue, 5);
+        const avgBand = pitch === 'OVERALL' ? bin.cold.totalBand : bin.cold.totalBand / bin.cold.count;
+        drawDot(ctx, x - 8, yscale(avgBand), colBlue, 6);
       }
       
       // Warm data (yellow)
       if (bin.warm.count > 0) {
-        const avgBand = bin.warm.totalBand / bin.warm.count;
-        drawDot(ctx, x + 8, yscale(avgBand), colYellow, 5);
+        const avgBand = pitch === 'OVERALL' ? bin.warm.totalBand : bin.warm.totalBand / bin.warm.count;
+        drawDot(ctx, x + 8, yscale(avgBand), colYellow, 6);
       }
     }
   }
