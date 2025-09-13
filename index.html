@@ -4388,8 +4388,8 @@ function midiToNoteLabel(midi) {
 function finishRecallReview() {
   if (!currentRecallSession) return;
   
-  // Update display
-  updateRecallDisplay();
+  // Update display (with error handling in case elements don't exist)
+  try { updateRecallDisplay(); } catch(_) {}
   
   // Set completion flags
   if (currentRecallSession.type === 'cold') {
