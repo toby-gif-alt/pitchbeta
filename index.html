@@ -282,7 +282,7 @@
         <select id="recallPitchSelect" style="padding-right:28px"></select>
         <label for="recallGranularitySelect">View:</label>
         <select id="recallGranularitySelect" style="padding-right:28px">
-          <option value="WEEKLY" selected>Weekly (Day 1 → 7)</option>
+          <option value="WEEKLY" selected>Weekly (Mon → Sun)</option>
           <option value="OVERALL">Overall (Week 1 → 8)</option>
         </select>
         <div id="recallLegend" style="display:flex;gap:12px;align-items:center;font-size:13px;opacity:.9;margin-left:20px;display:inline-flex">
@@ -1829,6 +1829,11 @@ function updateAllTimerUI() {
     }
     save();
   }
+  
+  // Handle TimeBlock break countdown (FIX: Add missing TimeBlock break timer update)
+  if (state.timeblock && state.timeblock.breakActive && state.timeblock.breakEndsAt) {
+    updateTimeBlockBreakUI();
+  }
 }
 
 function updateMenuTimer() {
@@ -2311,6 +2316,9 @@ function beginTimeBlockBreak() {
   });
   
   save();
+  
+  // FIX: Ensure unified ticker is running during TimeBlock breaks for timer updates
+  startUnifiedTicker();
   
   // Pause training
   if (sessionActive && !paused) {
@@ -7649,12 +7657,18 @@ function getRecallWeeklyBins(pitch) {
   const recallData = state.analytics?.recallSeries || [];
   if (recallData.length === 0) return bins;
   
-  // Get the most recent 7 days ending with today
+  // Get the current week start (Monday) and week end (Sunday)
   const today = new Date();
-  today.setHours(23, 59, 59, 999); // End of today
-  const sevenDaysAgo = new Date(today);
-  sevenDaysAgo.setDate(today.getDate() - 6); // 7 days ago (inclusive of today)
-  sevenDaysAgo.setHours(0, 0, 0, 0); // Start of that day
+  const currentDay = today.getDay(); // 0 = Sunday, 1 = Monday, etc.
+  const mondayOffset = currentDay === 0 ? -6 : 1 - currentDay; // Calculate offset to Monday
+  
+  const weekStart = new Date(today);
+  weekStart.setDate(today.getDate() + mondayOffset);
+  weekStart.setHours(0, 0, 0, 0); // Start of Monday
+  
+  const weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekStart.getDate() + 6); // End of Sunday  
+  weekEnd.setHours(23, 59, 59, 999);
   
   if (pitch === 'OVERALL') {
     // For OVERALL: Calculate average accuracy across all pitches per day
@@ -7664,12 +7678,12 @@ function getRecallWeeklyBins(pitch) {
     recallData.forEach(entry => {
       const entryDate = new Date(entry.date);
       
-      // Check if entry is within the last 7 days
-      if (entryDate < sevenDaysAgo || entryDate > today) return;
+      // Check if entry is within the current week
+      if (entryDate < weekStart || entryDate > weekEnd) return;
       
-      // Calculate which day this belongs to (1-7, where 1 is today, 7 is 7 days ago)  
-      const daysSinceStart = Math.floor((entryDate - sevenDaysAgo) / (24 * 60 * 60 * 1000));
-      const day = Math.min(7, Math.max(1, 8 - (daysSinceStart + 1))); // Reverse: Day 1 = today, Day 7 = 7 days ago
+      // Calculate which day this belongs to (1-7, where 1 = Monday, 7 = Sunday)  
+      const daysSinceWeekStart = Math.floor((entryDate - weekStart) / (24 * 60 * 60 * 1000));
+      const day = Math.min(7, Math.max(1, daysSinceWeekStart + 1)); // Day 1 = Monday, Day 7 = Sunday
       
       const key = `${day}-${entry.tag}`;
       if (!dailyData[key]) {
@@ -7699,19 +7713,19 @@ function getRecallWeeklyBins(pitch) {
       }
     }
   } else {
-    // Original logic for specific pitch selection
+    // Original logic for specific pitch selection - also fix this part
     recallData.forEach(entry => {
       const entryDate = new Date(entry.date);
       
-      // Check if entry is within the last 7 days
-      if (entryDate < sevenDaysAgo || entryDate > today) return;
+      // Check if entry is within the current week
+      if (entryDate < weekStart || entryDate > weekEnd) return;
       
       // Check pitch filter
       if (entry.pc !== pitch) return;
       
-      // Calculate which day this belongs to (1-7, where 1 is today, 7 is 7 days ago)
-      const daysSinceStart = Math.floor((entryDate - sevenDaysAgo) / (24 * 60 * 60 * 1000));
-      const day = Math.min(7, Math.max(1, 8 - (daysSinceStart + 1))); // Reverse: Day 1 = today, Day 7 = 7 days ago
+      // Calculate which day this belongs to (1-7, where 1 = Monday, 7 = Sunday)
+      const daysSinceWeekStart = Math.floor((entryDate - weekStart) / (24 * 60 * 60 * 1000));
+      const day = Math.min(7, Math.max(1, daysSinceWeekStart + 1)); // Day 1 = Monday, Day 7 = Sunday
       
       // Convert cents error to accuracy band
       const band = centsToAccuracyBand(entry.cents || 0);
@@ -7885,12 +7899,13 @@ function drawRecallChart() {
     } 
     ctx.stroke();
     
-    // X labels
+    // X labels - show day names (Mon, Tue, Wed, Thu, Fri, Sat, Sun)
     ctx.fillStyle = colText;
     ctx.textAlign = 'center';
+    const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
     for (let d = 1; d <= 7; d++) { 
       const x = xscale(d); 
-      ctx.fillText(`Day ${d}`, x, H - 6); 
+      ctx.fillText(dayNames[d - 1], x, H - 6); 
     }
     
     
@@ -7915,26 +7930,32 @@ function drawRecallChart() {
       // For specific pitch, plot individual recall data points
       const recallData = state.analytics?.recallSeries || [];
       
-      // Get the most recent 7 days ending with today
+      // Get the current week start (Monday) and week end (Sunday)
       const today = new Date();
-      today.setHours(23, 59, 59, 999);
-      const sevenDaysAgo = new Date(today);
-      sevenDaysAgo.setDate(today.getDate() - 6);
-      sevenDaysAgo.setHours(0, 0, 0, 0);
+      const currentDay = today.getDay(); // 0 = Sunday, 1 = Monday, etc.
+      const mondayOffset = currentDay === 0 ? -6 : 1 - currentDay; // Calculate offset to Monday
+      
+      const weekStart = new Date(today);
+      weekStart.setDate(today.getDate() + mondayOffset);
+      weekStart.setHours(0, 0, 0, 0); // Start of Monday
+      
+      const weekEnd = new Date(weekStart);
+      weekEnd.setDate(weekStart.getDate() + 6); // End of Sunday  
+      weekEnd.setHours(23, 59, 59, 999);
       
       // Filter and plot individual data points for specific pitch
       recallData.forEach(entry => {
         const entryDate = new Date(entry.date);
         
-        // Check if entry is within the last 7 days
-        if (entryDate < sevenDaysAgo || entryDate > today) return;
+        // Check if entry is within the current week
+        if (entryDate < weekStart || entryDate > weekEnd) return;
         
         // Check pitch filter
         if (entry.pc !== pitch) return;
         
-        // Calculate which day this belongs to (1-7, where 1 is today, 7 is 7 days ago)
-        const daysSinceStart = Math.floor((entryDate - sevenDaysAgo) / (24 * 60 * 60 * 1000));
-        const day = Math.min(7, Math.max(1, 8 - (daysSinceStart + 1))); // Reverse: Day 1 = today, Day 7 = 7 days ago
+        // Calculate which day this belongs to (1-7, where 1 = Monday, 7 = Sunday)
+        const daysSinceWeekStart = Math.floor((entryDate - weekStart) / (24 * 60 * 60 * 1000));
+        const day = Math.min(7, Math.max(1, daysSinceWeekStart + 1)); // Day 1 = Monday, Day 7 = Sunday
         
         const x = xscale(day);
         const band = centsToAccuracyBand(entry.cents || 0);
