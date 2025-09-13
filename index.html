@@ -2576,6 +2576,9 @@ function closeFlappyModal() {
   byId('flappyModal').style.display = 'none'; 
   detachFlappyControls();
   
+  // Clear menu flag
+  state.flappyFromMenu = false;
+  
   if (score > (state.flappyHighScore || 0)) { 
     state.flappyHighScore = score; 
     save(); 
@@ -4385,8 +4388,8 @@ function midiToNoteLabel(midi) {
 function finishRecallReview() {
   if (!currentRecallSession) return;
   
-  // Update display
-  updateRecallDisplay();
+  // Update display (with error handling in case elements don't exist)
+  try { updateRecallDisplay(); } catch(_) {}
   
   // Set completion flags
   if (currentRecallSession.type === 'cold') {
@@ -8044,6 +8047,8 @@ function openFlappyFromMenu(){
   const canPlayFlappy = inBreak || isLockedOut || hasCompletedTraining;
   
   if(canPlayFlappy) {
+    // Set flag to indicate Flappy was opened from menu (should always use flappy.mp3)
+    state.flappyFromMenu = true;
     openFlappyModal(); 
   } else {
     // Fix B.3: Use exact message from specification
@@ -8089,7 +8094,7 @@ function openFlappyModal(){
   
   // Update description based on context
   if (description) {
-    if (state.timeblock?.breakActive || isLocked()) {
+    if (state.flappyFromMenu || state.timeblock?.breakActive || isLocked()) {
       description.textContent = 'Tap/click (or Space) to flap. First tap starts — each flap makes a flappy sound.';
     } else {
       description.textContent = 'Tap/click (or Space) to flap. First tap starts — each flap plays a random pitch.';
@@ -8213,6 +8218,9 @@ function closeFlappy(){
   running=false; cancelAnimationFrame(flappyRAF); byId('flappyModal').style.display='none'; detachFlappyControls();
   if(score > (state.flappyHighScore||0)){ state.flappyHighScore = score; save(); }
   
+  // Clear menu flag
+  state.flappyFromMenu = false;
+  
   // Remove break message if it exists
   const breakMessage = byId('breakMessage');
   if (breakMessage) breakMessage.remove();
@@ -8234,9 +8242,9 @@ function flap(){
   
   // Only play sound if not muted
   if (!state.flappyMuted) {
-    // During TimeBlock breaks or lockout, always play flappy sound
-    // During regular play (rewards), play random pitches
-    if (state.timeblock?.breakActive || isLocked()) {
+    // Always play flappy sound when opened from menu (lockout/completed training scenarios)
+    // or during TimeBlock breaks
+    if (state.flappyFromMenu || state.timeblock?.breakActive || isLocked()) {
       playFlappySound();
     } else {
       // Regular flappy bird with musical pitches (only during rewards)
