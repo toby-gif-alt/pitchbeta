@@ -7667,9 +7667,9 @@ function getRecallWeeklyBins(pitch) {
       // Check if entry is within the last 7 days
       if (entryDate < sevenDaysAgo || entryDate > today) return;
       
-      // Calculate which day this belongs to (1-7)
+      // Calculate which day this belongs to (1-7, where 1 is today, 7 is 7 days ago)  
       const daysSinceStart = Math.floor((entryDate - sevenDaysAgo) / (24 * 60 * 60 * 1000));
-      const day = Math.min(7, Math.max(1, daysSinceStart + 1)); // Clamp to 1-7 range
+      const day = Math.min(7, Math.max(1, 8 - (daysSinceStart + 1))); // Reverse: Day 1 = today, Day 7 = 7 days ago
       
       const key = `${day}-${entry.tag}`;
       if (!dailyData[key]) {
@@ -7709,9 +7709,9 @@ function getRecallWeeklyBins(pitch) {
       // Check pitch filter
       if (entry.pc !== pitch) return;
       
-      // Calculate which day this belongs to (1-7, where 1 is 7 days ago, 7 is today)
+      // Calculate which day this belongs to (1-7, where 1 is today, 7 is 7 days ago)
       const daysSinceStart = Math.floor((entryDate - sevenDaysAgo) / (24 * 60 * 60 * 1000));
-      const day = Math.min(7, Math.max(1, daysSinceStart + 1)); // Clamp to 1-7 range
+      const day = Math.min(7, Math.max(1, 8 - (daysSinceStart + 1))); // Reverse: Day 1 = today, Day 7 = 7 days ago
       
       // Convert cents error to accuracy band
       const band = centsToAccuracyBand(entry.cents || 0);
@@ -7932,9 +7932,9 @@ function drawRecallChart() {
         // Check pitch filter
         if (entry.pc !== pitch) return;
         
-        // Calculate which day this belongs to (1-7)
+        // Calculate which day this belongs to (1-7, where 1 is today, 7 is 7 days ago)
         const daysSinceStart = Math.floor((entryDate - sevenDaysAgo) / (24 * 60 * 60 * 1000));
-        const day = Math.min(7, Math.max(1, daysSinceStart + 1));
+        const day = Math.min(7, Math.max(1, 8 - (daysSinceStart + 1))); // Reverse: Day 1 = today, Day 7 = 7 days ago
         
         const x = xscale(day);
         const band = centsToAccuracyBand(entry.cents || 0);
